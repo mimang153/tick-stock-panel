@@ -1,0 +1,34 @@
+---
+description: "ClickHouse 存储层规范：唯一数据源、storage 门面、ReplacingMergeTree、写缓冲与查询契约（tsp 项目专用）"
+globs: backend/app/**/*.py, backend/tests/**/*.py
+alwaysApply: false
+---
+# ClickHouse 存储层规范
+
+## 架构约束（最重要）
+- **业务代码严禁直接持有 ClickHouse 连接对象**，也严禁在业务层直接拼 SQL；一切读写必须经过 `storage` 门面（`app/storage/`），业务代码只依赖门面与 `CacheBackend`
+- 后端启动即连 CK，连接失败必须 fail-closed（直接失败），不允许进入半可用状态
+- 连接配置走 `.env`：`CLICKHOUSE_URL` / `CLICKHOUSE_HTTP_PORT` / `CLICKHOUSE_DATABASE` / `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD`
+- 测试写数据必须使用唯一**表名前缀**（如 `t_ab12cd_`），放在独立 database（`tsp_test`），结束统一 `DROP TABLE`，仓储层统一收口前缀，业务代码不感知
+
+## 表设计
+- 使用 `ReplacingMergeTree` 承接 upsert 语义，`ORDER BY` 必须体现去重键（如 `(date, kind, member)`、`symbol, date`）
+- 分钟表按月分区；时序表以 `date` / `time_value` 承载，注意时区（跨午休、交易日/盘次区分）
+- 需要去重的最新态读取：用 `argMax(col, updated_at)` / 带 `FINAL` 查询；CK 合并是后台异步的，`FINAL` 只保证查询可见最新版本，不保证物理去重
+- 动态列（如财务）用 `Map` 并注意 `mapGet` 适配；返回时宽表展开，顺序稳定
+- 多资产合并用 CK 视图（`UNION ALL`），由 storage 层统一建好，业务调用方零改动
+
+## 写入
+- 批量写为主，使用写缓冲：分批 flush（`CH_WRITE_FLUSH_INTERVAL_MS` / `CH_WRITE_FLUSH_ROWS`），进程退出前必须正确 flush，避免 kill 后数据丢失
+- 读写同步与 upsert：优先用 CK 天然 upsert 消除 read-modify-write；需要范围覆盖时用 `mutations_sync=2` 的 DELETE + INSERT
+- 缺主键/必需列时拒绝写入并告警，不得写入脏数据
+
+## 查询与安全
+- 派生结果缓存名（`matrix_cache` 等）用 Arrow IPC + LRU，加 `accessed_at` 做 TTL
+- 执行 SQL 必须走参数化绑定，禁止拼接字符串（防注入）
+- 自定义 screener SQL 校验：仅允许单条 `SELECT`；禁止 `;` 多语句、`INTO OUTFILE`、`SYSTEM`、写操作；禁止 `url(`/`file(`/`s3(`/`remote(`/`mysql(`/`jdbc(` 等远程表函数
+- 设置查询超时（`CH_QUERY_TIMEOUT_S`），对大查询设置合理 timeout 与限制
+
+## 一致性
+- 已接入表必须验证「写入→读回→API 正常」；双栈对照（dev vs CK vs origin）无未解释差异
+- 数据源不在 CK 本地权威数据的（用户配置、远程接口缓存如自选/池）不得强行建表，应归 `CacheBackend`，避免把缓存固化进 CK 表

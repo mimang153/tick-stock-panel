@@ -1,4 +1,5 @@
 """分钟请求批次属于 Provider;核心只消费有界帧。"""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -15,12 +16,18 @@ from app.services import kline_sync
 
 
 def frame(symbols):
-    return pl.DataFrame({
-        "symbol": symbols, "datetime": [datetime(2026, 11, 6, 9, 31)] * len(symbols),
-        "open": [10.0] * len(symbols), "high": [10.2] * len(symbols),
-        "low": [9.9] * len(symbols), "close": [10.1] * len(symbols),
-        "volume": [100.0] * len(symbols), "amount": [101000.0] * len(symbols),
-    })
+    return pl.DataFrame(
+        {
+            "symbol": symbols,
+            "datetime": [datetime(2026, 11, 6, 9, 31)] * len(symbols),
+            "open": [10.0] * len(symbols),
+            "high": [10.2] * len(symbols),
+            "low": [9.9] * len(symbols),
+            "close": [10.1] * len(symbols),
+            "volume": [100.0] * len(symbols),
+            "amount": [101000.0] * len(symbols),
+        }
+    )
 
 
 class StreamSource:
@@ -37,7 +44,7 @@ class StreamSource:
             for offset in range(0, len(symbols), self.size):
                 if offset and self.fail:
                     raise ProviderRequestError("source request failed")
-                batch = symbols[offset:offset + self.size]
+                batch = symbols[offset : offset + self.size]
                 self.requests.append(batch)
                 yield frame(batch)
                 if on_chunk_done:
@@ -59,10 +66,13 @@ def test_core_passes_full_universe_once_and_respects_provider_batch(monkeypatch)
     source = StreamSource()
     route(monkeypatch, source)
     symbols = [f"{i:06d}.SZ" for i in range(400)]
-    frames, progress = [], []
+    frames, progress = [], []  # type: ignore[var-annotated]
     result = kline_sync.sync_minute_batch(
-        symbols, start_time=datetime(2026, 11, 6), end_time=datetime(2026, 11, 6, 15),
-        on_segment=frames.append, on_chunk_done=lambda *args: progress.append(args),
+        symbols,
+        start_time=datetime(2026, 11, 6),
+        end_time=datetime(2026, 11, 6, 15),
+        on_segment=frames.append,
+        on_chunk_done=lambda *args: progress.append(args),
     )
     assert len(source.calls) == 1 and source.calls[0][0] == symbols
     assert [len(batch) for batch in source.requests] == [200, 200]
@@ -74,7 +84,7 @@ def test_core_passes_full_universe_once_and_respects_provider_batch(monkeypatch)
 def test_late_source_failure_keeps_previous_frame_and_propagates(monkeypatch):
     source = StreamSource(size=2, fail=True)
     route(monkeypatch, source)
-    frames = []
+    frames = []  # type: ignore[var-annotated]
     with pytest.raises(ProviderRequestError, match="source request failed"):
         kline_sync.sync_minute_batch(["a", "b", "c"], on_segment=frames.append)
     assert len(frames) == 1 and frames[0]["symbol"].to_list() == ["a", "b"]
@@ -138,7 +148,7 @@ def test_legacy_stream_keeps_existing_empty_and_pandas_normalization(monkeypatch
     if result_type == "pandas":
         source.get_minute = lambda *_args, **_kwargs: expected.to_pandas()
     route(monkeypatch, source)
-    published = []
+    published = []  # type: ignore[var-annotated]
     kline_sync.sync_minute_batch(["a"], on_segment=published.append)
     if result_type == "none":
         assert published == []
@@ -151,10 +161,20 @@ def test_legacy_stream_keeps_existing_empty_and_pandas_normalization(monkeypatch
 
 def yaml_source(batch=200, rpm=None):
     columns = frame(["a"]).columns
-    return GenericHTTPProvider(CustomSourceConfig(name="yaml", display_name="yaml", datasets={
-        "minute": DatasetConfig(url="https://example.invalid", batch=batch, rpm=rpm,
-                                field_map={name: name for name in columns}),
-    }))
+    return GenericHTTPProvider(
+        CustomSourceConfig(
+            name="yaml",
+            display_name="yaml",
+            datasets={
+                "minute": DatasetConfig(
+                    url="https://example.invalid",
+                    batch=batch,
+                    rpm=rpm,
+                    field_map={name: name for name in columns},
+                ),
+            },
+        )
+    )
 
 
 def test_yaml_stream_is_lazy_and_core_does_not_override_batch(monkeypatch):
@@ -174,7 +194,7 @@ def test_yaml_stream_is_lazy_and_core_does_not_override_batch(monkeypatch):
         assert len(requests) == 1
         route(monkeypatch, source)
         requests.clear()
-        out = []
+        out = []  # type: ignore[var-annotated]
         kline_sync.sync_minute_batch([str(i) for i in range(400)], on_segment=out.append)
         assert [len(part) for part in requests] == [200, 200]
         assert sum(part.height for part in out) == 400
@@ -207,7 +227,9 @@ def test_yaml_reload_defers_close_until_minute_stream_finishes(monkeypatch, tmp_
     old, new = yaml_source(batch=1), yaml_source(batch=1)
     providers = iter([old, new])
     for source in (old, new):
-        monkeypatch.setattr(source, "_request_rows", lambda *_args, **kwargs: frame(kwargs["symbols"]).to_dicts())
+        monkeypatch.setattr(
+            source, "_request_rows", lambda *_args, **kwargs: frame(kwargs["symbols"]).to_dicts()
+        )
     monkeypatch.setattr(loader, "_PROVIDERS", {})
     monkeypatch.setattr(loader, "_LOAD_ERRORS", [])
     monkeypatch.setattr(loader, "_PLUGIN_STATUS", {})
@@ -222,7 +244,7 @@ def test_yaml_reload_defers_close_until_minute_stream_finishes(monkeypatch, tmp_
         loader.load_all(tmp_path)
         assert not old._client.is_closed
         assert loader.list_sources()[0]["name"] == "yaml"
-        assert loader.get_config_dict("yaml")["datasets"]["minute"]["batch"] == 1
+        assert loader.get_config_dict("yaml")["datasets"]["minute"]["batch"] == 1  # type: ignore[index]
         assert [part["symbol"].to_list() for part in stream] == [["b"]]
         assert old._client.is_closed and not new._client.is_closed
     finally:
@@ -230,15 +252,18 @@ def test_yaml_reload_defers_close_until_minute_stream_finishes(monkeypatch, tmp_
         new.close()
 
 
-@pytest.mark.parametrize("bad_frame", [
-    frame(["a"]).drop("volume"),
-    frame(["a"]).drop("datetime"),
-    frame(["a"]).with_columns(pl.lit(None, dtype=pl.Datetime("us")).alias("datetime")),
-    frame(["a"]).with_columns(pl.lit(None, dtype=pl.String).alias("symbol")),
-])
+@pytest.mark.parametrize(
+    "bad_frame",
+    [
+        frame(["a"]).drop("volume"),
+        frame(["a"]).drop("datetime"),
+        frame(["a"]).with_columns(pl.lit(None, dtype=pl.Datetime("us")).alias("datetime")),
+        frame(["a"]).with_columns(pl.lit(None, dtype=pl.String).alias("symbol")),
+    ],
+)
 def test_invalid_stream_schema_is_rejected_before_publish(monkeypatch, bad_frame):
     source = StreamSource()
-    closed, published = [], []
+    closed, published = [], []  # type: ignore[var-annotated]
 
     def stream(*_args, **_kwargs):
         try:
@@ -272,7 +297,7 @@ def test_stream_accepts_missing_amount_and_propagates_job_cancellation(monkeypat
         raise JobCancelledError("cancelled-job")
 
     monkeypatch.setattr(source, "iter_minute", stream)
-    published = []
+    published = []  # type: ignore[var-annotated]
     with pytest.raises(JobCancelledError):
         kline_sync.sync_minute_batch(["a", "b"], on_segment=published.append, on_chunk_done=cancel)
     assert published[0].columns == frame(["a"]).drop("amount").columns
@@ -285,7 +310,11 @@ def test_cancel_during_source_rate_wait_does_not_start_another_request(monkeypat
     source = yaml_source(rpm=60)
     requests = []
     monkeypatch.setattr("time.monotonic", lambda: 100.0)
-    monkeypatch.setattr(source, "_request_rows", lambda *_args, **kwargs: requests.append(kwargs["symbols"]) or [])
+    monkeypatch.setattr(
+        source,
+        "_request_rows",
+        lambda *_args, **kwargs: requests.append(kwargs["symbols"]) or [],  # type: ignore[func-returns-value]
+    )
 
     def cancel(*_args):
         raise JobCancelledError("waiting-job")
@@ -301,13 +330,15 @@ def test_cancel_during_source_rate_wait_does_not_start_another_request(monkeypat
 
 
 @pytest.mark.parametrize("asset_type", ["stock", "etf"])
-def test_stream_failure_preserves_queryable_partitions_and_retry_is_idempotent(monkeypatch, tmp_path, asset_type):
+def test_stream_failure_preserves_queryable_partitions_and_retry_is_idempotent(
+    monkeypatch, tmp_path, asset_type, ck_runtime
+):
     from polars.testing import assert_frame_equal
 
     from app.tickflow.capabilities import CapabilitySet
     from app.tickflow.repository import DataStore, KlineRepository
 
-    repo = KlineRepository(DataStore(tmp_path))
+    repo = KlineRepository(DataStore(tmp_path), storage=ck_runtime)
     source = StreamSource(size=1, fail=True)
     route(monkeypatch, source)
     monkeypatch.setattr(kline_sync.preferences, "get_minute_sync_segment_days", lambda: 20)
@@ -320,13 +351,21 @@ def test_stream_failure_preserves_queryable_partitions_and_retry_is_idempotent(m
 
     with pytest.raises(ProviderRequestError):
         kline_sync.sync_and_persist_minute(
-            ["a", "b"], repo, capset, force_full_days=True, asset_type=asset_type,
+            ["a", "b"],
+            repo,
+            capset,
+            force_full_days=True,
+            asset_type=asset_type,
         )
     assert_frame_equal(repo.get_minute("a", day, asset_type=asset_type), frame(["a"]))
     assert repo.get_minute("b", day, asset_type=asset_type).is_empty()
     source.fail = False
     kline_sync.sync_and_persist_minute(
-        ["a", "b"], repo, capset, force_full_days=True, asset_type=asset_type,
+        ["a", "b"],
+        repo,
+        capset,
+        force_full_days=True,
+        asset_type=asset_type,
     )
     for symbol in ("a", "b"):
         assert_frame_equal(repo.get_minute(symbol, day, asset_type=asset_type), frame([symbol]))

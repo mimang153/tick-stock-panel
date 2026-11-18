@@ -5,17 +5,16 @@
   - preset 策略: 从内存缓存或即时计算获取完整指标, ~10-50ms
   - custom SQL: DuckDB (用户传 SQL WHERE 字符串), ~10-50ms
 """
+
 from __future__ import annotations
 
 import logging
 import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from pathlib import Path
 
 import polars as pl
 
-from app.parquet import scan_enriched_parquet
 from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
@@ -26,22 +25,25 @@ logger = logging.getLogger(__name__)
 MIN_INDICATOR_WARMUP_DAYS = 30
 
 
-def enriched_history_days(data_dir, asset_type: str = "stock", as_of: date | None = None) -> int:
-    """本地 enriched 在 as_of 及之前覆盖的交易日数 (#303)。
+def enriched_history_days(
+    data_dir=None, asset_type: str = "stock", as_of: date | None = None
+) -> int:
+    """enriched 在 as_of 及之前覆盖的交易日数 (#303)。
 
-    按 date=* 分区目录名计数 (目录列举 O(天数)), 不读 parquet 内容 —
-    只做数据充足性提示, 不进入指标计算路径。
+    ``data_dir`` 仅为兼容既有调用签名保留；计数走 CK 的 distinct date，
+    只做数据充足性提示，不读取指标宽表。
     """
+    from app.storage.runtime import get_storage
     from app.tickflow.repository import enriched_dirname
 
-    root = Path(data_dir) / enriched_dirname(asset_type)
-    if not root.exists():
+    runtime = get_storage()
+    if runtime is None:
         return 0
-    days = [d.name[5:] for d in root.glob("date=*") if d.is_dir() and len(d.name) > 5]
-    if as_of is not None:
-        as_of_s = as_of.isoformat()
-        days = [d for d in days if d <= as_of_s]
-    return len(days)
+    try:
+        return len(runtime.store.list_daily_dates(enriched_dirname(asset_type), end=as_of))
+    except Exception as e:  # noqa: BLE001 - 仅提示用途，失败按 0 天处理
+        logger.warning("enriched 天数统计失败: %s", e)
+        return 0
 
 
 # ── 进程级历史数据缓存 (避免 run_all 每次重新扫描 parquet + 计算指标) ──
@@ -56,7 +58,11 @@ def _join_instruments(df: pl.DataFrame, instruments: pl.DataFrame) -> pl.DataFra
     if instruments.is_empty():
         return df
     if "name" not in df.columns:
-        columns = [c for c in ["symbol", "name", "total_shares", "float_shares"] if c in instruments.columns]
+        columns = [
+            c
+            for c in ["symbol", "name", "total_shares", "float_shares"]
+            if c in instruments.columns
+        ]
         return df.join(instruments.select(columns), on="symbol", how="left")
     if "name" not in instruments.columns:
         return df
@@ -67,12 +73,15 @@ def _join_instruments(df: pl.DataFrame, instruments: pl.DataFrame) -> pl.DataFra
     return (
         df.join(
             instruments.select("symbol", pl.col("name").alias("_instrument_name")),
-            on="symbol", how="left", maintain_order="left",
+            on="symbol",
+            how="left",
+            maintain_order="left",
         )
         .with_columns(
-            pl.when(missing).then(
-                pl.col("_instrument_name").cast(pl.Utf8).str.strip_chars().replace("", None)
-            ).otherwise(pl.col("name")).alias("name")
+            pl.when(missing)
+            .then(pl.col("_instrument_name").cast(pl.Utf8).str.strip_chars().replace("", None))
+            .otherwise(pl.col("name"))
+            .alias("name")
         )
         .drop("_instrument_name")
     )
@@ -92,6 +101,7 @@ class ScreenerService:
         self.repo = repo
         self.asset_type = asset_type
         from app.tickflow.repository import enriched_dirname
+
         self._enriched_dirname = enriched_dirname(asset_type)
 
     @staticmethod
@@ -114,6 +124,33 @@ class ScreenerService:
         if root is not None:
             assert_usable(root, self.asset_type, end=end, enriched_only=enriched_only)
 
+    def _enriched_store(self):
+        """enriched 存储门面（CK 唯一读源）。"""
+        from app.storage.runtime import require_storage
+
+        return require_storage().store
+
+    def _read_enriched_window(
+        self,
+        start: date,
+        end: date,
+        columns: list[str],
+    ) -> pl.DataFrame:
+        """按窗口读 enriched 存储列（列裁剪 + 主键裁剪），未知列自动丢弃。"""
+        store = self._enriched_store()
+        known = set(store.table_columns(self._enriched_dirname))
+        available = [c for c in columns if c in known]
+        if not available:
+            return pl.DataFrame()
+        df = store.read_daily(
+            self._enriched_dirname,
+            start=start,
+            end=end,
+            columns=available,
+        )
+        sort_keys = [c for c in ("symbol", "date") if c in df.columns]
+        return df.sort(sort_keys) if sort_keys else df
+
     def _load_enriched_for_date(self, target_date: date) -> pl.DataFrame:
         """从 enriched parquet 读取指定日期的基础数据并即时计算完整指标+信号。
 
@@ -129,23 +166,37 @@ class ScreenerService:
         # 尝试从 repo 级预计算历史缓存中提取目标日期 (仅 stock: 该缓存为股票专用)
         if self.asset_type == "stock":
             cached_hist = self.repo.get_enriched_history(target_date, 1)
-            if cached_hist is not None and not cached_hist.is_empty() and "date" in cached_hist.columns:
+            if (
+                cached_hist is not None
+                and not cached_hist.is_empty()
+                and "date" in cached_hist.columns
+            ):
                 df = cached_hist.filter(pl.col("date") == target_date)
                 if not df.is_empty():
                     logger.debug("_load_enriched_for_date: repo history cache for %s", target_date)
                     return _join_instruments(df, self.repo.get_instruments_asset(self.asset_type))
 
-        # 历史日期: 从 parquet 读取 14 列, 即时计算指标 (慢路径)
-        enriched_dir = self.repo.store.data_dir / self._enriched_dirname
-        ds = target_date.isoformat()
-        target_parquet = enriched_dir / f"date={ds}" / "part.parquet"
-
-        if not target_parquet.exists():
-            return pl.DataFrame()
-
+        # 历史日期: 从 CK 读取存储列, 即时计算指标 (慢路径)
         try:
-            df = pl.read_parquet(target_parquet)
-        except Exception as e:  # noqa: BLE001
+            df = self._read_enriched_window(
+                target_date,
+                target_date,
+                [
+                    "symbol",
+                    "date",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "amount",
+                    "raw_close",
+                    "raw_high",
+                    "raw_low",
+                    "turnover_rate",
+                ],
+            )
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.warning("load_enriched_for_date failed: %s", e)
             return pl.DataFrame()
 
@@ -169,28 +220,25 @@ class ScreenerService:
 
         返回列: symbol, prev_consec。找不到前一交易日时返回空 DataFrame。
         """
-        enriched_dir = self.repo.store.data_dir / self._enriched_dirname
+        store = self._enriched_store()
+        known = set(store.table_columns(self._enriched_dirname))
+        # 存储列理论上必含 consec_col; 缺列时直接返回空, 不再逐日试探
+        if "symbol" not in known or consec_col not in known:
+            return pl.DataFrame()
         for candidate in self._prior_partition_dates(as_of, _PRIOR_PARTITION_SCAN):
-            target_parquet = enriched_dir / f"date={candidate.isoformat()}" / "part.parquet"
-            if not target_parquet.exists():
-                continue
             try:
-                lf = pl.scan_parquet(target_parquet)
-                cols = lf.collect_schema().names()
-            except Exception as e:  # noqa: BLE001
-                logger.warning("load_prior_consecutive scan failed for %s: %s", candidate, e)
-                return pl.DataFrame()
-            # 存储列理论上必含 consec_col; 若该分区缺列则继续向前找 (与旧循环一致)
-            if "symbol" not in cols or consec_col not in cols:
-                continue
-            try:
-                return lf.select(
-                    "symbol",
-                    pl.col(consec_col).alias("prev_consec"),
-                ).collect()
-            except Exception as e:  # noqa: BLE001
+                df = store.read_daily(
+                    self._enriched_dirname,
+                    start=candidate,
+                    end=candidate,
+                    columns=["symbol", consec_col],
+                )
+            except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
                 logger.warning("load_prior_consecutive read failed for %s: %s", candidate, e)
                 return pl.DataFrame()
+            if df.is_empty():
+                continue
+            return df.rename({consec_col: "prev_consec"})
         return pl.DataFrame()
 
     def _prior_partition_dates(self, as_of: date, limit: int) -> list[date]:
@@ -201,21 +249,14 @@ class ScreenerService:
         固定窗口会整段落空。与 auction_benchmark._prev_trading_day
         「本地日K分区日期 = 已知交易日集合」同口径。
         """
-        enriched_dir = self.repo.store.data_dir / self._enriched_dirname
-        days: list[date] = []
         try:
-            entries = list(enriched_dir.iterdir())
-        except OSError:
+            days: list[date] = self._enriched_store().list_daily_dates(
+                self._enriched_dirname,
+                end=as_of - timedelta(days=1),
+            )
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+            logger.warning("enriched 交易日枚举失败: %s", e)
             return []
-        for part in entries:
-            if not part.name.startswith("date="):
-                continue
-            try:
-                day = date.fromisoformat(part.name[5:])
-            except ValueError:
-                continue
-            if day < as_of:
-                days.append(day)
         days.sort(reverse=True)
         return days[:limit]
 
@@ -231,25 +272,27 @@ class ScreenerService:
         )
 
         # 加载 warmup 历史 (目标日期前 ~120 天)
-        enriched_dir = self.repo.store.data_dir / self._enriched_dirname
         start = target_date - timedelta(days=150)
         # turnover_rate 是 enriched 存储列, 必须随行透传: 否则即时计算后该列
         # 丢失, 自定义 SQL 用它做条件会 Binder Error 被吞成空结果 (#187)
-        read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate"]
+        read_cols = [
+            "symbol",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "raw_close",
+            "raw_high",
+            "raw_low",
+            "turnover_rate",
+        ]
 
         try:
-            lf = (
-                scan_enriched_parquet(str(enriched_dir / "**" / "*.parquet"))
-                .filter(
-                    (pl.col("date") >= start)
-                    & (pl.col("date") <= target_date)
-                )
-                .sort(["symbol", "date"])
-            )
-            available = [c for c in read_cols if c in lf.schema]
-            df_hist = lf.select(available).collect()
-        except Exception as e:  # noqa: BLE001
+            df_hist = self._read_enriched_window(start, target_date, read_cols)
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.warning("warmup history load failed: %s", e)
             df_hist = df_target
 
@@ -274,71 +317,63 @@ class ScreenerService:
 
         return _join_instruments(df_result, instruments)
 
-    def _load_enriched_history(self, target_date: date, lookback_days: int) -> pl.DataFrame:
-        """读取目标日期之前的基础行情数据, 供历史窗口策略使用。
+    # ---- _load_enriched_history 分段 helper (语义等价) ----
 
-        优先从 repo 内存缓存获取 (启动时已预计算), 命中时 0ms。
-        缓存 miss 时走 scan_parquet + compute_indicators 慢路径。
-        """
-        self._assert_integrity(target_date, enriched_only=True)
+    def _enriched_repo_cache(self, target_date, lookback_days, t0):
         # 优先级 1: repo 级预计算缓存 (启动时 _refresh_enriched 已计算完整历史; 仅 stock)
-        t0 = time.perf_counter()
         if self.asset_type == "stock":
             cached = self.repo.get_enriched_history(target_date, lookback_days)
             if cached is not None and not cached.is_empty():
                 # JOIN instruments (repo 缓存不含 name 等列)
                 instruments = self.repo.get_instruments_asset(self.asset_type)
-                if instruments is not None and not instruments.is_empty() and "name" not in cached.columns:
-                    inst_cols = [c for c in ["symbol", "name", "total_shares", "float_shares"]
-                                 if c in instruments.columns]
+                if (
+                    instruments is not None
+                    and not instruments.is_empty()
+                    and "name" not in cached.columns
+                ):
+                    inst_cols = [
+                        c
+                        for c in ["symbol", "name", "total_shares", "float_shares"]
+                        if c in instruments.columns
+                    ]
                     cached = cached.join(instruments.select(inst_cols), on="symbol", how="left")
                 elapsed = (time.perf_counter() - t0) * 1000
-                logger.info("_load_enriched_history(%s, %d): repo cache hit, %.1fms, %d rows",
-                            target_date, lookback_days, elapsed, len(cached))
+                logger.info(
+                    "_load_enriched_history(%s, %d): repo cache hit, %.1fms, %d rows",
+                    target_date,
+                    lookback_days,
+                    elapsed,
+                    len(cached),
+                )
                 return cached
+        return None
 
+    def _enriched_ttl_cache(self, cache_key, target_date, lookback_days):
         # 优先级 2: 进程级 history_cache (之前的 TTL 缓存)
-        cache_key = (self.asset_type, target_date, lookback_days)
         now = time.monotonic()
         ttl_cached = _history_cache.get(cache_key)
         if ttl_cached is not None:
             ts, cached_df = ttl_cached
             if now - ts < _HISTORY_CACHE_TTL:
                 logger.debug("history TTL cache hit: %s lookback=%d", target_date, lookback_days)
-                return cached_df
+                return cached_df, now
             del _history_cache[cache_key]
+        return None, now
 
-        # 优先级 3: scan_parquet + compute_indicators (慢路径, ~5s)
-        logger.warning("_load_enriched_history cache miss, computing indicators (%s, %d)...",
-                       target_date, lookback_days)
+    def _enriched_compute_window(self, target_date, lookback_days, start, read_cols):
         from app.indicators.pipeline import (
             compute_indicators,
             compute_limit_signals,
             compute_signals,
         )
 
-        warmup = 60
-        start = target_date - timedelta(days=min((lookback_days + warmup) * 2, 180))
-
-        enriched_dir = self.repo.store.data_dir / self._enriched_dirname
-        # 同 _compute_enriched_full: turnover_rate 存储列随行透传 (#187)
-        read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate"]
-
         try:
-            lf = (
-                scan_enriched_parquet(str(enriched_dir / "**" / "*.parquet"))
-                .filter((pl.col("date") >= start) & (pl.col("date") <= target_date))
-                .sort(["symbol", "date"])
-            )
-            available = [c for c in read_cols if c in lf.collect_schema().names()]
-            df_hist = lf.select(available).collect()
-        except Exception as e:  # noqa: BLE001
+            df_hist = self._read_enriched_window(start, target_date, read_cols)
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.warning("load_enriched_history failed: %s", e)
-            return pl.DataFrame()
-
+            return None
         if df_hist.is_empty():
-            return pl.DataFrame()
+            return None
 
         df_full = compute_indicators(df_hist)
         df_full = compute_signals(df_full)
@@ -352,7 +387,11 @@ class ScreenerService:
             )
 
         if instruments is not None and not instruments.is_empty():
-            inst_cols = [c for c in ["symbol", "name", "total_shares", "float_shares"] if c in instruments.columns]
+            inst_cols = [
+                c
+                for c in ["symbol", "name", "total_shares", "float_shares"]
+                if c in instruments.columns
+            ]
             if "name" not in df_full.columns:
                 df_full = df_full.join(instruments.select(inst_cols), on="symbol", how="left")
 
@@ -367,12 +406,9 @@ class ScreenerService:
                 lookback_start = trading_dates[0]
             df_full = df_full.filter(pl.col("date") >= lookback_start)
 
-        df_full = df_full.sort(["symbol", "date"])
+        return df_full.sort(["symbol", "date"])
 
-        elapsed = (time.perf_counter() - t0) * 1000
-        logger.info("_load_enriched_history(%s, %d): computed in %.1fms, %d rows",
-                    target_date, lookback_days, elapsed, len(df_full))
-
+    def _enriched_cache_store(self, cache_key, now, df_full):
         _history_cache[cache_key] = (now, df_full)
         # TTL 先清一轮; 仍超上限时按最旧无条件淘汰 — 否则两分钟内出现 >10 个
         # 不同 (asset_type, date, lookback) 键时全部新鲜、零逐出, 数 GB 宽帧驻留
@@ -384,6 +420,60 @@ class ScreenerService:
                 oldest = min(_history_cache, key=lambda k: _history_cache[k][0])
                 del _history_cache[oldest]
 
+    def _load_enriched_history(self, target_date: date, lookback_days: int) -> pl.DataFrame:
+        """读取目标日期之前的基础行情数据, 供历史窗口策略使用。
+
+        优先从 repo 内存缓存获取 (启动时已预计算), 命中时 0ms。
+        缓存 miss 时走 scan_parquet + compute_indicators 慢路径。
+        """
+        self._assert_integrity(target_date, enriched_only=True)
+        t0 = time.perf_counter()
+        cached = self._enriched_repo_cache(target_date, lookback_days, t0)
+        if cached is not None:
+            return cached
+
+        cache_key = (self.asset_type, target_date, lookback_days)
+        ttl_cached, now = self._enriched_ttl_cache(cache_key, target_date, lookback_days)
+        if ttl_cached is not None:
+            return ttl_cached
+
+        # 优先级 3: scan_parquet + compute_indicators (慢路径, ~5s)
+        logger.warning(
+            "_load_enriched_history cache miss, computing indicators (%s, %d)...",
+            target_date,
+            lookback_days,
+        )
+        warmup = 60
+        start = target_date - timedelta(days=min((lookback_days + warmup) * 2, 180))
+
+        # 同 _compute_enriched_full: turnover_rate 存储列随行透传 (#187)
+        read_cols = [
+            "symbol",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "raw_close",
+            "raw_high",
+            "raw_low",
+            "turnover_rate",
+        ]
+        df_full = self._enriched_compute_window(target_date, lookback_days, start, read_cols)
+        if df_full is None:
+            return pl.DataFrame()
+
+        elapsed = (time.perf_counter() - t0) * 1000
+        logger.info(
+            "_load_enriched_history(%s, %d): computed in %.1fms, %d rows",
+            target_date,
+            lookback_days,
+            elapsed,
+            len(df_full),
+        )
+        self._enriched_cache_store(cache_key, now, df_full)
         return df_full
 
     def run(
@@ -423,9 +513,8 @@ class ScreenerService:
         con = None
         try:
             import duckdb
-            con = duckdb.connect(
-                database=":memory:", config={"enable_external_access": False}
-            )
+
+            con = duckdb.connect(database=":memory:", config={"enable_external_access": False})
             con.register("enriched", df.to_arrow())
             where = " AND ".join(f"({c})" for c in conditions)
             sql = f"SELECT * FROM enriched WHERE {where}"
@@ -434,14 +523,14 @@ class ScreenerService:
             if limit:
                 sql += f" LIMIT {limit}"
             df_result = con.execute(sql).pl()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.warning("screener SQL query failed: %s", e)
             df_result = pl.DataFrame()
         finally:
             if con is not None:
-                try:
+                try:  # noqa: SIM105 - SIM105: 显式except表达降级路径, contextlib写法更晦涩
                     con.close()
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
                     pass
 
         rows = df_result.to_dicts() if not df_result.is_empty() else []
@@ -507,7 +596,7 @@ class ScreenerService:
         # (取不到时 None → 缓存 fail-closed 不启用)
         try:
             data_generation = self.repo.get_matrix_data_generation(self.asset_type)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             data_generation = None
         return StrategyDataContext(
             asset_type=self.asset_type,
@@ -538,9 +627,7 @@ class ScreenerService:
         if df.is_empty():
             fallback = self.repo.latest_minute_date_global()
             if fallback is None:
-                raise ValueError(
-                    "无分钟K数据 — 请先在 数据→分钟K 完成同步, 或开启盘中增量刷新"
-                )
+                raise ValueError("无分钟K数据 — 请先在 数据→分钟K 完成同步, 或开启盘中增量刷新")
             if fallback != as_of:
                 df = self.repo.get_minute_by_dates(symbols, [fallback])
         return df
@@ -552,17 +639,12 @@ class ScreenerService:
         d = self.repo.enriched_latest_date()
         if d:
             return d
-        # 回退 DuckDB
+        # 回退 CK enriched 最新日期
         try:
-            res = self.repo.execute_one(
-                "SELECT max(date) FROM kline_enriched",
-            )
-            if res and res[0]:
-                d = res[0]
-                return d if isinstance(d, date) else date.fromisoformat(str(d))
-        except Exception:  # noqa: BLE001
+            store = self._enriched_store()
+            return store.latest_daily_date("kline_daily_enriched")
+        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             return None
-        return None
 
     def coverage_warnings(self, as_of: date, *, required_bars: int | None = None) -> list[str]:
         """数据充足性提示 (#303): enriched 覆盖不足时返回用户可读警告, 充足返回 []。

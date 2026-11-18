@@ -12,6 +12,7 @@
   - 终态记录不受补录影响; 终态写入覆盖 running 快照(同一文件)。
 均为纯逻辑, 不触网。
 """
+
 from __future__ import annotations
 
 import json
@@ -24,6 +25,7 @@ def _read_disk(d, jid: str) -> dict:
 
 
 # ── 创建/启动即落盘 ──────────────────────────────────────────────────────
+
 
 def test_create_writes_pending_snapshot_to_disk(tmp_path):
     d = tmp_path / "jobs"
@@ -47,6 +49,7 @@ def test_start_updates_disk_snapshot_to_running(tmp_path):
 
 
 # ── 进程死亡 → 下次启动补录 ──────────────────────────────────────────────
+
 
 def test_orphan_running_record_is_reaped_on_next_boot(tmp_path):
     """核心场景: 进程死在 running(甚至工作已做完但未终态), 记录必须可见。"""
@@ -79,7 +82,9 @@ def test_orphan_pending_record_is_reaped(tmp_path):
 
     revived = JobStore(store_dir=d)
     j = revived.get(jid)
+    assert j is not None
     assert j["status"] == "failed"
+    assert j is not None
     assert j["duration_s"] is None
 
 
@@ -92,7 +97,9 @@ def test_reap_does_not_touch_terminal_records(tmp_path):
 
     revived = JobStore(store_dir=d)
     j = revived.get(jid)
+    assert j is not None
     assert j["status"] == "succeeded"
+    assert j is not None
     assert j["result"] == {"daily_rows": 100}
 
 
@@ -110,6 +117,7 @@ def test_reap_allows_new_job_after_dead_orphan(tmp_path):
 
 
 # ── 终态覆盖快照 ─────────────────────────────────────────────────────────
+
 
 def test_terminal_write_replaces_running_snapshot(tmp_path):
     d = tmp_path / "jobs"

@@ -1,0 +1,39 @@
+---
+description: Security best practices for Python and JavaScript (tsp 前端 + 后端)
+globs: *.js, *.jsx, *.tsx, *.ts, *.py
+alwaysApply: false
+---
+# Security Best Practices
+
+Ensures application security standards are maintained.
+
+<rule>
+name: security_practices
+description: Enforce security best practices across the application
+filters:
+  - type: file_extension
+    pattern: "\\.(py|ts|tsx|js|jsx)$"
+
+actions:
+  - type: enforce
+    conditions:
+      - pattern: "eval\\("
+        message: "Avoid using eval() - security risk"
+
+      - pattern: "innerHTML"
+        message: "Use textContent or sanitize HTML content"
+
+  - type: suggest
+    message: |
+      Security Best Practices:
+      - Implement CSRF protection for state-changing endpoints
+      - Use parameterized queries / SQL placeholders (never string-concatenate SQL)
+      - Sanitize user input; never render unsanitized HTML
+      - Implement proper access controls (authn/authz) on every endpoint
+      - Follow security update protocol for dependencies (npm / uv)
+      - Never commit secrets, API keys, or tokens; use .env + settings
+
+metadata:
+  priority: critical
+  version: 1.0
+</rule>

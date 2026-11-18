@@ -6,15 +6,18 @@
 文件, 之后读侧整条链路报错。下面这些持久化文件仍是直接覆盖写:
 
 - ext_data.write_ext_parquet / fix_symbol_format — 用户上传/推送的扩展数据
-- instrument_sync.sync_instruments / enrich_names_from_quotes — 标的维表
 - financial_sync._write_table — 财务表
 - market_mainline.upsert_mainline_history — 主线历史 (读旧→合并→写回)
 - regime_builder.refresh_phase_labels / upsert_regime_history — 市场情绪时序 (读旧→合并→写回)
 - tickflow.pools.get_pool — 标的池缓存
 
+标的维表 (instrument_sync) 已整体迁到 ClickHouse, 不再落本地 parquet,
+对应用例改成 "CK 维表在写入中断时保持完好" (见下)。
+
 中断的模拟: 让 `DataFrame.write_parquet` 往目标路径写入半截字节后抛出异常, 等价于
 进程在写入过程中被杀。修复后半截字节落在 `.tmp` 上, 目标文件不动。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -71,7 +74,9 @@ def test_atomic_write_parquet_replaces_target_and_cleans_up(tmp_path: Path) -> N
     assert [p.name for p in tmp_path.iterdir()] == ["part.parquet"]
 
 
-def test_interrupted_atomic_write_keeps_target_and_hides_tmp_from_globs(tmp_path: Path, crash) -> None:
+def test_interrupted_atomic_write_keeps_target_and_hides_tmp_from_globs(
+    tmp_path: Path, crash
+) -> None:
     target = tmp_path / "date=2026-03-02" / "part.parquet"
     old = pl.DataFrame({"v": [1]})
     _seed(old, target)
@@ -91,12 +96,16 @@ def test_interrupted_atomic_write_keeps_target_and_hides_tmp_from_globs(tmp_path
 @pytest.mark.parametrize("mode", ["snapshot", "timeseries"])
 def test_ext_write_interrupted_keeps_existing_rows(tmp_path: Path, crash, mode: str) -> None:
     config = ExtConfig(
-        id="hot", label="人气", mode=mode,
+        id="hot",
+        label="人气",
+        mode=mode,  # type: ignore[arg-type]
         fields=[ExtField("symbol", "string"), ExtField("heat", "float")],
     )
     cfg_dir = tmp_path / "ext_data" / "hot"
-    target = cfg_dir / "part.parquet" if mode == "snapshot" else (
-        cfg_dir / "timeseries" / "date=2026-03-02" / "part.parquet"
+    target = (
+        cfg_dir / "part.parquet"
+        if mode == "snapshot"
+        else (cfg_dir / "timeseries" / "date=2026-03-02" / "part.parquet")
     )
     old = pl.DataFrame({"symbol": ["000001.SZ", "600000.SH"], "heat": [1.0, 2.0]})
     _seed(old, target)
@@ -116,7 +125,9 @@ def test_ext_write_interrupted_keeps_existing_rows(tmp_path: Path, crash, mode: 
 
 def test_fix_symbol_format_interrupted_keeps_partition(tmp_path: Path, crash) -> None:
     config = ExtConfig(
-        id="hot", label="人气", mode="timeseries",
+        id="hot",
+        label="人气",
+        mode="timeseries",
         fields=[ExtField("symbol", "string"), ExtField("heat", "float")],
     )
     target = tmp_path / "ext_data" / "hot" / "timeseries" / "date=2026-03-02" / "part.parquet"
@@ -140,51 +151,83 @@ def _instruments(names: list[str]) -> pl.DataFrame:
     return pl.DataFrame({"symbol": ["600000.SH", "000001.SZ"], "name": names})
 
 
-def test_sync_instruments_interrupted_keeps_existing_table(tmp_path: Path, crash, monkeypatch) -> None:
-    target = tmp_path / "instruments" / "instruments.parquet"
-    old = _instruments(["浦发银行", "平安银行"])
-    _seed(old, target)
+def test_sync_instruments_interrupted_keeps_existing_table(
+    tmp_path: Path, ck_runtime, monkeypatch
+) -> None:
+    """维表已迁 CK: 同步中断不能破坏既有维表。
+
+    维表读写都在 CK (本地 parquet 不再落), "半截文件"场景消失; 等价保护是:
+    写入中断时既有 CK 维表保持完好, 不被半份数据替换。
+    """
+    ck_runtime.write_instruments(
+        "stock",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH", "000001.SZ"],
+                "name": ["浦发银行", "平安银行"],
+            }
+        ),
+    )
     monkeypatch.setattr(
-        instrument_sync, "_fetch_instruments_via_provider",
+        instrument_sync,
+        "_fetch_instruments_via_provider",
         lambda: [{"symbol": "600036.SH", "name": "招商银行"}],
     )
 
-    crash.armed = True
+    def _boom(*_args, **_kwargs):
+        raise OSError("simulated kill during write")
+
+    monkeypatch.setattr(ck_runtime, "write_instruments", _boom)
     with pytest.raises(OSError, match="simulated kill"):
         instrument_sync.sync_instruments(tmp_path)
-    assert_frame_equal(pl.read_parquet(target), old)
 
-    crash.armed = False
-    assert instrument_sync.sync_instruments(tmp_path) == 1
-    assert pl.read_parquet(target)["symbol"].to_list() == ["600036.SH"]
-    assert _no_tmp_left(target)
+    names = dict(ck_runtime.read_instruments("stock").select("symbol", "name").iter_rows())
+    assert names == {"600000.SH": "浦发银行", "000001.SZ": "平安银行"}
+    # 维表不再落本地 parquet
+    assert not (tmp_path / "instruments" / "instruments.parquet").exists()
 
 
-def test_enrich_names_interrupted_keeps_existing_table(tmp_path: Path, crash) -> None:
-    target = tmp_path / "instruments" / "instruments.parquet"
-    old = _instruments(["", "平安银行"])
-    _seed(old, target)
+def test_enrich_names_interrupted_keeps_existing_table(tmp_path: Path, ck_runtime) -> None:
+    """名称回填同理: 中断时 CK 维表保持原样。"""
+    ck_runtime.write_instruments(
+        "stock",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH", "000001.SZ"],
+                "name": ["", "平安银行"],
+            }
+        ),
+    )
     quotes = [{"symbol": "600000.SH", "ext": {"name": "浦发银行"}}]
 
-    crash.armed = True
+    def _boom(*_args, **_kwargs):
+        raise OSError("simulated kill during write")
+
+    ck_runtime.write_instruments = _boom  # type: ignore[method-assign]
     with pytest.raises(OSError, match="simulated kill"):
         instrument_sync.enrich_names_from_quotes(tmp_path, quotes)
-    assert_frame_equal(pl.read_parquet(target), old)
 
-    crash.armed = False
-    assert instrument_sync.enrich_names_from_quotes(tmp_path, quotes) == 1
-    assert pl.read_parquet(target)["name"].to_list() == ["浦发银行", "平安银行"]
-    assert _no_tmp_left(target)
+    names = dict(ck_runtime.read_instruments("stock").select("symbol", "name").iter_rows())
+    assert names == {"600000.SH": "", "000001.SZ": "平安银行"}
 
 
 # ---------- 财务表 ----------
 
 
-def test_financial_table_interrupted_keeps_existing_file(tmp_path: Path, crash) -> None:
+def test_financial_table_interrupted_keeps_existing_file(tmp_path: Path, crash, ck_runtime) -> None:
     target = tmp_path / "financials" / "income" / "part.parquet"
-    old = pl.DataFrame({"symbol": ["600000.SH"], "revenue": [1.0]})
+    # period_end 是 CK 主键分量, 缺它整表拒写 (本地 parquet 与 CK 保持同一口径)
+    old = pl.DataFrame(
+        {"symbol": ["600000.SH"], "period_end": [date(2026, 3, 2)], "revenue": [1.0]}
+    )
     _seed(old, target)
-    new = pl.DataFrame({"symbol": ["600000.SH", "000001.SZ"], "revenue": [2.0, 3.0]})
+    new = pl.DataFrame(
+        {
+            "symbol": ["600000.SH", "000001.SZ"],
+            "period_end": [date(2026, 3, 3)] * 2,
+            "revenue": [2.0, 3.0],
+        }
+    )
 
     crash.armed = True
     with pytest.raises(OSError, match="simulated kill"):
@@ -222,14 +265,16 @@ def test_mainline_upsert_interrupted_keeps_history(tmp_path: Path, crash) -> Non
 
 def _regime(days: list[date]) -> pl.DataFrame:
     n = len(days)
-    return pl.DataFrame({
-        "date": days,
-        "max_consecutive": [3] * n,
-        "first_board": [40] * n,
-        "ge2_count": [10] * n,
-        "promo_rate": [0.3] * n,
-        "seal_rate": [0.7] * n,
-    })
+    return pl.DataFrame(
+        {
+            "date": days,
+            "max_consecutive": [3] * n,
+            "first_board": [40] * n,
+            "ge2_count": [10] * n,
+            "promo_rate": [0.3] * n,
+            "seal_rate": [0.7] * n,
+        }
+    )
 
 
 def test_regime_upsert_interrupted_keeps_history(tmp_path: Path, crash) -> None:
@@ -259,7 +304,8 @@ def test_regime_phase_relabel_interrupted_keeps_history(tmp_path: Path, crash, m
     old = _regime([date(2026, 3, 2), date(2026, 3, 3)])
     _seed(old, target)
     monkeypatch.setattr(
-        market_phase, "classify_phase_series",
+        market_phase,
+        "classify_phase_series",
         lambda df: df.with_columns(pl.lit("修复").alias("phase")),
     )
 

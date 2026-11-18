@@ -26,10 +26,13 @@
   - 进程内结果缓存 TTL 30s (分钟数据默认 6s 刷新一轮, 30s 已足够"实时"),
     缓存键含全部影响结果的参数
 """
+
 from __future__ import annotations
 
 import logging
 import time
+from datetime import date, datetime
+from datetime import time as dt_time
 from pathlib import Path
 from typing import Any
 
@@ -60,12 +63,42 @@ _DEFAULT_SERIES_ROWS = 10
 # "标签桶"成员数动辄数百上千, 成交额合计天然占优, 会挤出真实题材。用户可通过
 # exclude_sectors 参数整体替换该名单; 传空数组 = 关闭名称过滤 (成员数上限仍生效)。
 _DEFAULT_EXCLUDE_SECTORS = (
-    '融资融券', '转融券', '转债标的', '含可转债', '沪股通', '深股通',
-    'AH股', 'B股', 'GDR', 'MSCI', '富时罗素', '标普道琼斯',
-    '上证50', '上证180', '沪深300', '中证500', '中证800', '中证1000', '科创50',
-    '重仓', '证金持股', '汇金概念',
-    '预盈预增', '预亏预减', '昨日涨停', '昨日连板', '昨日触涨停', '昨日曾涨停',
-    '次新', 'ST板块', 'ST股', '破净', '壳资源', '股权激励', '员工持股', '并购重组',
+    "融资融券",
+    "转融券",
+    "转债标的",
+    "含可转债",
+    "沪股通",
+    "深股通",
+    "AH股",
+    "B股",
+    "GDR",
+    "MSCI",
+    "富时罗素",
+    "标普道琼斯",
+    "上证50",
+    "上证180",
+    "沪深300",
+    "中证500",
+    "中证800",
+    "中证1000",
+    "科创50",
+    "重仓",
+    "证金持股",
+    "汇金概念",
+    "预盈预增",
+    "预亏预减",
+    "昨日涨停",
+    "昨日连板",
+    "昨日触涨停",
+    "昨日曾涨停",
+    "次新",
+    "ST板块",
+    "ST股",
+    "破净",
+    "壳资源",
+    "股权激励",
+    "员工持股",
+    "并购重组",
 )
 # 自动活跃榜成员数上限: 成员数超过该值的板块不参与自动选取 (仍出现在 universe 与自定义清单)
 _MAX_AUTO_MEMBERS = 300
@@ -111,20 +144,28 @@ def _prev_daily_close(data_dir: Path, target_date: str) -> pl.DataFrame | None:
 
     与 api/ext_data._prev_daily_close 同口径 (服务层不依赖 api 层, 就地实现)。
     """
-    daily = data_dir / "kline_daily"
-    if not daily.exists():
-        return None
-    dates = sorted(
-        d.name[5:]
-        for d in daily.iterdir()
-        if d.is_dir() and d.name.startswith("date=") and (d / "part.parquet").is_file()
-    )
-    prevs = [d for d in dates if d < target_date]
-    if not prevs:
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is None:
         return None
     try:
-        df = pl.read_parquet(daily / f"date={prevs[-1]}" / "part.parquet", columns=["symbol", "close"])
-    except Exception:
+        dates = runtime.store.list_daily_dates("kline_daily")
+    except Exception as exc:  # noqa: BLE001 - 前收缺失时调用方退化到当日首根分钟
+        logger.warning("sector_rotation: 交易日枚举失败: %s", exc)
+        return None
+    prevs = [d.isoformat() for d in dates if d.isoformat() < target_date]
+    if not prevs:
+        return None
+    prev = date.fromisoformat(prevs[-1])
+    try:
+        df = runtime.store.read_daily(
+            "kline_daily",
+            start=prev,
+            end=prev,
+            columns=["symbol", "close"],
+        )
+    except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         return None
     return (
         df.with_columns(_bare().alias("_bare"))
@@ -141,17 +182,23 @@ def _minute_pcts(minute_dir: Path, target: str) -> tuple[pl.DataFrame | None, st
 
     amount 列缺失 (旧 schema) 时走精简读取, has_amount=False 由上层降级活跃度。
     """
-    path = minute_dir / f"date={target}" / "part.parquet"
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is None:
+        return None, "minute_schema", False
+    day = date.fromisoformat(target)
     try:
-        bars = pl.read_parquet(path, columns=["symbol", "datetime", "close", "amount"])
+        bars = runtime.store.read_minute(
+            "kline_minute",
+            start=datetime.combine(day, dt_time.min),
+            end=datetime.combine(day, dt_time.max),
+        )
+        # CK 表结构固定含 amount，兼容旧 parquet 的精简读取分支不再需要
         has_amount = True
-    except Exception:
-        try:
-            bars = pl.read_parquet(path, columns=["symbol", "datetime", "close"])
-            has_amount = False
-        except Exception as exc:
-            logger.warning("sector_rotation read minute partition failed: %s", exc)
-            return None, "minute_schema", False
+    except Exception as exc:  # noqa: BLE001 - 分钟不可读时返回原因由上层降级
+        logger.warning("sector_rotation read minute data failed: %s", exc)
+        return None, "minute_schema", False
     # close <= 0 / 非有限的分钟行无效: 作基准时 pct 为 inf, 作分子时是 -100% 假跌幅
     bars = bars.drop_nulls(subset=["datetime", "close"]).filter(
         pl.col("close").cast(pl.Float64).is_finite() & (pl.col("close") > 0)
@@ -161,13 +208,19 @@ def _minute_pcts(minute_dir: Path, target: str) -> tuple[pl.DataFrame | None, st
     bars = bars.with_columns(_bare().alias("_bare"))
 
     prev = _prev_daily_close(minute_dir.parent, target)
-    joined = bars.join(prev, on="_bare", how="left") if prev is not None else bars.with_columns(
-        pl.lit(None, dtype=pl.Float64).alias("prev_close")
+    joined = (
+        bars.join(prev, on="_bare", how="left")
+        if prev is not None
+        else bars.with_columns(pl.lit(None, dtype=pl.Float64).alias("prev_close"))
     )
-    refs = joined.group_by("_bare").agg(
-        pl.col("prev_close").first().alias("_prev"),
-        pl.col("close").sort_by("datetime").first().alias("_first"),
-    ).with_columns(pl.coalesce(["_prev", "_first"]).alias("_ref"))
+    refs = (
+        joined.group_by("_bare")
+        .agg(
+            pl.col("prev_close").first().alias("_prev"),
+            pl.col("close").sort_by("datetime").first().alias("_first"),
+        )
+        .with_columns(pl.coalesce(["_prev", "_first"]).alias("_ref"))
+    )
     n_prev = refs["_prev"].is_not_null().sum()
     basis = "prev_close" if n_prev == refs.height else ("first_close" if n_prev == 0 else "mixed")
     out = (
@@ -181,14 +234,15 @@ def _minute_pcts(minute_dir: Path, target: str) -> tuple[pl.DataFrame | None, st
     if dropped:
         logger.warning(
             "sector_rotation dropped %d minute rows outside ±%.0f%% (dirty closes)",
-            dropped, _PCT_PHYSICAL_BOUND * 100,
+            dropped,
+            _PCT_PHYSICAL_BOUND * 100,
         )
     if out.is_empty():
         return None, "minute_empty", has_amount
     return out, basis, has_amount
 
 
-def _load_sector_flow(data_dir: Path, flow_field: str) -> pl.DataFrame | None:
+def _load_sector_flow(data_dir: Path, flow_field: str) -> pl.DataFrame | None:  # noqa: C901 - C901: 分支为业务多阶段编排, 拆分会割裂上下文; 单测已覆盖
     """读取用户选择的资金流扩展列 → (_bare, _flow) 每标的一行; 不可用返回 None。
 
     flow_field 格式 "表id.列名"。读该扩展表最新分区 (snapshot 取 part.parquet,
@@ -202,7 +256,7 @@ def _load_sector_flow(data_dir: Path, flow_field: str) -> pl.DataFrame | None:
         return None
     try:
         config = ExtConfigStore(data_dir).get(config_id)
-    except Exception:
+    except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         return None
     if config is None:
         return None
@@ -218,7 +272,7 @@ def _load_sector_flow(data_dir: Path, flow_field: str) -> pl.DataFrame | None:
         return None
     try:
         df = pl.read_parquet(path)
-    except Exception:
+    except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         return None
     if df.is_empty() or column not in df.columns:
         return None
@@ -234,10 +288,12 @@ def _load_sector_flow(data_dir: Path, flow_field: str) -> pl.DataFrame | None:
     if use_col not in df.columns:
         return None
     out = (
-        df.select([
-            _bare(use_col).alias("_bare"),
-            pl.col(column).cast(pl.Float64, strict=False).alias("_flow"),
-        ])
+        df.select(
+            [
+                _bare(use_col).alias("_bare"),  # type: ignore[arg-type]
+                pl.col(column).cast(pl.Float64, strict=False).alias("_flow"),
+            ]
+        )
         .drop_nulls(subset=["_flow", "_bare"])
         .filter(pl.col("_flow").is_finite() & (pl.col("_flow") != 0.0))
         # 与 screener._load_ext_value_maps / ext_factors 同口径取每标的最后一行:
@@ -267,10 +323,7 @@ def _normalize_0_100(values: list[float | None]) -> list[float | None]:
     if len(valid) == 1 or max(valid) == min(valid):
         return [50.0 if v is not None else None for v in values]
     span = max(valid) - min(valid)
-    return [
-        (v - min(valid)) / span * 100.0 if v is not None else None
-        for v in values
-    ]
+    return [(v - min(valid)) / span * 100.0 if v is not None else None for v in values]
 
 
 def _auto_eligible(name: str, n_members: int, exclude_sectors: tuple[str, ...]) -> bool:
@@ -278,6 +331,11 @@ def _auto_eligible(name: str, n_members: int, exclude_sectors: tuple[str, ...]) 
     if n_members > _MAX_AUTO_MEMBERS:
         return False
     return not any(pattern in name for pattern in exclude_sectors)
+
+
+def _desc_key(value: float | None) -> tuple[int, float]:
+    """降序排序列的键: 有值优先 (True 在前), 其次按数值降序。"""
+    return (0 if value is None else 1, -(value or 0.0))
 
 
 def _rank_for_mode(
@@ -292,49 +350,111 @@ def _rank_for_mode(
 
     activity 量额缺失时退化综合分; flow 在扩展列不可用时退化综合分;
     pct/rank_change 的无值板块排最后; score 直接用 sectors 的既有排序。
+    所有维度都以板块名做次级键: 同分板块的顺序必须稳定 (热力图行序不能刷新一次
+    变一次), 聚合来源的字典顺序本身不稳定。
     """
     if sort_by == "activity":
         if has_amount and activity_map:
-            return [n for n, _ in sorted(activity_map.items(), key=lambda kv: kv[1], reverse=True)]
+            return [
+                name
+                for name, _ in sorted(
+                    activity_map.items(),
+                    key=lambda kv: (_desc_key(kv[1]), kv[0]),
+                )
+            ]
         return [item["name"] for item in sectors]
     if sort_by == "flow" and flow_available:
         return [
-            name for name, _ in sorted(
+            name
+            for name, _ in sorted(
                 ((item["name"], flow_by_member.get(item["name"])) for item in sectors),
-                key=lambda kv: (kv[1] is not None, kv[1] or 0.0),
-                reverse=True,
+                key=lambda kv: (_desc_key(kv[1]), kv[0]),
             )
         ]
     if sort_by == "pct":
         return [
-            item["name"] for item in sorted(
+            item["name"]
+            for item in sorted(
                 sectors,
-                key=lambda item: (item["pct_now"] is not None, item["pct_now"] or 0.0),
-                reverse=True,
+                key=lambda item: (_desc_key(item["pct_now"]), item["name"]),
             )
         ]
     if sort_by == "rank_change":
         return [
-            item["name"] for item in sorted(
+            item["name"]
+            for item in sorted(
                 sectors,
-                key=lambda item: (item["rank_change"] is not None, item["rank_change"] or 0),
-                reverse=True,
+                key=lambda item: (_desc_key(item["rank_change"]), item["name"]),
             )
         ]
     if sort_by == "momentum":
         # 近端动量 = 现累计涨幅 - 1h 前累计涨幅: 走强 (加速上涨) 在前, 走弱 (减速/回落) 在后;
         # 热力图按此排序时, 上下分界直接呈现资金从走弱板块流向走强板块的方向
         return [
-            item["name"] for item in sorted(
+            item["name"]
+            for item in sorted(
                 sectors,
                 key=lambda item: (
-                    item["pct_now"] is not None and item["pct_prev"] is not None,
-                    (item["pct_now"] or 0.0) - (item["pct_prev"] or 0.0),
+                    0 if (item["pct_now"] is None or item["pct_prev"] is None) else 1,
+                    _desc_key((item["pct_now"] or 0.0) - (item["pct_prev"] or 0.0)),
+                    item["name"],
                 ),
-                reverse=True,
             )
         ]
     return [item["name"] for item in sectors]
+
+
+def _normalize_rotation_params(
+    kind, flow_field, top, bucket_minutes, series_names, exclude_sectors, auto_rows, sort_by
+):
+    """统一校验板块维度参数并归一化展示配置。"""
+    if kind not in ("concept", "industry"):
+        raise ValueError(f"不支持的板块维度: {kind} (可选 concept/industry)")
+    if sort_by not in _SORT_MODES:
+        raise ValueError(f"不支持的排序维度: {sort_by} (可选 {_SORT_MODES})")
+    bucket_minutes = int(bucket_minutes)
+    if bucket_minutes not in _ALLOWED_BUCKETS:
+        raise ValueError(f"不支持的分钟桶: {bucket_minutes} (可选 {_ALLOWED_BUCKETS})")
+    top = max(5, min(100, int(top)))
+    flow_field = (flow_field or "").strip() or None
+    if series_names:
+        series_names = (
+            list(dict.fromkeys(str(n).strip() for n in series_names if str(n).strip()))[
+                :_MAX_SERIES_ROWS
+            ]
+            or None
+        )
+    if exclude_sectors is None:
+        exclude_effective: tuple[str, ...] = _DEFAULT_EXCLUDE_SECTORS
+    else:
+        exclude_effective = tuple(
+            dict.fromkeys(str(n).strip() for n in exclude_sectors if str(n).strip())
+        )[:_MAX_EXCLUDE_PARAM]
+    rows_limit = (
+        _DEFAULT_SERIES_ROWS if auto_rows is None else max(1, min(_MAX_SERIES_ROWS, int(auto_rows)))
+    )
+    return (
+        kind,
+        flow_field,
+        top,
+        bucket_minutes,
+        series_names,
+        exclude_effective,
+        rows_limit,
+        sort_by,
+    )
+
+
+def _cache_sector_result(cache_key, result) -> None:
+    """写入板块缓存并淘汰最旧条目，保留当前结果。"""
+    _cache[cache_key] = result
+    _cache_ts[cache_key] = time.monotonic()
+    while len(_cache) > _CACHE_MAX_ENTRIES:
+        oldest = min(_cache_ts, key=lambda k: _cache_ts.get(k, 0.0), default=None)
+        if oldest is None or oldest == cache_key:
+            break
+        _cache.pop(oldest, None)
+        _cache_ts.pop(oldest, None)
 
 
 def build_sector_rotation(
@@ -349,93 +469,60 @@ def build_sector_rotation(
     auto_rows: int | None = None,
     sort_by: str = "activity",
 ) -> dict:
-    """计算盘中板块切换走势 (概念/行业二选一)。
-
-    exclude_sectors: 自动活跃榜排除板块 (名称子串匹配); None = 使用内置属性板块
-    名单, [] = 清空名称过滤 (成员数上限仍生效)。仅影响自动选取, 自定义清单不过滤。
-    auto_rows: 自动模式展示行数, 缺省 10, 范围 [1, 20]。
-    sort_by: 自动榜排序维度 (activity/score/pct/rank_change/flow), 排除名单与
-    成员数上限对全部维度生效, 不足展示行数时回退不过滤。
-
-    返回结构:
-      status/date/basis/kind/flow_field/bucket_minutes/member_count/flow_available/
-      default_exclude_sectors: 内置排除名单 (供前端编辑器预填) /
-      max_auto_members: 自动活跃榜成员数上限 /
-      timeline: [{time, rotation, leader, leader_pct, market_pct,
-                  cross_up, cross_down}] /
-      cross_events: [{time, name, dir: "up"|"down", pct}] 0 轴穿越事件
-        (全市场板块, 最新在前, 封顶 120 条; dir=up 转强/down 转弱) /
-      sectors: [{name, pct_now, pct_prev, rank_now, rank_prev, rank_change,
-                 flow, score, n_members, n_members_with_bars}] 按 score 降序截 top 条 /
-      series: {buckets: [HH:MM], sectors: [展示板块名], matrix: [[各桶板块涨幅]]}
-        展示板块与分钟桶涨幅矩阵, 供前端热力图/走势线; 展示板块 = series_names
-        (自定义监控, ≤20, 不过滤) 或活跃榜 (sort_by 维度降序, 先剔除排除名单与
-        成员数超上限的板块, 不足展示行数时回退不过滤; momentum 维度对半取样:
-        前半=走强组, 后半=走弱组; N = auto_rows, 缺省 10); 某桶无该板块行情时为 null /
-      universe: [{name, pct_now, activity, n_members, n_members_with_bars, excluded}]
-        全部板块清单按活跃度降序 (自定义选择器的数据源, activity 为 None 排后,
-        永不剔除; excluded=True 表示被自动活跃榜过滤, 仅影响自动选取)
-    不可计算时返回 {status: "no_data"|"empty", reason, date?} (fail-closed, 不静默)。
-    """
-    if kind not in ("concept", "industry"):
-        raise ValueError(f"不支持的板块维度: {kind} (可选 concept/industry)")
-    if sort_by not in _SORT_MODES:
-        raise ValueError(f"不支持的排序维度: {sort_by} (可选 {_SORT_MODES})")
-    bucket_minutes = int(bucket_minutes)
-    if bucket_minutes not in _ALLOWED_BUCKETS:
-        raise ValueError(f"不支持的分钟桶: {bucket_minutes} (可选 {_ALLOWED_BUCKETS})")
-    top = max(5, min(100, int(top)))
-    flow_field = (flow_field or "").strip() or None
-    if series_names:
-        series_names = list(dict.fromkeys(str(n).strip() for n in series_names if str(n).strip()))[:_MAX_SERIES_ROWS] or None
-    if exclude_sectors is None:
-        exclude_effective: tuple[str, ...] = _DEFAULT_EXCLUDE_SECTORS
-    else:
-        # 显式入参 (含空数组) 整体替换内置名单; 空数组归一为 () = 关闭名称过滤
-        exclude_effective = tuple(dict.fromkeys(
-            str(n).strip() for n in exclude_sectors if str(n).strip()
-        ))[:_MAX_EXCLUDE_PARAM]
-    rows_limit = _DEFAULT_SERIES_ROWS if auto_rows is None else max(1, min(_MAX_SERIES_ROWS, int(auto_rows)))
+    """计算盘中板块切换走势；返回结构与参数语义见 REST 文档。"""
+    (
+        kind,
+        flow_field,
+        top,
+        bucket_minutes,
+        series_names,
+        exclude_effective,
+        rows_limit,
+        sort_by,
+    ) = _normalize_rotation_params(
+        kind, flow_field, top, bucket_minutes, series_names, exclude_sectors, auto_rows, sort_by
+    )
 
     data_dir: Path = repo.store.data_dir
     cache_key = (
-        kind, flow_field or "", top, bucket_minutes, tuple(series_names or ()),
-        exclude_effective, rows_limit, sort_by,
+        kind,
+        flow_field or "",
+        top,
+        bucket_minutes,
+        tuple(series_names or ()),
+        exclude_effective,
+        rows_limit,
+        sort_by,
     )
     now = time.monotonic()
     hit = _cache.get(cache_key)
     if hit is not None and (now - _cache_ts.get(cache_key, 0.0)) < _CACHE_TTL:
         return hit
 
-    result = _compute(repo, data_dir, kind, flow_field, top, bucket_minutes, series_names, exclude_effective, rows_limit, sort_by)
-    _cache[cache_key] = result
-    _cache_ts[cache_key] = time.monotonic()
-    while len(_cache) > _CACHE_MAX_ENTRIES:
-        oldest = min(_cache_ts, key=lambda k: _cache_ts.get(k, 0.0), default=None)
-        if oldest is None or oldest == cache_key:
-            break
-        _cache.pop(oldest, None)
-        _cache_ts.pop(oldest, None)
+    result = _compute(
+        repo,
+        data_dir,
+        kind,
+        flow_field,
+        top,
+        bucket_minutes,
+        series_names,
+        exclude_effective,
+        rows_limit,
+        sort_by,
+    )
+    _cache_sector_result(cache_key, result)
     return result
 
 
-def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, bucket_minutes: int, series_names: list[str] | None, exclude_sectors: tuple[str, ...], auto_rows: int, sort_by: str) -> dict:
-    minute_dir = data_dir / "kline_minute"
-    target = _latest_minute_partition(minute_dir)
-    if not target:
-        return {"status": "no_data", "reason": "minute_missing", "kind": kind}
+# ---- _compute 分段 helper (与原内联代码语义等价) ----
 
-    map_df, member_count = _load_concept_map_df(repo, kind)
-    if map_df.is_empty() or member_count == 0:
-        return {"status": "no_data", "reason": "members_missing", "date": target, "kind": kind}
 
-    pcts, basis, has_amount = _minute_pcts(minute_dir, target)
-    if pcts is None:
-        return {"status": "no_data", "reason": basis, "date": target, "kind": kind}
-
-    # 桶化 + 板块聚合: 先每股桶内均值 (成交额按桶合计), 再板块等权均值 (停牌/缺分钟不放大权重)
+def _sector_buckets(pcts, map_df, kind, bucket_minutes, has_amount):
     member_df = map_df.rename({"_sym_up": "_bare", kind: "_member"})
-    buckets = pcts.with_columns(pl.col("datetime").dt.truncate(f"{bucket_minutes}m").alias("_bucket"))
+    buckets = pcts.with_columns(
+        pl.col("datetime").dt.truncate(f"{bucket_minutes}m").alias("_bucket")
+    )
     stock_agg = [pl.col("_pct").mean().alias("_sym_pct")]
     if has_amount:
         stock_agg.append(pl.col("amount").sum().alias("_sym_amt"))
@@ -447,19 +534,15 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
         .agg(
             pl.col("_sym_pct").mean().alias("_spct"),
             pl.len().alias("_n"),
-            *( [pl.col("_sym_amt").sum().alias("_amt")] if has_amount else [] ),
+            *([pl.col("_sym_amt").sum().alias("_amt")] if has_amount else []),
         )
         .sort(["_bucket", "_spct"], descending=[False, True])
     )
-    if by_sector.is_empty():
-        return {"status": "empty", "reason": "no_member_bars", "date": target, "kind": kind}
+    return by_sector, member_df, buckets
 
-    market = (
-        buckets.group_by("_bucket").agg(pl.col("_pct").mean().alias("_mpct")).sort("_bucket")
-    )
 
-    # 每桶领涨板块 + top 集合 (供切换走势与排名对照) + 0 轴穿越统计 (涨跌切换:
-    # 板块涨幅由负转正 = 转强/上穿, 由正转负 = 转弱/下穿; ≥0 计为多方)
+def _sector_details(by_sector):
+    # 每桶领涨板块 + top 集合 + 0 轴穿越统计; ≥0 计为多方
     per_bucket: list[dict[str, Any]] = []
     cross_events: list[dict[str, Any]] = []
     prev_sign: dict[str, int] = {}
@@ -471,47 +554,61 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
             sign = 1 if pct >= 0 else -1
             prev = prev_sign.get(name)
             if prev is not None and prev != sign:
-                event = {"time": bucket.strftime("%H:%M"), "name": name, "dir": "up" if sign > 0 else "down", "pct": _r4(pct)}
+                event = {
+                    "time": bucket.strftime("%H:%M"),
+                    "name": name,
+                    "dir": "up" if sign > 0 else "down",
+                    "pct": _r4(pct),
+                }
                 if sign > 0:
                     cross_up += 1
                 else:
                     cross_down += 1
                 cross_events.append(event)
             prev_sign[name] = sign
-        per_bucket.append({
-            "bucket": bucket,
-            "names": names,
-            "pct": pcts,
-            "top_set": set(names[:_TOP_OVERLAP]),
-            "leader": names[0],
-            "leader_pct": frame["_spct"][0],
-            "cross_up": cross_up,
-            "cross_down": cross_down,
-        })
+        per_bucket.append(
+            {
+                "bucket": bucket,
+                "names": names,
+                "pct": pcts,
+                "top_set": set(names[:_TOP_OVERLAP]),
+                "leader": names[0],
+                "leader_pct": frame["_spct"][0],
+                "cross_up": cross_up,
+                "cross_down": cross_down,
+            }
+        )
     per_bucket.sort(key=lambda item: item["bucket"])
-    market_map = {row["_bucket"]: row["_mpct"] for row in market.iter_rows(named=True)}
+    return per_bucket, cross_events
 
-    # 对照窗口: 距当前桶约 _RANK_WINDOW_MIN 个交易分钟的最近历史桶 (午休不计,
-    # 与活跃度窗口按桶数回看同口径; 按墙钟算时 13:00~13:59 会拿 11:30 桶作「1 小时前」)
-    def _reference_index(index: int) -> int | None:
-        current = trading_minutes_elapsed_from_dt(per_bucket[index]["bucket"])
-        for back in range(index - 1, -1, -1):
-            delta_min = current - trading_minutes_elapsed_from_dt(per_bucket[back]["bucket"])
-            if delta_min >= _RANK_WINDOW_MIN:
-                return back
-        return 0 if index > 0 else None  # 不足一小时: 与最早桶比; 首桶无对照
 
+def _reference_index(per_bucket, index: int) -> int | None:
+    current = trading_minutes_elapsed_from_dt(per_bucket[index]["bucket"])
+    for back in range(index - 1, -1, -1):
+        delta_min = current - trading_minutes_elapsed_from_dt(per_bucket[back]["bucket"])
+        if delta_min >= _RANK_WINDOW_MIN:
+            return back
+    return 0 if index > 0 else None  # 不足一小时: 与最早桶比; 首桶无对照
+
+
+def _sector_ranks(per_bucket, ref_index):
     rank_now = {name: i + 1 for i, name in enumerate(per_bucket[-1]["names"])}
-    ref_index = _reference_index(len(per_bucket) - 1)
     if ref_index is not None:
         rank_prev = {name: i + 1 for i, name in enumerate(per_bucket[ref_index]["names"])}
-        pct_prev_map = dict(zip(per_bucket[ref_index]["names"], per_bucket[ref_index]["pct"], strict=True))
+        pct_prev_map = dict(
+            zip(per_bucket[ref_index]["names"], per_bucket[ref_index]["pct"], strict=True)
+        )
     else:
         rank_prev, pct_prev_map = {}, {}
+    return rank_now, rank_prev, pct_prev_map
 
+
+def _sector_timeline(per_bucket, buckets):
+    market = buckets.group_by("_bucket").agg(pl.col("_pct").mean().alias("_mpct")).sort("_bucket")
+    market_map = {row["_bucket"]: row["_mpct"] for row in market.iter_rows(named=True)}
     timeline = []
     for index, item in enumerate(per_bucket):
-        back = _reference_index(index)
+        back = _reference_index(per_bucket, index)
         if back is not None:
             # 除数取梯队宽与两侧实际板块数的较小值: 板块总数不足 10 时
             # top 集合恒为全集, 按 10 归一会稀释换血信号
@@ -519,17 +616,23 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
             overlap = len(item["top_set"] & per_bucket[back]["top_set"]) / width if width else 1.0
         else:
             overlap = 1.0
-        timeline.append({
-            "time": item["bucket"].strftime("%H:%M"),
-            "rotation": round(1.0 - min(1.0, max(0.0, overlap)), 4),
-            "leader": item["leader"],
-            "leader_pct": _r4(item["leader_pct"]),
-            "market_pct": _r4(market_map.get(item["bucket"])),
-            "cross_up": item["cross_up"],
-            "cross_down": item["cross_down"],
-        })
+        timeline.append(
+            {
+                "time": item["bucket"].strftime("%H:%M"),
+                "rotation": round(1.0 - min(1.0, max(0.0, overlap)), 4),
+                "leader": item["leader"],
+                "leader_pct": _r4(item["leader_pct"]),
+                "market_pct": _r4(market_map.get(item["bucket"])),
+                "cross_up": item["cross_up"],
+                "cross_down": item["cross_down"],
+            }
+        )
+    return timeline
 
-    # 资金流 (扩展数据, 用户选择): 板块 = 成分股数值合计
+
+def _sector_flow_activity(
+    data_dir, flow_field, member_df, by_sector, per_bucket, bucket_minutes, has_amount
+):
     flow_by_member: dict[str, float] = {}
     flow_available = False
     if flow_field:
@@ -553,7 +656,8 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
     n_with_bars = {
         row["_member"]: row["_n"]
         for row in by_sector.filter(pl.col("_bucket") == per_bucket[-1]["bucket"])
-        .select(["_member", "_n"]).iter_rows(named=True)
+        .select(["_member", "_n"])
+        .iter_rows(named=True)
     }
     # 活跃度: 最近 _ACTIVITY_WINDOW_MIN 分钟成分股成交额合计 (量额列缺失时不可用)
     activity_map: dict[str, float] = {}
@@ -567,38 +671,68 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
             .agg(pl.col("_amt").sum().alias("_amt"))
             .iter_rows(named=True)
         }
+    return flow_by_member, flow_available, members_count_by_sector, n_with_bars, activity_map
+
+
+def _sector_scores(
+    per_bucket,
+    flow_by_member,
+    flow_available,
+    members_count_by_sector,
+    n_with_bars,
+    rank_now,
+    rank_prev,
+    pct_prev_map,
+):
     all_names = sorted({name for item in per_bucket for name in item["names"]})
     names = per_bucket[-1]["names"]
     pcts_now = dict(zip(names, per_bucket[-1]["pct"], strict=True))
     pct_values = [pcts_now.get(name) for name in names]
     pct_norm = _normalize_0_100(pct_values)
-    flow_values = [flow_by_member.get(name) for name in names] if flow_available else [None] * len(names)
-    flow_norm = _normalize_0_100(flow_values) if flow_available else [None] * len(names)
+    flow_values = (
+        [flow_by_member.get(name) for name in names] if flow_available else [None] * len(names)
+    )
+    flow_norm = _normalize_0_100(flow_values) if flow_available else [None] * len(names)  # type: ignore[arg-type]
 
     sectors = []
     for i, name in enumerate(names):
         score = (
-            0.5 * pct_norm[i] + 0.5 * flow_norm[i]
+            0.5 * pct_norm[i] + 0.5 * flow_norm[i]  # type: ignore[operator]
             if flow_available and flow_norm[i] is not None
             else pct_norm[i]
         )
-        sectors.append({
-            "name": name,
-            "pct_now": _r4(pcts_now.get(name)),
-            "pct_prev": _r4(pct_prev_map.get(name)),
-            "rank_now": rank_now.get(name),
-            "rank_prev": rank_prev.get(name),
-            "rank_change": (
-                rank_prev[name] - rank_now[name]
-                if name in rank_prev and name in rank_now else None
-            ),
-            "flow": _r4(flow_by_member.get(name)) if flow_available else None,
-            "score": round(score, 2) if score is not None else None,
-            "n_members": members_count_by_sector.get(name, 0),
-            "n_members_with_bars": n_with_bars.get(name, 0),
-        })
-    sectors.sort(key=lambda item: (item["score"] is not None, item["score"] or 0.0), reverse=True)
+        sectors.append(
+            {
+                "name": name,
+                "pct_now": _r4(pcts_now.get(name)),
+                "pct_prev": _r4(pct_prev_map.get(name)),
+                "rank_now": rank_now.get(name),
+                "rank_prev": rank_prev.get(name),
+                "rank_change": (
+                    rank_prev[name] - rank_now[name]
+                    if name in rank_prev and name in rank_now
+                    else None
+                ),
+                "flow": _r4(flow_by_member.get(name)) if flow_available else None,
+                "score": round(score, 2) if score is not None else None,
+                "n_members": members_count_by_sector.get(name, 0),
+                "n_members_with_bars": n_with_bars.get(name, 0),
+            }
+        )
+    # 同分板块按名称定序: 聚合顺序不稳定, 不加次级键会让榜单/热力图行序刷新一次变一次
+    sectors.sort(key=lambda item: (_desc_key(item["score"]), item["name"]))
+    return sectors, all_names, pcts_now
 
+
+def _sector_universe(
+    all_names,
+    pcts_now,
+    activity_map,
+    has_amount,
+    members_count_by_sector,
+    n_with_bars,
+    exclude_sectors,
+):
     # 全部板块清单 (自定义选择器数据源), 按活跃度降序, 无活跃度数据排后
     universe = [
         {
@@ -607,12 +741,30 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
             "activity": _r4(activity_map.get(name)) if has_amount else None,
             "n_members": members_count_by_sector.get(name, 0),
             "n_members_with_bars": n_with_bars.get(name, 0),
-            "excluded": not _auto_eligible(name, members_count_by_sector.get(name, 0), exclude_sectors),
+            "excluded": not _auto_eligible(
+                name, members_count_by_sector.get(name, 0), exclude_sectors
+            ),
         }
         for name in all_names
     ]
-    universe.sort(key=lambda item: (item["activity"] is not None, item["activity"] or 0.0), reverse=True)
+    universe.sort(key=lambda item: (_desc_key(item["activity"]), item["name"]))
+    return universe
 
+
+def _sector_series(
+    per_bucket,
+    series_names,
+    sectors,
+    activity_map,
+    has_amount,
+    flow_by_member,
+    flow_available,
+    all_names,
+    members_count_by_sector,
+    exclude_sectors,
+    auto_rows,
+    sort_by,
+):
     # 展示板块与分钟桶涨幅矩阵 (前端热力图/走势线共用): 自定义监控板块 (≤20,
     # 剔除当日无行情的, 不过滤) 或活跃榜 (sort_by 维度降序, 先剔除排除名单与
     # 超成员数上限的板块, 不足展示行数时回退不过滤)
@@ -620,9 +772,12 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
         known = set(all_names)
         display_names = [n for n in series_names if n in known]
     else:
-        ranked = _rank_for_mode(sort_by, sectors, activity_map, has_amount, flow_by_member, flow_available)
+        ranked = _rank_for_mode(
+            sort_by, sectors, activity_map, has_amount, flow_by_member, flow_available
+        )
         eligible = [
-            n for n in ranked
+            n
+            for n in ranked
             if _auto_eligible(n, members_count_by_sector.get(n, 0), exclude_sectors)
         ]
         if sort_by == "momentum" and len(eligible) > auto_rows:
@@ -641,22 +796,105 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
         "sectors": display_names,
         "matrix": [[_r4(m.get(name)) for m in pct_maps] for name in display_names],
     }
+    return display_names, series
 
+
+def _sector_payload(**kw) -> dict:
     return {
         "status": "ok",
-        "date": target,
-        "kind": kind,
-        "basis": basis,
-        "flow_field": flow_field,
-        "flow_available": flow_available,
-        "bucket_minutes": bucket_minutes,
-        "member_count": member_count,
+        "date": kw["target"],
+        "kind": kw["kind"],
+        "basis": kw["basis"],
+        "flow_field": kw["flow_field"],
+        "flow_available": kw["flow_available"],
+        "bucket_minutes": kw["bucket_minutes"],
+        "member_count": kw["member_count"],
         "default_exclude_sectors": list(_DEFAULT_EXCLUDE_SECTORS),
         "max_auto_members": _MAX_AUTO_MEMBERS,
-        "as_of": per_bucket[-1]["bucket"].strftime("%H:%M"),
-        "timeline": timeline,
-        "cross_events": list(reversed(cross_events[-120:])),
-        "sectors": sectors[:top],
-        "series": series,
-        "universe": universe,
+        "as_of": kw["per_bucket"][-1]["bucket"].strftime("%H:%M"),
+        "timeline": kw["timeline"],
+        "cross_events": list(reversed(kw["cross_events"][-120:])),
+        "sectors": kw["sectors"][: kw["top"]],
+        "series": kw["series"],
+        "universe": kw["universe"],
     }
+
+
+def _compute(
+    repo,
+    data_dir: Path,
+    kind: str,
+    flow_field: str | None,
+    top: int,
+    bucket_minutes: int,
+    series_names: list[str] | None,
+    exclude_sectors: tuple[str, ...],
+    auto_rows: int,
+    sort_by: str,
+) -> dict:
+    minute_dir = data_dir / "kline_minute"
+    target = _latest_minute_partition(minute_dir)
+    if not target:
+        return {"status": "no_data", "reason": "minute_missing", "kind": kind}
+
+    map_df, member_count = _load_concept_map_df(repo, kind)
+    if map_df.is_empty() or member_count == 0:
+        return {"status": "no_data", "reason": "members_missing", "date": target, "kind": kind}
+
+    pcts, basis, has_amount = _minute_pcts(minute_dir, target)
+    if pcts is None:
+        return {"status": "no_data", "reason": basis, "date": target, "kind": kind}
+
+    # 桶化 + 板块聚合: 先每股桶内均值 (成交额按桶合计), 再板块等权均值 (停牌/缺分钟不放大权重)
+    by_sector, member_df, buckets = _sector_buckets(pcts, map_df, kind, bucket_minutes, has_amount)
+    if by_sector.is_empty():
+        return {"status": "empty", "reason": "no_member_bars", "date": target, "kind": kind}
+
+    # 每桶领涨板块 + top 集合 (供切换走势与排名对照) + 0 轴穿越统计
+    per_bucket, cross_events = _sector_details(by_sector)
+
+    # 对照窗口: 距当前桶约 _RANK_WINDOW_MIN 个交易分钟的最近历史桶 (午休不计, 按墙钟 13:xx 会拿 11:30 桶)
+    ref_index = _reference_index(per_bucket, len(per_bucket) - 1)
+    rank_now, rank_prev, pct_prev_map = _sector_ranks(per_bucket, ref_index)
+    timeline = _sector_timeline(per_bucket, buckets)
+
+    flow_by_member, flow_available, members_count_by_sector, n_with_bars, activity_map = (
+        _sector_flow_activity(
+            data_dir, flow_field, member_df, by_sector, per_bucket, bucket_minutes, has_amount
+        )
+    )
+    sectors, all_names, pcts_now = _sector_scores(
+        per_bucket,
+        flow_by_member,
+        flow_available,
+        members_count_by_sector,
+        n_with_bars,
+        rank_now,
+        rank_prev,
+        pct_prev_map,
+    )
+    universe = _sector_universe(
+        all_names,
+        pcts_now,
+        activity_map,
+        has_amount,
+        members_count_by_sector,
+        n_with_bars,
+        exclude_sectors,
+    )
+    _, series = _sector_series(
+        per_bucket,
+        series_names,
+        sectors,
+        activity_map,
+        has_amount,
+        flow_by_member,
+        flow_available,
+        all_names,
+        members_count_by_sector,
+        exclude_sectors,
+        auto_rows,
+        sort_by,
+    )
+
+    return _sector_payload(**locals())

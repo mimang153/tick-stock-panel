@@ -12,6 +12,7 @@
 性能: 全量回填只窄扫 enriched 的 4 列并先过滤连板 >=1(全历史 ~10 万行),
 join 概念映射后 group_by, 峰值内存 <100MB。
 """
+
 from __future__ import annotations
 
 import logging
@@ -28,14 +29,13 @@ from app.services.rps_rotation import _load_concept_map_df
 logger = logging.getLogger(__name__)
 
 MEMBERSHIP_NOTE = (
-    "概念成分为当前快照回看历史(本地自 2026-07 起留存, 无历史版本), "
-    "早年主线存在归属漂移, 越近越准"
+    "概念成分为当前快照回看历史(本地自 2026-07 起留存, 无历史版本), 早年主线存在归属漂移, 越近越准"
 )
 
 MAINLINE_DIR = "mainline_history"
-_TOP_PER_DAY = 30          # 每日持久化的主线数(按分数截断)
-_INDUSTRY_LEVEL = 2        # 行业主线取前两级(如 计算机-软件开发)
-_MIN_LIMIT_UP = 3          # 单概念当日最少涨停家数(低于此不参与排名)
+_TOP_PER_DAY = 30  # 每日持久化的主线数(按分数截断)
+_INDUSTRY_LEVEL = 2  # 行业主线取前两级(如 计算机-软件开发)
+_MIN_LIMIT_UP = 3  # 单概念当日最少涨停家数(低于此不参与排名)
 
 # 主线分权重: 概念内涨停家数 / 最高连板 / 梯队档位数 / 二板以上家数
 _SCORE_WEIGHTS = {
@@ -63,7 +63,7 @@ def _resolve_filter_config(filter_cfg: dict | None) -> dict:
             "max_members": int(cfg["max_members"]),
             "blacklist": set(cfg["blacklist"]),
         }
-    except Exception:
+    except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         return {"min_members": 4, "max_members": 600, "blacklist": set()}
 
 
@@ -88,28 +88,44 @@ def load_risk_warning_symbols(data_dir: Path) -> frozenset[str]:
     from app.price_limits import polars_is_risk_warning_name
 
     syms: frozenset[str] = frozenset()
-    inst_dir = data_dir / "instruments"
-    if inst_dir.exists():
-        try:
-            df = pl.read_parquet(inst_dir / "**" / "*.parquet").select(["symbol", "name"])
-            st = df.filter(polars_is_risk_warning_name(pl.col("name")))
-            syms = frozenset(s.upper() for s in st["symbol"].to_list())
-        except Exception as e:
-            logger.warning("load risk-warning symbols failed: %s", e)
+    try:
+        from app.services.instrument_sync import load_instruments
+
+        df = load_instruments().select(["symbol", "name"])
+        st = df.filter(polars_is_risk_warning_name(pl.col("name")))
+        syms = frozenset(s.upper() for s in st["symbol"].to_list())
+    except Exception as e:  # noqa: BLE001 - ST 名单不可用时按无 ST 处理
+        logger.warning("load risk-warning symbols failed: %s", e)
     _ST_SYMBOLS_CACHE = (now, syms)
     return syms
 
 
+def _mainline_store():
+    """派生结果缓存的 CK 门面; 未初始化返回 None (离线/单测回退本地)。"""
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    return None if runtime is None else runtime.store
+
+
 def load_mainline_history(data_dir: Path, kind: str = "concept") -> pl.DataFrame:
     """读取主线时序(全部 kind), 不存在返回空 DataFrame。"""
-    p = mainline_path(data_dir)
-    if not p.exists():
-        return pl.DataFrame()
-    try:
-        df = pl.read_parquet(p)
-    except Exception as e:
-        logger.warning("load_mainline_history failed: %s", e)
-        return pl.DataFrame()
+    store = _mainline_store()
+    if store is not None:
+        try:
+            df = store.read_mainline()
+        except Exception as e:  # noqa: BLE001 - 已有日志, CK 失败返回空帧
+            logger.warning("load_mainline_history (CK) failed: %s", e)
+            return pl.DataFrame()
+    else:
+        p = mainline_path(data_dir)
+        if not p.exists():
+            return pl.DataFrame()
+        try:
+            df = pl.read_parquet(p)
+        except Exception as e:  # noqa: BLE001 - 已有日志, 读失败返回空帧
+            logger.warning("load_mainline_history failed: %s", e)
+            return pl.DataFrame()
     if df.is_empty() or "kind" not in df.columns:
         return df
     return df.filter(pl.col("kind") == kind)
@@ -122,10 +138,143 @@ def _industry_member(member: str, kind: str) -> str:
     return "-".join(member.split("-")[:_INDUSTRY_LEVEL])
 
 
-def compute_mainline_range(repo, data_dir: Path, start: date, end: date,
-                           kind: str = "concept",
-                           filter_cfg: dict | None = None,
-                           exclude_st: bool | None = None) -> pl.DataFrame:
+# ---- compute_mainline_range 分段 helper (与原内联代码语义等价) ----
+
+
+def _filter_mainline_map(map_df, kind, cfg):
+    if cfg["min_members"] > 1 or cfg["max_members"] < 5000 or cfg["blacklist"]:
+        member_counts = map_df.group_by(kind).len().rename({"len": "_members"})
+        member_counts = member_counts.filter(
+            pl.col("_members").ge(cfg["min_members"])
+            & pl.col("_members").le(cfg["max_members"])
+            & ~pl.col(kind).is_in(sorted(cfg["blacklist"]))
+        )
+        allowed = member_counts.select(kind)
+        map_df = map_df.join(allowed, on=kind, how="semi")
+        if map_df.is_empty():
+            return None
+    return map_df
+
+
+def _mainline_limit_rows(data_dir, start, end, exclude_st):
+    from app.storage.runtime import require_storage
+
+    limit_rows = (
+        require_storage()
+        .store.read_daily(
+            "kline_daily_enriched",
+            start=start,
+            end=end,
+            columns=["date", "symbol", "consecutive_limit_ups", "amount"],
+        )
+        .filter(pl.col("consecutive_limit_ups") >= 1)
+    )
+    if limit_rows.is_empty():
+        return None
+
+    limit_rows = limit_rows.with_columns(pl.col("symbol").str.to_uppercase().alias("_sym_up"))
+
+    # 剔除风险警示股: ST 板块的涨停生态(主板曾 5% 便宜板)不代表题材主线。
+    if exclude_st is None:
+        try:
+            from app.services import preferences
+
+            exclude_st = preferences.get_sentiment_exclude_st()
+        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+            exclude_st = True
+    if exclude_st:
+        st_syms = load_risk_warning_symbols(data_dir)
+        if st_syms:
+            limit_rows = limit_rows.filter(~pl.col("_sym_up").is_in(sorted(st_syms)))
+    return limit_rows
+
+
+def _mainline_agg(joined, kind):
+    joined = joined.with_columns(
+        pl.col(kind)
+        .map_elements(
+            lambda m: _industry_member(str(m), kind),
+            return_dtype=pl.Utf8,
+        )
+        .alias("member")
+    )
+    return joined.group_by(["date", "member"]).agg(
+        pl.len().alias("limit_up_count"),
+        (pl.col("consecutive_limit_ups") >= 2).sum().alias("ge2_count"),
+        pl.col("consecutive_limit_ups").max().alias("max_boards"),
+        pl.col("consecutive_limit_ups").sum().alias("boards_sum"),
+        pl.col("consecutive_limit_ups")
+        .filter(pl.col("consecutive_limit_ups") >= 2)
+        .n_unique()
+        .alias("rungs_filled"),
+        pl.col("symbol")
+        .sort_by(
+            pl.col("consecutive_limit_ups"),
+            pl.col("amount"),
+            descending=[True, True],
+        )
+        .first()
+        .alias("leader_symbol"),
+    )
+
+
+def _mainline_score(agg):
+    # 截面 rank 归一(0-1) → 加权主线分(0-100)。分母 max(n-1,1) 保证单概念日不除零。
+    agg = agg.filter(pl.col("limit_up_count") >= _MIN_LIMIT_UP)
+    norm_exprs = []
+    for col in _SCORE_WEIGHTS:
+        norm_exprs.append(  # noqa: PERF401 - PERF401: 循环内含多行处理/异常, 改写推导式损可读性
+            (
+                (pl.col(col).rank(method="average") - 1.0)
+                / pl.max_horizontal(pl.len().over("date") - 1, 1)
+            )
+            .over("date")
+            .alias(f"_{col}_r")
+        )
+    agg = agg.with_columns(norm_exprs)
+    agg = agg.with_columns(
+        (100.0 * sum(_SCORE_WEIGHTS[col] * pl.col(f"_{col}_r") for col in _SCORE_WEIGHTS)).alias(
+            "score"
+        )
+    )
+    return agg.with_columns(
+        pl.col("score").rank(method="ordinal", descending=True).over("date").alias("rank")
+    )
+
+
+def _mainline_result(agg, kind):
+    return (
+        agg.filter(pl.col("rank") <= _TOP_PER_DAY)
+        .drop([f"_{col}_r" for col in _SCORE_WEIGHTS])
+        .with_columns(pl.lit(kind).alias("kind"))
+        .select(
+            [
+                "date",
+                "kind",
+                "member",
+                "limit_up_count",
+                "ge2_count",
+                "max_boards",
+                "boards_sum",
+                "rungs_filled",
+                "leader_symbol",
+                "score",
+                "rank",
+            ]
+        )
+        .sort(["date", "rank"])
+    )
+
+
+def compute_mainline_range(
+    repo,
+    data_dir: Path,
+    start: date,
+    end: date,
+    kind: str = "concept",
+    filter_cfg: dict | None = None,
+    exclude_st: bool | None = None,
+) -> pl.DataFrame:
     """计算 [start, end] 每日主线排行(按 _SCORE_WEIGHTS 加权截面分)。
 
     filter_cfg: {"min_members", "max_members", "blacklist"}; None 时读用户偏好。
@@ -149,113 +298,36 @@ def compute_mainline_range(repo, data_dir: Path, start: date, end: date,
         return pl.DataFrame()
 
     cfg = _resolve_filter_config(filter_cfg)
-    if cfg["min_members"] > 1 or cfg["max_members"] < 5000 or cfg["blacklist"]:
-        member_counts = map_df.group_by(kind).len().rename({"len": "_members"})
-        member_counts = member_counts.filter(
-            pl.col("_members").ge(cfg["min_members"])
-            & pl.col("_members").le(cfg["max_members"])
-            & ~pl.col(kind).is_in(sorted(cfg["blacklist"]))
-        )
-        allowed = member_counts.select(kind)
-        map_df = map_df.join(allowed, on=kind, how="semi")
-        if map_df.is_empty():
-            return pl.DataFrame()
-
-    limit_rows = (
-        pl.scan_parquet(enriched_dir / "**" / "*.parquet")
-        .select(["date", "symbol", "consecutive_limit_ups", "amount"])
-        .filter(
-            (pl.col("date") >= start) & (pl.col("date") <= end)
-            & (pl.col("consecutive_limit_ups") >= 1)
-        )
-        .collect()
-    )
-    if limit_rows.is_empty():
+    map_df = _filter_mainline_map(map_df, kind, cfg)
+    if map_df is None:
         return pl.DataFrame()
 
-    limit_rows = limit_rows.with_columns(pl.col("symbol").str.to_uppercase().alias("_sym_up"))
-
-    # 剔除风险警示股: ST 板块的涨停生态(主板曾 5% 便宜板)不代表题材主线。
-    if exclude_st is None:
-        try:
-            from app.services import preferences
-            exclude_st = preferences.get_sentiment_exclude_st()
-        except Exception:
-            exclude_st = True
-    if exclude_st:
-        st_syms = load_risk_warning_symbols(repo.store.data_dir)
-        if st_syms:
-            limit_rows = limit_rows.filter(~pl.col("_sym_up").is_in(sorted(st_syms)))
+    limit_rows = _mainline_limit_rows(repo.store.data_dir, start, end, exclude_st)
+    if limit_rows is None:
+        return pl.DataFrame()
 
     joined = limit_rows.join(map_df, on="_sym_up", how="inner")
     if joined.is_empty():
         return pl.DataFrame()
-    joined = joined.with_columns(
-        pl.col(kind).map_elements(
-            lambda m: _industry_member(str(m), kind),
-            return_dtype=pl.Utf8,
-        ).alias("member")
-    )
-
-    agg = (
-        joined.group_by(["date", "member"])
-        .agg(
-            pl.len().alias("limit_up_count"),
-            (pl.col("consecutive_limit_ups") >= 2).sum().alias("ge2_count"),
-            pl.col("consecutive_limit_ups").max().alias("max_boards"),
-            pl.col("consecutive_limit_ups").sum().alias("boards_sum"),
-            pl.col("consecutive_limit_ups")
-              .filter(pl.col("consecutive_limit_ups") >= 2)
-              .n_unique()
-              .alias("rungs_filled"),
-            pl.col("symbol")
-              .sort_by(
-                  pl.col("consecutive_limit_ups"), pl.col("amount"),
-                  descending=[True, True],
-              )
-              .first()
-              .alias("leader_symbol"),
-        )
-    )
-
-    # 截面 rank 归一(0-1) → 加权主线分(0-100)。分母 max(n-1,1) 保证单概念日不除零。
-    agg = agg.filter(pl.col("limit_up_count") >= _MIN_LIMIT_UP)
-    norm_exprs = []
-    for col in _SCORE_WEIGHTS:
-        norm_exprs.append(
-            ((pl.col(col).rank(method="average") - 1.0)
-             / pl.max_horizontal(pl.len().over("date") - 1, 1)).over("date").alias(f"_{col}_r")
-        )
-    agg = agg.with_columns(norm_exprs)
-    agg = agg.with_columns(
-        (
-            100.0 * sum(
-                _SCORE_WEIGHTS[col] * pl.col(f"_{col}_r") for col in _SCORE_WEIGHTS
-            )
-        ).alias("score")
-    )
-    agg = agg.with_columns(
-        pl.col("score").rank(method="ordinal", descending=True).over("date").alias("rank")
-    )
-    result = (
-        agg.filter(pl.col("rank") <= _TOP_PER_DAY)
-        .drop([f"_{col}_r" for col in _SCORE_WEIGHTS])
-        .with_columns(pl.lit(kind).alias("kind"))
-        .select([
-            "date", "kind", "member", "limit_up_count", "ge2_count",
-            "max_boards", "boards_sum", "rungs_filled", "leader_symbol",
-            "score", "rank",
-        ])
-        .sort(["date", "rank"])
-    )
-    return result
+    agg = _mainline_agg(joined, kind)
+    return _mainline_result(_mainline_score(agg), kind)
 
 
-def replace_mainline_range(data_dir: Path, start: date, end: date, kind: str, new_rows: pl.DataFrame) -> None:
+def replace_mainline_range(
+    data_dir: Path, start: date, end: date, kind: str, new_rows: pl.DataFrame
+) -> None:
     """历史修正按范围替换: 新结果为空时, 也要移除该范围旧主线。"""
+    store = _mainline_store()
+    if store is not None:
+        store.replace_mainline(kind=kind, start=start, end=end, rows=new_rows)
+        return
     path = mainline_path(data_dir)
     old = pl.read_parquet(path) if path.exists() else pl.DataFrame()
-    kept = old.filter(~((pl.col("kind") == kind) & pl.col("date").is_between(start, end))) if not old.is_empty() else old
+    kept = (
+        old.filter(~((pl.col("kind") == kind) & pl.col("date").is_between(start, end)))
+        if not old.is_empty()
+        else old
+    )
     combined = pl.concat([kept, new_rows], how="diagonal_relaxed").sort(["date", "kind", "rank"])
     atomic_write_parquet(combined, path)
 
@@ -263,6 +335,17 @@ def replace_mainline_range(data_dir: Path, start: date, end: date, kind: str, ne
 def upsert_mainline_history(data_dir: Path, new_rows: pl.DataFrame) -> None:
     """按 (date, kind) 整日覆盖 upsert; schema 以 new_rows 为权威(同 regime 模式)。"""
     if new_rows.is_empty() or "date" not in new_rows.columns:
+        return
+    store = _mainline_store()
+    if store is not None:
+        # 整日覆盖 = 按每个 (date, kind) 范围删除后重写
+        for (day, kind_key), group in new_rows.group_by(["date", "kind"]):
+            store.replace_mainline(
+                kind=str(kind_key),
+                start=day,
+                end=day,
+                rows=group,
+            )
         return
     p = mainline_path(data_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -278,8 +361,7 @@ def upsert_mainline_history(data_dir: Path, new_rows: pl.DataFrame) -> None:
         )
         target_cols = new_rows.columns
         keep_exprs = [
-            pl.col(c) if c in kept.columns else pl.lit(None).alias(c)
-            for c in target_cols
+            pl.col(c) if c in kept.columns else pl.lit(None).alias(c) for c in target_cols
         ]
         kept = kept.select(keep_exprs)
         combined = pl.concat([kept, new_rows.select(target_cols)], how="vertical_relaxed")
@@ -287,8 +369,9 @@ def upsert_mainline_history(data_dir: Path, new_rows: pl.DataFrame) -> None:
     atomic_write_parquet(combined, p)
 
 
-def compute_mainline_incremental(repo, data_dir: Path, *, today: date | None = None,
-                                 kind: str = "concept") -> pl.DataFrame:
+def compute_mainline_incremental(
+    repo, data_dir: Path, *, today: date | None = None, kind: str = "concept"
+) -> pl.DataFrame:
     """增量补算主线(供 daily_pipeline / 手动触发): 补 enriched 已有而主线缺失的日。"""
     today = today or cn_today()
     from app.services.regime_builder import enriched_date_set

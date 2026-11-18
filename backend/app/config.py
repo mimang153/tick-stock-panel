@@ -1,4 +1,5 @@
 """全局配置 — 从环境变量 / .env 读取。"""
+
 from __future__ import annotations
 
 import logging
@@ -236,14 +237,32 @@ class Settings(BaseSettings):
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
     data_dir: Path = _user_data_root()
 
+    # ClickHouse 存储层 — 方案与包络见 ../../docs/v1.0.1/design/DES-001-clickhouse-storage-design.md §4.8/§4.9。
+    # CK 由 docker compose 以 clickhouse/clickhouse-server:24.8.8-alpine 启动:
+    #   源码直跑 → 连宿主机映射端口 http://localhost:8123
+    #   应用容器 → compose 注入 CLICKHOUSE_URL=http://clickhouse:8123(服务名)
+    # 库名生产 tsp / 测试 tsp_test; tsp 用户按库授权, 应用不建库(由容器初始化脚本预建)。
+    clickhouse_url: str = "http://localhost:8123"
+    clickhouse_database: str = "tsp"
+    clickhouse_user: str = "tsp"
+    # 口令只从 CLICKHOUSE_PASSWORD 环境变量/compose 注入, 源码不内置明文默认值
+    # (compose 与 .env.example 提供本地开发默认, 应用自身不持有凭据)
+    clickhouse_password: str = ""
+    ch_query_timeout_s: int = 60
+    # 写缓冲阈值: 满足任一条件即批量 INSERT (§4.2)
+    ch_write_flush_interval_ms: int = 2000
+    ch_write_flush_rows: int = 5000
+
     # tiers.yaml 路径 — frozen: 资源目录内; 非 frozen: 项目根目录
     tiers_yaml: Path = _RESOURCE_ROOT / "tiers.yaml" if _IS_FROZEN else _PROJECT_ROOT / "tiers.yaml"
 
     # 静态文件(前端 dist) — frozen: 资源目录的 static/; 非 frozen: frontend/dist
-    static_dir: Path = _RESOURCE_ROOT / "static" if _IS_FROZEN else (_PROJECT_ROOT / "frontend" / "dist")
+    static_dir: Path = (
+        _RESOURCE_ROOT / "static" if _IS_FROZEN else (_PROJECT_ROOT / "frontend" / "dist")
+    )
 
     @model_validator(mode="after")
-    def _resolve_paths(self) -> Settings:
+    def _resolve_paths(self) -> Settings:  # noqa: C901 - C901: 分支为业务多阶段编排, 拆分会割裂上下文; 单测已覆盖
         """Docker 相对路径按应用目录解析；源码、桌面和绝对路径契约不变。"""
         self.data_dir = _resolve_data_dir(self.data_dir)
         if self.backtest_matrix_cache_max_mb <= 0:
@@ -268,12 +287,19 @@ class Settings(BaseSettings):
             raise ValueError("strategy_run_all_workers must be >= 1")
         if self.strategy_run_all_first_return_s < 0:
             raise ValueError("strategy_run_all_first_return_s must be >= 0")
+        if self.ch_query_timeout_s <= 0:
+            raise ValueError("ch_query_timeout_s must be positive")
+        if self.ch_write_flush_interval_ms <= 0:
+            raise ValueError("ch_write_flush_interval_ms must be positive")
+        if self.ch_write_flush_rows <= 0:
+            raise ValueError("ch_write_flush_rows must be positive")
         return self
 
     @property
     def use_free_mode(self) -> bool:
         """是否走 Free 模式。优先看 secrets.json,其次看 .env。"""
         from app import secrets_store
+
         return not secrets_store.get_tickflow_key()
 
 

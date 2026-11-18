@@ -1,14 +1,12 @@
 """扩展数据定时拉取引擎 — 从外部 API 拉取数据写入 Parquet。"""
+
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import threading
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from datetime import UTC, date, datetime, timedelta, timezone
-from functools import reduce
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +84,7 @@ def _in_time_window(start: str | None, end: str | None) -> bool:
 # 响应解析
 # ---------------------------------------------------------------------------
 
+
 def _extract_rows(data: Any, path: str) -> list[dict]:
     """按 dot-path 从 JSON 响应中提取行数组。
 
@@ -136,6 +135,7 @@ def _apply_field_map(rows: list[dict], field_map: dict[str, str]) -> list[dict]:
 # 拉取执行
 # ---------------------------------------------------------------------------
 
+
 def _format_date_value(day: date, date_format: str) -> str:
     """按配置格式把交易日序列化为接口参数值。
 
@@ -173,16 +173,32 @@ def since_cursor(data_dir, config: ExtConfig, day: date) -> str | None:
     pull = config.pull
     if not pull or not pull.since_param or not pull.time_field or pull.fanout:
         return None  # fanout 两级拉取 (目录→明细) 无整表游标语义
-    part = _day_partition(Path(data_dir), config.id, day)
-    if not part.exists():
-        return None
-    import polars as pl
+    from app.storage.runtime import get_storage
 
-    try:
-        col = pl.read_parquet(part, columns=[pull.time_field])[pull.time_field]
-        value = col.max()
-    except Exception:  # noqa: BLE001 — 列缺失/文件损坏 → 全量, 不阻断拉取
-        return None
+    runtime = get_storage()
+    if runtime is not None:
+        # CK 为唯一读源 (镜像写入 time_value 与源 time_field 同值字符串)。
+        # 字符串 max 只可能小于等于数值 max, 游标偏小只会多拉不会漏拉, 方向安全。
+        try:
+            df = runtime.store.read_ext_timeseries(config.id, start=day, end=day)
+        except Exception:  # noqa: BLE001 — 不可读 → 全量, 不阻断拉取
+            return None
+        if df.is_empty() or "time_value" not in df.columns:
+            return None
+        col = df["time_value"].drop_nulls()
+        value = col.max() if not col.is_empty() else None
+    else:
+        # 存储未初始化 (离线脚本/单测) 回退本地分区
+        part = _day_partition(Path(data_dir), config.id, day)
+        if not part.exists():
+            return None
+        import polars as pl
+
+        try:
+            col = pl.read_parquet(part, columns=[pull.time_field])[pull.time_field]
+            value = col.max()
+        except Exception:  # noqa: BLE001 — 列缺失/文件损坏 → 全量, 不阻断拉取
+            return None
     if value is None:
         return None
     return str(value).strip() or None
@@ -242,7 +258,6 @@ def _apply_auth(config_id: str, auth: dict | None, url: str, headers: dict[str, 
     from urllib.parse import quote
 
     from app import secrets_store
-
     from app.services.ext_data import get_ext_api_key
 
     auth_type = str((auth or {}).get("type") or "none").lower()
@@ -268,7 +283,7 @@ def _apply_auth(config_id: str, auth: dict | None, url: str, headers: dict[str, 
     elif auth_type == "header":
         headers[header_name] = key
     elif auth_type == "query":
-        name = str(auth.get("param") or "token")
+        name = str(auth.get("param") or "token")  # type: ignore[union-attr]
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}{name}={quote(key, safe='')}"
     else:
@@ -311,7 +326,9 @@ def _assert_rows_date_if_dated(pull: PullConfig, rows: list[dict], day: date) ->
 
 
 async def _request_json(
-    pull: PullConfig, config_id: str, day: date | None = None,
+    pull: PullConfig,
+    config_id: str,
+    day: date | None = None,
     extra_params: dict[str, str] | None = None,
     *,
     url_override: str | None = None,
@@ -327,13 +344,15 @@ async def _request_json(
     if url_override is not None:
         url = url_override
     else:
-        url = _with_date_param(pull.url, pull.date_param, day, pull.date_format) if day else pull.url
+        url = (
+            _with_date_param(pull.url, pull.date_param, day, pull.date_format) if day else pull.url
+        )
     if extra_params:
         url = _append_query_params(url, extra_params)
     # 每配置超时 (PullConfig.timeout_seconds, 默认 30 与历史行为一致);
     # getattr 兜底测试用的简化 pull 对象
     timeout = getattr(pull, "timeout_seconds", None)
-    timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else 30
+    timeout = timeout if isinstance(timeout, int | float) and timeout > 0 else 30
     async with _pull_client_scope() as client:
         headers = outbound_headers(pull.headers)
         url = _apply_auth(config_id, pull.auth, url, headers)
@@ -401,7 +420,7 @@ async def _fetch_rows_for_date(config: ExtConfig, target_date: date, data_dir=No
         raise ValueError("拉取未配置或 URL 为空")
 
     cursor = since_cursor(data_dir, config, target_date) if data_dir is not None else None
-    since_extra: dict[str, str] | None = {pull.since_param: cursor} if cursor else None
+    since_extra: dict[str, str] | None = {pull.since_param: cursor} if cursor else None  # type: ignore[dict-item]
 
     if pull.fanout:
         from app.services.ext_fanout import fetch_fanout_rows
@@ -427,7 +446,8 @@ async def _fetch_rows_for_date(config: ExtConfig, target_date: date, data_dir=No
         else:
             logger.warning(
                 "ext pull %s: 分页拉取达到 max_pages=%d 上限, 结果可能不完整",
-                config.id, pull.max_pages,
+                config.id,
+                pull.max_pages,
             )
         rows = collected
     else:
@@ -472,15 +492,19 @@ async def fetch_and_ingest(
     if not rows:
         raise ValueError("提取到的行数为 0")
     n = await run_ext_data_io(
-        rows_to_parquet, rows, config, data_dir, snapshot_date=day,
+        rows_to_parquet,
+        rows,
+        config,
+        data_dir,
+        snapshot_date=day,
         keep_strategy_cache=keep_strategy_cache,
     )
     return n, day.isoformat()
 
 
 MAX_BACKFILL_DAYS = 120  # 单次回补上限: 同步端点, 控制请求时长
-_BACKFILL_DAY_INTERVAL_S = 0.3   # 相邻请求间隔 (对数据源限速)
-_BACKFILL_429_WAIT_S = 30.0      # 429 限流退避时长 (服务端按分钟配额)
+_BACKFILL_DAY_INTERVAL_S = 0.3  # 相邻请求间隔 (对数据源限速)
+_BACKFILL_429_WAIT_S = 30.0  # 429 限流退避时长 (服务端按分钟配额)
 _BACKFILL_MAX_CONSECUTIVE_429 = 3  # 连续 429 天数达到阈值 → 中止本次回补
 _RATE_LIMIT_ABORT_REASON = "限流中止 (429), 稍后重跑回补可自动续补剩余日期"
 
@@ -492,7 +516,14 @@ def _status_code(e: BaseException) -> int | None:
 
 
 def _day_partition(data_dir, config_id: str, day: date) -> Path:
-    return Path(data_dir) / "ext_data" / config_id / "timeseries" / f"date={day.isoformat()}" / "part.parquet"
+    return (
+        Path(data_dir)
+        / "ext_data"
+        / config_id
+        / "timeseries"
+        / f"date={day.isoformat()}"
+        / "part.parquet"
+    )
 
 
 async def backfill_history(
@@ -505,7 +536,33 @@ async def backfill_history(
         return await _backfill_history(config, data_dir, start, end)
 
 
-async def _backfill_history(
+async def _handle_rate_limited_day(config, data_dir, d, remaining_days, consecutive_429, failed):
+    """限流日退避重试；返回 (连续429, 状态, 写入行数, 是否中止)。"""
+    consecutive_429 += 1
+    if consecutive_429 >= _BACKFILL_MAX_CONSECUTIVE_429:
+        remaining = [
+            dd for dd in remaining_days if not _day_partition(data_dir, config.id, dd).exists()
+        ]
+        failed.extend(
+            {"date": dd.isoformat(), "reason": _RATE_LIMIT_ABORT_REASON} for dd in remaining
+        )
+        return consecutive_429, "abort", 0, True
+    await asyncio.sleep(_BACKFILL_429_WAIT_S)
+    try:
+        rows = await fetch_rows_for_date(config, d)
+        consecutive_429 = 0
+        if not rows:
+            return consecutive_429, "empty", 0, False
+        written = await run_ext_data_io(rows_to_parquet, rows, config, data_dir, snapshot_date=d)
+        return consecutive_429, "fetched", written, False
+    except Exception as e2:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
+        if _status_code(e2) == 404:
+            return consecutive_429, "empty", 0, False
+        failed.append({"date": d.isoformat(), "reason": str(e2)[:200]})
+        return consecutive_429, "failed", 0, False
+
+
+async def _backfill_history(  # noqa: C901 - 历史回补逐日状态机含限流/404/失败分支, 已抽限流 helper
     config: ExtConfig,
     data_dir,
     start: date,
@@ -550,7 +607,9 @@ async def _backfill_history(
             if not rows:
                 empty += 1  # 该日无数据 (服务端未归档), 不是错误
             else:
-                rows_written += await run_ext_data_io(rows_to_parquet, rows, config, data_dir, snapshot_date=d)
+                rows_written += await run_ext_data_io(
+                    rows_to_parquet, rows, config, data_dir, snapshot_date=d
+                )
                 fetched += 1
         except httpx.HTTPStatusError as e:
             if _status_code(e) == 404:
@@ -560,29 +619,17 @@ async def _backfill_history(
             elif _status_code(e) != 429:
                 failed.append({"date": d.isoformat(), "reason": str(e)[:200]})
             else:
-                # 服务端按分钟配额限流: 退避后原地重试一次; 连续多日 429
-                # 说明配额窗口已耗尽, 中止剩余天数 (幂等, 重跑即可续补)。
-                consecutive_429 += 1
-                if consecutive_429 >= _BACKFILL_MAX_CONSECUTIVE_429:
-                    remaining = [dd for dd in days[i:] if not _day_partition(data_dir, config.id, dd).exists()]
-                    failed.extend({"date": dd.isoformat(), "reason": _RATE_LIMIT_ABORT_REASON}
-                                  for dd in remaining)
+                consecutive_429, status, written, abort = await _handle_rate_limited_day(
+                    config, data_dir, d, days[i:], consecutive_429, failed
+                )
+                if status == "fetched":
+                    rows_written += written
+                    fetched += 1
+                elif status == "empty":
+                    empty += 1
+                if abort:
                     break
-                await asyncio.sleep(_BACKFILL_429_WAIT_S)
-                try:
-                    rows = await fetch_rows_for_date(config, d)
-                    consecutive_429 = 0
-                    if not rows:
-                        empty += 1
-                    else:
-                        rows_written += await run_ext_data_io(rows_to_parquet, rows, config, data_dir, snapshot_date=d)
-                        fetched += 1
-                except Exception as e2:
-                    if _status_code(e2) == 404:  # 退避重试后无该日快照 → 同样视为无数据
-                        empty += 1
-                    else:
-                        failed.append({"date": d.isoformat(), "reason": str(e2)[:200]})
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             failed.append({"date": d.isoformat(), "reason": str(e)[:200]})
         if i + 1 < len(days):
             await asyncio.sleep(_BACKFILL_DAY_INTERVAL_S)  # 限速, 对数据源礼貌
@@ -594,7 +641,6 @@ async def _backfill_history(
         "failed": failed,
         "rows_written": rows_written,
     }
-
 
 
 # ---------------------------------------------------------------------------
@@ -684,6 +730,7 @@ class PullScheduler:
       "no running event loop"。因此对 task 的增删一律通过
       call_soon_threadsafe 提交到主循环执行 —— 同一套代码两种调用场景都安全。
     """
+
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task] = {}
         self._running = False
@@ -707,9 +754,7 @@ class PullScheduler:
         """
         loop = self._loop
         if loop is None or loop.is_closed():
-            raise RuntimeError(
-                "PullScheduler: 事件循环不可用 (start() 未在事件循环中调用?)"
-            )
+            raise RuntimeError("PullScheduler: 事件循环不可用 (start() 未在事件循环中调用?)")
         loop.call_soon_threadsafe(fn, *args)
 
     def stop(self) -> None:
@@ -742,12 +787,11 @@ class PullScheduler:
         def _apply() -> None:
             for config in enabled_configs:
                 if config.id not in self._tasks:
-                    self._tasks[config.id] = self._loop.create_task(
-                        self._run_loop(config)
-                    )
+                    self._tasks[config.id] = self._loop.create_task(self._run_loop(config))  # type: ignore[union-attr]
                     logger.info(
                         "PullScheduler: scheduled %s (every %d min)",
-                        config.id, config.pull.schedule_minutes,
+                        config.id,
+                        config.pull.schedule_minutes,  # type: ignore[union-attr]
                     )
             for cid in [c for c in self._tasks if c not in active_ids]:
                 task = self._tasks.pop(cid)
@@ -761,19 +805,17 @@ class PullScheduler:
         try:
             # 例行定时刷新: 不清策略结果缓存 (见 invalidate_ext_caches),
             # 否则策略页每轮拉取后整页空白, 直到下次全量重算完成。
-            n, d = await fetch_and_ingest(
-                fresh, self._data_dir, keep_strategy_cache=True
-            )
-            fresh.pull.last_run = datetime.now(timezone.utc).isoformat()
-            fresh.pull.last_status = "success"
-            fresh.pull.last_message = f"{n} rows @ {d}"
-            fresh.pull.last_rows = n
+            n, d = await fetch_and_ingest(fresh, self._data_dir, keep_strategy_cache=True)
+            fresh.pull.last_run = datetime.now(UTC).isoformat()  # type: ignore[union-attr]
+            fresh.pull.last_status = "success"  # type: ignore[union-attr]
+            fresh.pull.last_message = f"{n} rows @ {d}"  # type: ignore[union-attr]
+            fresh.pull.last_rows = n  # type: ignore[union-attr]
             await run_ext_data_io(store.upsert, fresh, keep_strategy_cache=True)
             logger.info("PullScheduler: %s success, %d rows", fresh.id, n)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             fresh2 = await run_ext_data_io(store.get, fresh.id)
             if fresh2 and fresh2.pull:
-                fresh2.pull.last_run = datetime.now(timezone.utc).isoformat()
+                fresh2.pull.last_run = datetime.now(UTC).isoformat()
                 fresh2.pull.last_status = "error"
                 fresh2.pull.last_message = str(e)[:200]
                 await run_ext_data_io(store.upsert, fresh2, keep_strategy_cache=True)
@@ -793,7 +835,9 @@ class PullScheduler:
         while self._running:
             fresh = await run_ext_data_io(store.get, config_id)
             if (
-                not fresh or not fresh.pull or not fresh.pull.enabled
+                not fresh
+                or not fresh.pull
+                or not fresh.pull.enabled
                 or fresh.pull.schedule_time != hhmm
             ):
                 return  # 停用 / 改时刻 / 切回间隔制 → 外层循环重读
@@ -801,7 +845,8 @@ class PullScheduler:
             target = _today_target(now, hhmm)
             if (
                 _is_scheduled_day(now, fresh.pull)
-                and now >= target and not _ran_at_or_after(fresh.pull, target)
+                and now >= target
+                and not _ran_at_or_after(fresh.pull, target)
             ):
                 await self._execute_pull(fresh, store)
                 continue
@@ -812,12 +857,13 @@ class PullScheduler:
             if latest and latest.pull and latest.pull.next_run != nxt_iso:
                 latest.pull.next_run = nxt_iso
                 await run_ext_data_io(store.upsert, latest, keep_strategy_cache=True)
-            await asyncio.sleep(
-                min(_DAILY_POLL_SECONDS, max((nxt - now).total_seconds(), 1.0))
-            )
+            await asyncio.sleep(min(_DAILY_POLL_SECONDS, max((nxt - now).total_seconds(), 1.0)))
 
     async def _sleep_interval_reloading(
-        self, config_id: str, store: ExtConfigStore, interval: float,
+        self,
+        config_id: str,
+        store: ExtConfigStore,
+        interval: float,
     ) -> None:
         """间隔制睡眠, 但每 60s 重读配置。
 
@@ -859,7 +905,7 @@ class PullScheduler:
 
                 # 时间窗口检查: 不在窗口内则跳过本次拉取
                 if not _in_time_window(pull.time_window_start, pull.time_window_end):
-                    fresh.pull.last_run = datetime.now(timezone.utc).isoformat()
+                    fresh.pull.last_run = datetime.now(UTC).isoformat()
                     fresh.pull.last_status = "skipped"
                     fresh.pull.last_message = "不在拉取时间窗口内"
                     await run_ext_data_io(store.upsert, fresh, keep_strategy_cache=True)
@@ -877,9 +923,7 @@ class PullScheduler:
                 next_dt = datetime.now(UTC).timestamp() + interval
                 latest = await run_ext_data_io(store.get, config.id)
                 if latest and latest.pull:
-                    latest.pull.next_run = datetime.fromtimestamp(
-                        next_dt, tz=UTC
-                    ).isoformat()
+                    latest.pull.next_run = datetime.fromtimestamp(next_dt, tz=UTC).isoformat()
                     await run_ext_data_io(store.upsert, latest, keep_strategy_cache=True)
 
                 await self._sleep_interval_reloading(config.id, store, interval)

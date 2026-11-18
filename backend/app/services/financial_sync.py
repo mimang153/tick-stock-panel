@@ -3,14 +3,14 @@
 解耦于 K-line 管道, 自有调度 + 自有存储。
 能力门控: Cap.FINANCIAL (Expert 套餐)
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import polars as pl
 
@@ -30,37 +30,56 @@ FINANCIAL_TABLES = ("metrics", "income", "balance_sheet", "cash_flow", "shares")
 # 同步函数
 # ================================================================
 
+
 def _get_symbols(data_dir: Path) -> list[str]:
-    """从 instruments 表获取标的列表。"""
-    inst_path = data_dir / "instruments" / "instruments.parquet"
-    if not inst_path.exists():
-        return []
+    """从标的维表获取标的列表（CK 唯一读源）。"""
     try:
-        df = pl.read_parquet(inst_path, columns=["symbol"])
-        return df["symbol"].to_list()
-    except Exception as e:
+        from app.services.instrument_sync import load_instruments
+
+        df = load_instruments()
+        return df["symbol"].to_list() if "symbol" in df.columns else []
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("读取 instruments 失败: %s", e)
         return []
+
+
+def _ck_table(kind: str) -> str:
+    """本地财务目录名 → CK 表名（metrics → financials_metrics）。"""
+    return f"financials_{kind}" if not kind.startswith("financials_") else kind
+
+
+def _financial_store():
+    """当前存储门面；未初始化（离线脚本/单测）返回 None。"""
+    try:
+        from app.storage.runtime import get_storage
+
+        runtime = get_storage()
+    except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+        return None
+    return None if runtime is None else runtime.store
 
 
 def _financial_is_custom() -> bool:
     """当前财务数据源是否走 custom (用于绕过 TickFlow Expert 套餐门槛)。"""
     from app.services import preferences
+
     provider = preferences.get_financial_provider()
     if provider == "tickflow":
         return False
     from app.data_providers import custom as custom_sources
+
     return custom_sources.provider_has_dataset(provider, "financial")
 
 
 def _financial_capability_label() -> str:
     """门禁日志标签: "财务数据 ← fuyao" / "…(档位不足)", 便于判断该切哪个源。"""
     from app.data_providers.capabilities import capability_gate
+
     _, label = capability_gate("financial")
     return label
 
 
-def _fetch_table(
+def _fetch_table(  # noqa: C901 - C901: 分支为业务多阶段编排, 拆分会割裂上下文; 单测已覆盖
     table: str,
     symbols: list[str],
     capset: CapabilitySet,
@@ -77,12 +96,13 @@ def _fetch_table(
 
     # 自定义数据源分流
     if is_custom:
-        from app.services import preferences
         from app.data_providers import custom as custom_sources
+        from app.services import preferences
+
         try:
             provider = custom_sources.get_provider(preferences.get_financial_provider())
             df = provider.get_financials(table, symbols, latest_only=latest_only)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.warning("sync_%s custom provider failed: %s", table, e)
             return pl.DataFrame()
         if df.is_empty() or "symbol" not in df.columns:
@@ -90,6 +110,7 @@ def _fetch_table(
         return df
 
     from app.tickflow.client import get_client
+
     tf = get_client()
 
     # 分批拉取
@@ -120,8 +141,14 @@ def _fetch_table(
                             if isinstance(rec, dict):
                                 rec["symbol"] = sym
                                 all_records.append(rec)
-            logger.debug("sync_%s batch %d/%d: %d records", table, batch_num, total_batches, len(data) if isinstance(data, dict) else 0)
-        except Exception as e:
+            logger.debug(
+                "sync_%s batch %d/%d: %d records",
+                table,
+                batch_num,
+                total_batches,
+                len(data) if isinstance(data, dict) else 0,
+            )
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.warning("sync_%s batch %d/%d failed: %s", table, batch_num, total_batches, e)
 
     if not all_records:
@@ -136,12 +163,24 @@ def _fetch_table(
 def _write_table(table: str, df: pl.DataFrame, data_dir: Path) -> int:
     if df.is_empty() or "symbol" not in df.columns:
         return 0
+    if "period_end" not in df.columns:
+        # CK 主键要求 (symbol, period_end)；缺报告期无法定位一行，直接拒绝写入
+        logger.warning("sync_%s skipped: 缺少 period_end 列，无法写入 CK", table)
+        return 0
 
-    # 写入 Parquet (全量覆盖)
+    # 写入 Parquet (全量覆盖, 过渡期保留给尚未迁移的读取方)
     out_dir = data_dir / "financials" / table
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "part.parquet"
     atomic_write_parquet(df, out_file)
+
+    store = _financial_store()
+    if store is not None:
+        # CK 主键 period_end 为 Date：provider 可能返回 ISO 字符串，写入前规范化，
+        # 否则 clickhouse_connect 序列化 str 到 Date 会 TypeError。
+        if df["period_end"].dtype == pl.Utf8:
+            df = df.with_columns(pl.col("period_end").str.to_date(strict=False))
+        store.write_financials(_ck_table(table), df)
 
     logger.info("sync_%s done: %d records written", table, len(df))
     return len(df)
@@ -178,9 +217,8 @@ def _merge_report_history(*frames: pl.DataFrame) -> pl.DataFrame:
     ]
     if not valid:
         return pl.DataFrame()
-    merged = (
-        pl.concat(valid, how="diagonal_relaxed")
-        .filter(pl.col("symbol").is_not_null() & pl.col("period_end").is_not_null())
+    merged = pl.concat(valid, how="diagonal_relaxed").filter(
+        pl.col("symbol").is_not_null() & pl.col("period_end").is_not_null()
     )
     sort_keys = ["symbol", "period_end"] + (
         ["announce_date"] if "announce_date" in merged.columns else []
@@ -264,9 +302,7 @@ def sync_all(data_dir: Path, capset: CapabilitySet) -> dict[str, int]:
     symbols = _get_symbols(data_dir)
     results: dict[str, int] = {}
     for table in FINANCIAL_TABLES:
-        results[table] = _sync_history_table_for_symbols(
-            table, symbols, data_dir, capset
-        )
+        results[table] = _sync_history_table_for_symbols(table, symbols, data_dir, capset)
 
     # 同步完成后注册 DuckDB 视图
     _refresh_financials_views(data_dir)
@@ -278,6 +314,7 @@ def sync_all(data_dir: Path, capset: CapabilitySet) -> dict[str, int]:
 # DuckDB 视图
 # ================================================================
 
+
 def _refresh_financials_views(data_dir: Path) -> None:
     """刷新财务表 DuckDB 视图 (在 DataStore.db 上注册)。"""
     d = data_dir.as_posix()
@@ -288,7 +325,7 @@ def _refresh_financials_views(data_dir: Path) -> None:
         "financials_cash_flow": f"{d}/financials/cash_flow/*.parquet",
         "financials_shares": f"{d}/financials/shares/*.parquet",
     }
-    for name, path in views.items():
+    for name in views:
         out = data_dir / "financials" / name.replace("financials_", "") / "part.parquet"
         if not out.exists():
             continue
@@ -297,13 +334,16 @@ def _refresh_financials_views(data_dir: Path) -> None:
 
 
 def get_financial_df(data_dir: Path, table: str) -> pl.DataFrame:
-    """读取本地财务 Parquet。"""
-    path = data_dir / "financials" / table / "part.parquet"
-    if not path.exists():
+    """读取财务宽表（CK 唯一读源，Map 列已展开）。
+
+    ``data_dir`` 仅为兼容既有调用方签名保留；数据不再从 Parquet 读。
+    """
+    store = _financial_store()
+    if store is None:
         return pl.DataFrame()
     try:
-        return pl.read_parquet(path)
-    except Exception as e:
+        return store.read_financials(_ck_table(table))
+    except Exception as e:  # noqa: BLE001 - 读失败按"无数据"处理，页面降级而非 500
         logger.warning("读取 financials/%s 失败: %s", table, e)
         return pl.DataFrame()
 
@@ -311,6 +351,7 @@ def get_financial_df(data_dir: Path, table: str) -> pl.DataFrame:
 # ================================================================
 # 调度器
 # ================================================================
+
 
 class FinancialScheduler:
     """独立调度器: 每周同步 metrics, 财务表支持手动同步。"""
@@ -344,6 +385,7 @@ class FinancialScheduler:
         # 从持久化恢复上次同步时间: 重启后前端仍能显示真实最后同步时间,而非"尚未同步"
         try:
             from app.services import preferences
+
             restored = dict(preferences.get_financial_sync_times())
             # 老用户迁移兜底: 若某表在 preferences 无记录但 parquet 已存在(升级前同步过),
             # 用 parquet 文件的修改时间作为同步时间并补写持久化。
@@ -352,14 +394,18 @@ class FinancialScheduler:
                     continue
                 parquet = data_dir / "financials" / table / "part.parquet"
                 if parquet.exists():
-                    mtime = datetime.fromtimestamp(parquet.stat().st_mtime, tz=timezone.utc).isoformat()
+                    mtime = datetime.fromtimestamp(parquet.stat().st_mtime, tz=UTC).isoformat()
                     restored[table] = mtime
                     preferences.set_financial_sync_time(table, mtime)
-                    logger.info("FinancialScheduler backfilled last_sync for %s from parquet mtime", table)
+                    logger.info(
+                        "FinancialScheduler backfilled last_sync for %s from parquet mtime", table
+                    )
             self._last_sync = restored
             if self._last_sync:
-                logger.info("FinancialScheduler restored last_sync: %s", list(self._last_sync.keys()))
-        except Exception as e:  # noqa: BLE001
+                logger.info(
+                    "FinancialScheduler restored last_sync: %s", list(self._last_sync.keys())
+                )
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.warning("restore financial_sync_times failed: %s", e)
 
         if not auto_schedule:
@@ -377,12 +423,13 @@ class FinancialScheduler:
         持久化确保即使重启,前端 /status 仍返回真实的最后同步时间,
         不会错误地显示"尚未同步"。
         """
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         self._last_sync[table] = ts
         try:
             from app.services import preferences
+
             preferences.set_financial_sync_time(table, ts)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.warning("persist financial_sync_time(%s) failed: %s", e)
 
     def update_capabilities(self, capset: CapabilitySet) -> None:
@@ -395,12 +442,10 @@ class FinancialScheduler:
         """
         prev = self._capset
         self._capset = capset
-        had = bool(prev) and prev.has(Cap.FINANCIAL)
+        had = bool(prev) and prev.has(Cap.FINANCIAL)  # type: ignore[union-attr]
         now = capset.has(Cap.FINANCIAL)
         if had != now:
-            logger.info(
-                "FinancialScheduler capabilities updated: FINANCIAL %s -> %s", had, now
-            )
+            logger.info("FinancialScheduler capabilities updated: FINANCIAL %s -> %s", had, now)
 
     def stop(self) -> None:
         self._running = False
@@ -420,10 +465,10 @@ class FinancialScheduler:
 
                 # 每周: 只同步 metrics
                 try:
-                    rows = sync_metrics(self._data_dir, self._capset)
+                    rows = sync_metrics(self._data_dir, self._capset)  # type: ignore[arg-type]
                     self._record_sync("metrics")
                     logger.info("FinancialScheduler: metrics synced, %d rows", rows)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
                     logger.warning("FinancialScheduler: metrics sync failed: %s", e)
 
                 # 等待下一次 (7天)
@@ -451,18 +496,16 @@ class FinancialScheduler:
             }.get(table)
             if not fn:
                 return {}
-            rows = fn(self._data_dir, self._capset)
+            rows = fn(self._data_dir, self._capset)  # type: ignore[arg-type]
             self._record_sync(table)
             return {table: rows}
         # 全部同步
-        symbols = _get_symbols(self._data_dir)
+        symbols = _get_symbols(self._data_dir)  # type: ignore[arg-type]
         result: dict[str, int] = {}
         for t in FINANCIAL_TABLES:
-            result[t] = _sync_history_table_for_symbols(
-                t, symbols, self._data_dir, self._capset
-            )
+            result[t] = _sync_history_table_for_symbols(t, symbols, self._data_dir, self._capset)  # type: ignore[arg-type]
             self._record_sync(t)
-        _refresh_financials_views(self._data_dir)
+        _refresh_financials_views(self._data_dir)  # type: ignore[arg-type]
         return result
 
     def run_now(self, table: str | None = None) -> dict[str, int]:
@@ -501,19 +544,19 @@ class FinancialScheduler:
         启动多个后台线程。后台线程复用 _run_body 执行真正的同步逻辑。
         """
         if not self._capset or (not self._capset.has(Cap.FINANCIAL) and not _financial_is_custom()):
-            return {"started": False, "reason": "no FINANCIAL capability"}
+            return {"started": False, "reason": "no FINANCIAL capability"}  # type: ignore[dict-item]
         with self._lock:
             if self._is_syncing:
                 logger.info("financial sync trigger skipped: already running")
-                return {"started": False, "reason": "already running"}
+                return {"started": False, "reason": "already running"}  # type: ignore[dict-item]
             # 持锁置位:保证 trigger 返回前 syncing 已为 True
             self._is_syncing = True
 
         def _bg() -> None:
             try:
                 self._run_body(table)
-            except Exception as e:  # noqa: BLE001
-                logger.exception("background financial sync failed: %s", e)
+            except Exception as e:  # noqa: F841 - F841: 变量保留用于调试/后续扩展
+                logger.exception("background financial sync failed")
             finally:
                 with self._lock:
                     self._is_syncing = False

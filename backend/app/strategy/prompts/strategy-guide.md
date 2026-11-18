@@ -170,7 +170,7 @@ anchor_date = _date.fromisoformat(anchor_raw) if isinstance(anchor_raw, str) els
 - 需要日线条件时声明 `META.daily_history_bars`（1..250），入口增加 `*, daily=None`。日线字段不会自动出现在分钟帧中。
 - 单次运行读取本地分钟数据，回测需有相应历史覆盖。持续分钟策略提醒尚未接通策略监控中心，保存后不会自动开始监听。
 
-最小代码见 [AI 精简指南的分钟策略章节](strategy-guide-compact.md#minute_filter-分钟策略)，内置 AI 入口与边界见 [AI 策略迭代指南](../../../../docs/strategy-iteration.md#内置-ai-的策略能力与边界)。
+最小代码见 [AI 精简指南的分钟策略章节](strategy-guide-compact.md#minute_filter-分钟策略)，内置 AI 入口与边界见 [AI 策略迭代指南](../../../../docs/base_v1.0/strategy-iteration.md#内置-ai-的策略能力与边界)。
 
 ## 3. 常用指标列（参考，可直接使用）
 

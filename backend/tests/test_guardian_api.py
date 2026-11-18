@@ -1,4 +1,5 @@
 """守护 API 契约测试: overview/adopt/drop/rerun/config/runs。"""
+
 from __future__ import annotations
 
 from datetime import date
@@ -49,10 +50,15 @@ def client(tmp_path, monkeypatch):
     from app.services import preferences
 
     monkeypatch.setattr(
-        preferences, "get_guardian_schedule",
-        lambda: {"guardian_schedule_enabled": False, "guardian_watch_pct": 0.2,
-                 "guardian_retire_pct": 0.5, "guardian_k_max": 4,
-                 "lab_mined_slot_limit": 10},
+        preferences,
+        "get_guardian_schedule",
+        lambda: {
+            "guardian_schedule_enabled": False,
+            "guardian_watch_pct": 0.2,
+            "guardian_retire_pct": 0.5,
+            "guardian_k_max": 4,
+            "lab_mined_slot_limit": 10,
+        },
     )
 
     def fake_set(enabled, watch, retire, k_max, lab_mined_slot_limit=10):
@@ -111,8 +117,11 @@ def test_overview_projects_profiles(client, tmp_path):
 def test_overview_survives_missing_strategy(client, tmp_path):
     store = GuardianStore(tmp_path)
     store.create_baseline(
-        "ghost", kind="mining_gate", data_as_of="2026-01-09",
-        objective="sharpe", metrics={"score": 1.0},
+        "ghost",
+        kind="mining_gate",
+        data_as_of="2026-01-09",
+        objective="sharpe",
+        metrics={"score": 1.0},
     )
     item = client.get("/api/backtest/guardian/overview").json()["items"][0]
     assert item["name"] is None
@@ -120,12 +129,16 @@ def test_overview_survives_missing_strategy(client, tmp_path):
 
 
 def test_adopt_rejects_unknown_strategy_and_objective(client):
-    assert client.post(
-        "/api/backtest/guardian/ghost/adopt", json={"objective": "sharpe"}
-    ).status_code == 404
-    assert client.post(
-        "/api/backtest/guardian/tune_overnight/adopt", json={"objective": "win_rate"}
-    ).status_code == 400
+    assert (
+        client.post("/api/backtest/guardian/ghost/adopt", json={"objective": "sharpe"}).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/api/backtest/guardian/tune_overnight/adopt", json={"objective": "win_rate"}
+        ).status_code
+        == 400
+    )
 
 
 def test_adopt_rejects_missing_enriched(client, tmp_path):
@@ -146,9 +159,13 @@ def test_adopt_creates_trailing_profile_and_enqueues(client, tmp_path):
     assert body["ok"] is True and body["run_id"]
 
     profile = GuardianStore(tmp_path).get("tune_overnight")
+    assert profile is not None
     assert profile["baseline"]["kind"] == "trailing_reference"
+    assert profile is not None
     assert profile["baseline"]["objective"] == "sortino"
+    assert profile is not None
     assert profile["baseline"]["data_as_of"] == "2026-10-23"
+    assert profile is not None
     assert profile["baseline"]["metrics"] == {}
 
     manager = client.app.state.guardian_manager
@@ -162,8 +179,11 @@ def test_drop_and_rerun(client, tmp_path):
     assert client.post("/api/backtest/guardian/nope/rerun").status_code == 404
 
     store.create_baseline(
-        "mined_factor_x", kind="mining_gate", data_as_of="2026-01-09",
-        objective="sharpe", metrics={"score": 0.9},
+        "mined_factor_x",
+        kind="mining_gate",
+        data_as_of="2026-01-09",
+        objective="sharpe",
+        metrics={"score": 0.9},
     )
     response = client.post("/api/backtest/guardian/mined_factor_x/rerun")
     assert response.status_code == 200
@@ -207,10 +227,13 @@ def test_config_patch_validation(client):
     assert client.get("/api/backtest/guardian/config").json()["guardian_k_max"] == 4
     assert client.patch("/api/backtest/guardian/config", json={}).status_code == 400
     # watch >= retire 违反阈值约束 → 400
-    assert client.patch(
-        "/api/backtest/guardian/config",
-        json={"guardian_watch_pct": 0.6, "guardian_retire_pct": 0.5},
-    ).status_code == 400
+    assert (
+        client.patch(
+            "/api/backtest/guardian/config",
+            json={"guardian_watch_pct": 0.6, "guardian_retire_pct": 0.5},
+        ).status_code
+        == 400
+    )
 
     response = client.patch(
         "/api/backtest/guardian/config",

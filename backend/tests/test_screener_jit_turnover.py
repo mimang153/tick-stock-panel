@@ -5,6 +5,7 @@ warmup 读取白名单漏掉 turnover_rate 时, 即时计算后该列丢失 —�
 用 turnover_rate 做条件的请求在 DuckDB 注册视图里找不到列, Binder Error
 被 except 吞掉返回空结果 (无任何报错提示)。
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -15,7 +16,7 @@ import polars as pl
 from app.services.screener import ScreenerService
 
 
-def _write_enriched(tmp_path, days: int, turnover_by_day: dict[str, float]) -> None:
+def _write_enriched(tmp_path, days: int, turnover_by_day: dict[str, float], ck=None) -> None:
     base = tmp_path / "kline_daily_enriched"
     base.mkdir(parents=True, exist_ok=True)
     start = date(2026, 9, 1) - timedelta(days=days)
@@ -23,7 +24,7 @@ def _write_enriched(tmp_path, days: int, turnover_by_day: dict[str, float]) -> N
         d = start + timedelta(days=i)
         part = base / f"date={d.isoformat()}"
         part.mkdir(exist_ok=True)
-        pl.DataFrame(
+        frame = pl.DataFrame(
             {
                 "symbol": ["600000.SH", "000001.SZ"],
                 "date": [d, d],
@@ -40,7 +41,11 @@ def _write_enriched(tmp_path, days: int, turnover_by_day: dict[str, float]) -> N
                 "consecutive_limit_ups": [0, 0],
                 "consecutive_limit_downs": [0, 0],
             }
-        ).write_parquet(part / "part.parquet")
+        )
+        frame.write_parquet(part / "part.parquet")
+        if ck is not None:
+            # 筛选器的历史日读源已切 CK
+            ck.write_daily("kline_daily_enriched", frame)
 
 
 def _service(tmp_path, instruments: pl.DataFrame | None = None) -> ScreenerService:
@@ -55,9 +60,9 @@ def _service(tmp_path, instruments: pl.DataFrame | None = None) -> ScreenerServi
     return ScreenerService(repo, asset_type="stock")
 
 
-def test_historical_jit_frame_keeps_turnover_rate(tmp_path) -> None:
+def test_historical_jit_frame_keeps_turnover_rate(tmp_path, ck_runtime) -> None:
     target = date(2026, 9, 1)
-    _write_enriched(tmp_path, 30, {target.isoformat(): 5.5})
+    _write_enriched(tmp_path, 30, {target.isoformat(): 5.5}, ck=ck_runtime)
     svc = _service(tmp_path)  # 无 instruments → 无重算路径, 纯存储列透传
 
     df = svc._load_enriched_for_date(target)
@@ -68,9 +73,9 @@ def test_historical_jit_frame_keeps_turnover_rate(tmp_path) -> None:
     assert row["turnover_rate"] == 5.5
 
 
-def test_custom_sql_can_filter_on_turnover_rate(tmp_path) -> None:
+def test_custom_sql_can_filter_on_turnover_rate(tmp_path, ck_runtime) -> None:
     target = date(2026, 9, 1)
-    _write_enriched(tmp_path, 30, {target.isoformat(): 5.5})
+    _write_enriched(tmp_path, 30, {target.isoformat(): 5.5}, ck=ck_runtime)
     svc = _service(tmp_path)
 
     result = svc.run(target, ["turnover_rate > 3"], limit=10)

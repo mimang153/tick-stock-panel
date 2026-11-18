@@ -1,4 +1,5 @@
 """守护复验运行时测试: 用假回测服务驱动完整判定落档链路。"""
+
 from __future__ import annotations
 
 import threading
@@ -46,16 +47,18 @@ class _FakePrepared:
 class _FakeService:
     """stats_by_start: {date.isoformat(): stats dict}; 默认调用返回 default。"""
 
-    def __init__(self, default: dict, stats_by_start: dict | None = None,
-                 errors_by_start: dict | None = None) -> None:
+    def __init__(
+        self, default: dict, stats_by_start: dict | None = None, errors_by_start: dict | None = None
+    ) -> None:
         self.default = default
         self.stats_by_start = stats_by_start or {}
         self.errors_by_start = errors_by_start or {}
         self.runs: list[date] = []
         self.prepared_calls = 0
 
-    def prepare_matrix_optimization(self, configs, matrix_cache_max_bytes=0,
-                                    market_data_override=None):
+    def prepare_matrix_optimization(
+        self, configs, matrix_cache_max_bytes=0, market_data_override=None
+    ):
         self.prepared_calls += 1
         return _FakePrepared()
 
@@ -90,8 +93,13 @@ def _profile_store(tmp_path: Path) -> GuardianStore:
     return GuardianStore(tmp_path)
 
 
-def _seed_mining_profile(store: GuardianStore, strategy_id: str = "mined_factor_x",
-                         *, score: float = 2.0, n_trades: int = 300) -> None:
+def _seed_mining_profile(
+    store: GuardianStore,
+    strategy_id: str = "mined_factor_x",
+    *,
+    score: float = 2.0,
+    n_trades: int = 300,
+) -> None:
     store.create_baseline(
         strategy_id,
         kind="mining_gate",
@@ -115,9 +123,7 @@ def test_healthy_check_transitions_pending_to_healthy(tmp_path):
     _write_history(tmp_path)
     store = _profile_store(tmp_path)
     _seed_mining_profile(store)
-    service = _FakeService(
-        default={"sharpe": 1.9, "n_trades": 120, "max_drawdown": -0.08}
-    )
+    service = _FakeService(default={"sharpe": 1.9, "n_trades": 120, "max_drawdown": -0.08})
 
     result = run_guardian_runtime(
         _config(), data_dir=tmp_path, service=service, strategy_engine=_FakeEngine()
@@ -126,7 +132,9 @@ def test_healthy_check_transitions_pending_to_healthy(tmp_path):
     assert result["status"] == "succeeded"
     assert result["checked"] == 1 and result["errors"] == 0
     profile = store.get("mined_factor_x")
+    assert profile is not None
     assert profile["status"] == "healthy"
+    assert profile is not None
     check = profile["checks"][-1]
     assert check["verdict"] == "healthy"
     assert check["k"] == 2  # 41 个新自然日只够切 2 段
@@ -142,15 +150,16 @@ def test_severe_degradation_retires(tmp_path):
     _write_history(tmp_path)
     store = _profile_store(tmp_path)
     _seed_mining_profile(store)
-    service = _FakeService(default={"sharpe": 0.2, "n_trades": 150,
-                                    "max_drawdown": -0.12})
+    service = _FakeService(default={"sharpe": 0.2, "n_trades": 150, "max_drawdown": -0.12})
 
     run_guardian_runtime(
         _config(), data_dir=tmp_path, service=service, strategy_engine=_FakeEngine()
     )
 
     profile = store.get("mined_factor_x")
+    assert profile is not None
     assert profile["status"] == "retired"
+    assert profile is not None
     assert "退化" in (profile["status_reason"] or "")
 
 
@@ -167,7 +176,7 @@ def test_retired_profile_not_rechecked(tmp_path):
 
     assert result["skipped_retired"] == 1
     assert service.runs == []  # 退役策略不再复验
-    assert len(store.get("mined_factor_x")["checks"]) == 0
+    assert len(store.get("mined_factor_x")["checks"]) == 0  # type: ignore[index]
 
 
 def test_insufficient_new_data_skips_without_status_change(tmp_path):
@@ -184,8 +193,11 @@ def test_insufficient_new_data_skips_without_status_change(tmp_path):
 
     assert result["skipped"] == 1
     profile = store.get("mined_factor_x")
+    assert profile is not None
     assert profile["status"] == "pending"
+    assert profile is not None
     assert profile["checks"][-1]["skipped"] is True
+    assert profile is not None
     assert "新数据" in profile["checks"][-1]["reason"]
 
 
@@ -194,6 +206,7 @@ def test_single_segment_error_yields_watch_not_retired(tmp_path):
     store = _profile_store(tmp_path)
     _seed_mining_profile(store)
     from app.backtest.guardian import split_windows
+
     fresh_start, fresh_end = _AS_OF + timedelta(days=1), date(2026, 2, 10)
     first_segment_start = split_windows(fresh_start, fresh_end, 2)[0][0]
     service = _FakeService(
@@ -206,7 +219,9 @@ def test_single_segment_error_yields_watch_not_retired(tmp_path):
     )
 
     profile = store.get("mined_factor_x")
+    assert profile is not None
     assert profile["status"] == "watch"
+    assert profile is not None
     check = profile["checks"][-1]
     assert check["verdict"] == "watch"
     assert check["incomplete"] is True
@@ -221,17 +236,21 @@ def test_all_segments_error_records_error_and_keeps_status(tmp_path):
     _seed_mining_profile(store)
 
     class _AlwaysError(_FakeService):
-        def run(self, config, **kwargs):
+        def run(self, config, **kwargs):  # type: ignore[override]
             return SimpleNamespace(stats={}, error="db down")
 
     result = run_guardian_runtime(
-        _config(), data_dir=tmp_path, service=_AlwaysError(default={}),
+        _config(),
+        data_dir=tmp_path,
+        service=_AlwaysError(default={}),
         strategy_engine=_FakeEngine(),
     )
 
     assert result["errors"] == 1
     profile = store.get("mined_factor_x")
+    assert profile is not None
     assert profile["status"] == "pending"
+    assert profile is not None
     assert "db down" in (profile["checks"][-1]["error"] or "")
 
 
@@ -241,13 +260,15 @@ def test_missing_strategy_records_error(tmp_path):
     _seed_mining_profile(store, "ghost_strategy")
 
     result = run_guardian_runtime(
-        _config(), data_dir=tmp_path, service=_FakeService(default={}),
+        _config(),
+        data_dir=tmp_path,
+        service=_FakeService(default={}),
         strategy_engine=_FakeEngine(known=set()),
     )
 
     assert result["errors"] == 1
     assert result["results"][0]["error"] == "strategy_unavailable"
-    assert store.get("ghost_strategy")["status"] == "pending"
+    assert store.get("ghost_strategy")["status"] == "pending"  # type: ignore[index]
 
 
 def test_trailing_reference_calibrates_then_checks(tmp_path):
@@ -260,8 +281,7 @@ def test_trailing_reference_calibrates_then_checks(tmp_path):
         objective="sharpe",
         metrics={},
     )
-    service = _FakeService(default={"sharpe": 1.8, "n_trades": 90,
-                                    "max_drawdown": -0.09})
+    service = _FakeService(default={"sharpe": 1.8, "n_trades": 90, "max_drawdown": -0.09})
 
     result = run_guardian_runtime(
         _config(), data_dir=tmp_path, service=service, strategy_engine=_FakeEngine()
@@ -270,8 +290,11 @@ def test_trailing_reference_calibrates_then_checks(tmp_path):
     assert result["checked"] == 1
     profile = store.get("my_manual_strategy")
     # 标定: 尾随 40 天窗口 (全部 100 天里最后 252→不足→全量 100... len=100≥30)
+    assert profile is not None
     assert profile["baseline"]["metrics"]["score"] == 1.8
+    assert profile is not None
     assert profile["baseline"]["metrics"]["window_start"] is not None
+    assert profile is not None
     assert profile["status"] == "healthy"
 
 
@@ -284,8 +307,11 @@ def test_cancel_raises(tmp_path):
 
     with pytest.raises(GuardianRuntimeCancelledError):
         run_guardian_runtime(
-            _config(), data_dir=tmp_path, service=_FakeService(default={}),
-            strategy_engine=_FakeEngine(), cancel_check=cancel,
+            _config(),
+            data_dir=tmp_path,
+            service=_FakeService(default={}),
+            strategy_engine=_FakeEngine(),
+            cancel_check=cancel,
         )
 
 
@@ -297,10 +323,12 @@ def test_strategy_ids_filter(tmp_path):
     service = _FakeService(default={"sharpe": 1.9, "n_trades": 100})
 
     result = run_guardian_runtime(
-        _config(strategy_ids=["mined_factor_b"]), data_dir=tmp_path,
-        service=service, strategy_engine=_FakeEngine(),
+        _config(strategy_ids=["mined_factor_b"]),
+        data_dir=tmp_path,
+        service=service,
+        strategy_engine=_FakeEngine(),
     )
 
     assert result["checked"] == 1
-    assert store.get("mined_factor_a")["status"] == "pending"
-    assert store.get("mined_factor_b")["status"] == "healthy"
+    assert store.get("mined_factor_a")["status"] == "pending"  # type: ignore[index]
+    assert store.get("mined_factor_b")["status"] == "healthy"  # type: ignore[index]

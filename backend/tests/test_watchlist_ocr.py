@@ -1,4 +1,5 @@
 """自选截图 OCR：代码抽取、预处理、API 门禁与并发限制（不依赖本机 tesseract）。"""
+
 from __future__ import annotations
 
 import threading
@@ -92,16 +93,18 @@ def test_resolve_candidates_matched_and_unmatched():
     assert rows[2].matched and not rows[2].already_in_watchlist
 
 
-def test_import_watchlist_image_with_fake_ocr(tmp_path: Path):
-    inst = tmp_path / "instruments"
-    inst.mkdir()
-    pl.DataFrame(
-        {
-            "code": ["600036", "515880"],
-            "symbol": ["600036.SH", "515880.SH"],
-            "name": ["招商银行", "通信ETF国泰"],
-        }
-    ).write_parquet(inst / "instruments.parquet")
+def test_import_watchlist_image_with_fake_ocr(tmp_path: Path, ck_runtime):
+    # 维表读路径已切 CK：经 ck_runtime 写入带前缀的 instruments 表
+    ck_runtime.write_instruments(
+        "stock",
+        pl.DataFrame(
+            {
+                "code": ["600036", "515880"],
+                "symbol": ["600036.SH", "515880.SH"],
+                "name": ["招商银行", "通信ETF国泰"],
+            }
+        ),
+    )
 
     fake_text = "招商银行\n600036\n通信ETF\n515880\n伦敦金 XAUUSD"
     result = import_watchlist_image(

@@ -3,6 +3,7 @@
 直接按 [start,end] 过滤后 compute_all, 区间头部的 MA/MACD/RSI 会因缺
 历史窗口而失真 (回测起始段信号不可信)。
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -35,11 +36,10 @@ def _synthetic_enriched(n_days: int) -> pl.DataFrame:
     )
 
 
-def test_load_panel_warms_up_indicators(monkeypatch) -> None:
+def test_load_panel_warms_up_indicators(ck_runtime) -> None:
     df = _synthetic_enriched(250)
-    monkeypatch.setattr(
-        "app.services.backtest.scan_enriched_parquet", lambda glob: df.lazy()
-    )
+    # 回测面板读源已切 CK
+    ck_runtime.write_daily("kline_daily_enriched", df)
     svc = BacktestService(repo=MagicMock())
 
     start = df["date"][-30]
@@ -54,6 +54,7 @@ def test_load_panel_warms_up_indicators(monkeypatch) -> None:
     # 只断言非 NaN 区分不了新旧代码 —— ewm 类指标 (RSI/MACD) 从首个值
     # 播种, 无 warmup 时首行也有值, 只是数值失真 (#201 的实际危害)
     from app.indicators.pipeline import compute_all
+
     reference = compute_all(df).filter(pl.col("date") >= start)
     ref_rsi = float(reference["rsi_14"][0])
     first = panel.iloc[0]
@@ -62,12 +63,10 @@ def test_load_panel_warms_up_indicators(monkeypatch) -> None:
     )
 
 
-def test_load_panel_insufficient_history_degrades_gracefully(monkeypatch) -> None:
+def test_load_panel_insufficient_history_degrades_gracefully(ck_runtime) -> None:
     # 数据起点晚于 warmup 起点时自然退化: 有多少算多少, 不抛异常
     df = _synthetic_enriched(20)
-    monkeypatch.setattr(
-        "app.services.backtest.scan_enriched_parquet", lambda glob: df.lazy()
-    )
+    ck_runtime.write_daily("kline_daily_enriched", df)
     svc = BacktestService(repo=MagicMock())
 
     panel = svc._load_panel(["600000.SH"], df["date"][0], df["date"][-1])

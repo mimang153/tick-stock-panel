@@ -1,0 +1,10 @@
+<!-- ClickHouse 容器配置(挂载到 /etc/clickhouse-server/config.d/)。
+     内存上限固定在容器 memory limit 之内, 避免 CK 吃满宿主机内存后被内核 OOM kill。 -->
+<clickhouse>
+    <!-- 3.5 GB: 覆盖 5000+ 标的日K回填 + 并发同步 + 聚合查询的峰值
+         (1.5 GB 实测在回填与 uniqExact 并发时触发 MEMORY_LIMIT_EXCEEDED)。
+         机器内存 < 8 GB 时下调到 2000000000 并同步调小 compose 的 mem_limit。 -->
+    <max_server_memory_usage>3500000000</max_server_memory_usage>
+    <max_server_memory_usage_to_ram_ratio>0.8</max_server_memory_usage_to_ram_ratio>
+    <timezone>Asia/Shanghai</timezone>
+</clickhouse>

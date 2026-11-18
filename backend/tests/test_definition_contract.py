@@ -5,6 +5,7 @@
   - 新增一种 kind = 注册一个 DefinitionKind 描述器, 即复用同一
     校验/注册/依赖提取路径, 不再平行实现持久化与分发。
 """
+
 from __future__ import annotations
 
 import json
@@ -97,15 +98,21 @@ def test_get_kind_lazy_imports_domain_module() -> None:
         "print('lazy-ok')"
     )
     result = subprocess.run(
-        [sys.executable, "-c", code], cwd=Path(__file__).resolve().parents[1],
-        capture_output=True, text=True, check=True,
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=True,
     )
     assert "lazy-ok" in result.stdout
 
 
 def test_signal_validate_dispatch(tmp_path: Path) -> None:
     good = {
-        "id": "test_sig", "name": "t", "kind": "both", "timeframe": "daily",
+        "id": "test_sig",
+        "name": "t",
+        "kind": "both",
+        "timeframe": "daily",
         "conditions": [{"left": "close", "op": ">", "right": "ma20"}],
     }
     validate_definition("signal", good)  # 不抛
@@ -121,7 +128,10 @@ def test_signal_dependencies_reuse_compile_path() -> None:
     pipeline.get_signal_dependencies 的既有口径一致。
     """
     sig = {
-        "id": "test_sig", "name": "t", "kind": "both", "timeframe": "daily",
+        "id": "test_sig",
+        "name": "t",
+        "kind": "both",
+        "timeframe": "daily",
         "conditions": [
             {"left": "close", "op": ">", "right": "field:ma20", "rightDays": 1},
             {"left": "rsi_14", "op": "<", "right": 30},
@@ -133,7 +143,10 @@ def test_signal_dependencies_reuse_compile_path() -> None:
 
 def test_signal_dependencies_intraday_branch() -> None:
     sig = {
-        "id": "test_ia", "name": "t", "kind": "entry", "timeframe": "intraday",
+        "id": "test_ia",
+        "name": "t",
+        "kind": "entry",
+        "timeframe": "intraday",
         "conditions": [{"left": "price", "op": ">", "right": 0}],
     }
     deps = definition_dependencies("signal", sig)
@@ -141,8 +154,12 @@ def test_signal_dependencies_intraday_branch() -> None:
 
 
 def test_factor_dependencies_reuse_dsl_compile() -> None:
-    definition = {"id": "uf_x", "label": "x", "kind": "custom",
-                  "formula": "close / ts_mean(turnover_rate, 20)"}
+    definition = {
+        "id": "uf_x",
+        "label": "x",
+        "kind": "custom",
+        "formula": "close / ts_mean(turnover_rate, 20)",
+    }
     assert definition_dependencies("factor", definition) == frozenset({"close", "turnover_rate"})
     with pytest.raises(ValueError, match="id 必须匹配"):
         validate_definition("factor", {**definition, "id": "zz"})
@@ -155,12 +172,14 @@ def test_unknown_kind_rejected() -> None:
 
 def test_duplicate_kind_with_different_descriptor_rejected() -> None:
     with pytest.raises(ValueError, match="描述器不同"):
-        register_kind(DefinitionKind(
-            kind="signal",
-            store=JsonDefinitionStore("user_data/x", label="x"),
-            id_pattern=re.compile(r"^x$"),
-            validate=lambda d: None,
-        ))
+        register_kind(
+            DefinitionKind(
+                kind="signal",
+                store=JsonDefinitionStore("user_data/x", label="x"),
+                id_pattern=re.compile(r"^x$"),
+                validate=lambda d: None,
+            )
+        )
 
 
 # ── P1b 验收: 新增第三种 kind 复用同一管线 ────────────────
@@ -179,13 +198,15 @@ def test_new_kind_reuses_same_pipeline(tmp_path: Path) -> None:
         seen.append(defn)
         return frozenset(defn.get("weights", {}))
 
-    register_kind(DefinitionKind(
-        kind="scoring_test",
-        store=store,
-        id_pattern=re.compile(r"^sc_[a-z0-9_]{1,40}$"),
-        validate=_validate,
-        dependencies=_deps,
-    ))
+    register_kind(
+        DefinitionKind(
+            kind="scoring_test",
+            store=store,
+            id_pattern=re.compile(r"^sc_[a-z0-9_]{1,40}$"),
+            validate=_validate,
+            dependencies=_deps,
+        )
+    )
     try:
         # 存储: 同一 Store 基类
         definition = {"id": "sc_vol", "weights": {"close": 0.6, "volume": 0.4}}
@@ -208,12 +229,14 @@ def test_new_kind_reuses_same_pipeline(tmp_path: Path) -> None:
 
 def test_kind_without_extractor_returns_empty(tmp_path: Path) -> None:
     """无依赖提取器的 kind (纯记录类) → 空集, 不报错。"""
-    register_kind(DefinitionKind(
-        kind="record_test",
-        store=JsonDefinitionStore("user_data/records", label="record"),
-        id_pattern=re.compile(r"^r_"),
-        validate=lambda d: None,
-    ))
+    register_kind(
+        DefinitionKind(
+            kind="record_test",
+            store=JsonDefinitionStore("user_data/records", label="record"),
+            id_pattern=re.compile(r"^r_"),
+            validate=lambda d: None,
+        )
+    )
     try:
         assert definition_dependencies("record_test", {"id": "r_1"}) == frozenset()
     finally:
@@ -236,17 +259,35 @@ def test_existing_modules_share_store_base(tmp_path: Path) -> None:
     assert isinstance(lots._LOT_STORE, JsonDefinitionStore)
 
     # 批次语义: 非 lot_ 前缀文件不入读取面 (glob 参数化生效)
-    lots.save_one(tmp_path, {
-        "id": "lot_1", "symbol": "000001", "name": "x",
-        "buy_date": "2026-01-05", "qty": 100, "cost": 10.0, "target_pct": 20,
-    })
-    (tmp_path / "user_data" / "lots" / "stray.json").write_text(json.dumps({"id": "stray"}), encoding="utf-8")
+    lots.save_one(
+        tmp_path,
+        {
+            "id": "lot_1",
+            "symbol": "000001",
+            "name": "x",
+            "buy_date": "2026-01-05",
+            "qty": 100,
+            "cost": 10.0,
+            "target_pct": 20,
+        },
+    )
+    (tmp_path / "user_data" / "lots" / "stray.json").write_text(
+        json.dumps({"id": "stray"}), encoding="utf-8"
+    )
     assert [lot["id"] for lot in lots.load_all(tmp_path)] == ["lot_1"]
 
     # 监控规则语义: 读取归一化默认值照常回填
-    monitor_rules.save_one(tmp_path, {
-        "id": "r1", "type": "price", "symbols": ["000001"],
-        "op": "above", "field": "close", "threshold": 10,
-    })
+    monitor_rules.save_one(
+        tmp_path,
+        {
+            "id": "r1",
+            "type": "price",
+            "symbols": ["000001"],
+            "op": "above",
+            "field": "close",
+            "threshold": 10,
+        },
+    )
     rule = monitor_rules.load_one(tmp_path, "r1")
+    assert rule is not None
     assert rule["enabled"] is True and rule["scope"] == "symbols"

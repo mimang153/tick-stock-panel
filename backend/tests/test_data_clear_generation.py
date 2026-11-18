@@ -29,9 +29,6 @@ class _RepoStub:
     def refresh_cache(self) -> None:
         self.calls.append("refresh_cache")
 
-    def rebuild_views(self) -> None:
-        self.calls.append("rebuild_views")
-
 
 def _request(repo: _RepoStub) -> SimpleNamespace:
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo)))
@@ -44,8 +41,7 @@ def _write_parquet_placeholder(path: Path) -> None:
 
 def _stub_clear_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.api import overview
-    from app.services import alert_store
-    from app.services import pipeline_jobs
+    from app.services import alert_store, pipeline_jobs
     from app.services.pipeline_jobs import job_store
     from app.services.screener import ScreenerService
 
@@ -80,7 +76,7 @@ def test_clear_data_bumps_enriched_generations_and_invalidates_panel_cache(
         return pl.DataFrame({"value": [computes[-1]]})
 
     cache.get_or_compute(*cache_args, compute, "stock", stock_before)
-    result = data_api.clear_data(_request(repo))
+    result = data_api.clear_data(_request(repo))  # type: ignore[arg-type]
     stock_after = get_enriched_generation(tmp_path, "stock")
     etf_after = get_enriched_generation(tmp_path, "etf")
     cached_after = cache.get_or_compute(*cache_args, compute, "stock", stock_after)
@@ -92,7 +88,7 @@ def test_clear_data_bumps_enriched_generations_and_invalidates_panel_cache(
     assert etf_after != etf_before
     assert cached_after["value"].item() == 2
     assert cache.stats()["compute_count"] == 2
-    assert repo.calls == ["clear_cache", "refresh_cache", "rebuild_views"]
+    assert repo.calls == ["clear_cache", "refresh_cache"]
 
 
 def test_clear_data_restores_ready_generation_when_first_delete_fails(
@@ -113,13 +109,11 @@ def test_clear_data_restores_ready_generation_when_first_delete_fails(
     monkeypatch.setattr(Path, "unlink", fail_target)
 
     with pytest.raises(PermissionError, match="injected delete failure"):
-        data_api.clear_data(_request(repo))
+        data_api.clear_data(_request(repo))  # type: ignore[arg-type]
 
     assert target.is_file()
     assert get_enriched_generation(tmp_path, "stock") == generation_before
-    marker = json.loads(
-        (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
-    )
+    marker = json.loads((tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8"))
     assert marker["state"] == "ready"
 
 
@@ -148,12 +142,10 @@ def test_clear_data_keeps_generation_publishing_after_partial_delete(
     monkeypatch.setattr(Path, "unlink", fail_second_parquet)
 
     with pytest.raises(PermissionError, match="injected partial delete failure"):
-        data_api.clear_data(_request(repo))
+        data_api.clear_data(_request(repo))  # type: ignore[arg-type]
 
     assert sum(path.exists() for path in (first, second)) == 1
-    marker = json.loads(
-        (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
-    )
+    marker = json.loads((tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8"))
     assert marker["state"] == "publishing"
     with pytest.raises(EnrichedGenerationUnavailableError, match="being published"):
         get_enriched_generation(tmp_path, "stock")
@@ -171,23 +163,23 @@ def test_clear_data_recovers_stale_publishing_marker_from_dead_process(
     target = tmp_path / "kline_daily_enriched" / "date=2026-08-14" / "part.parquet"
     _write_parquet_placeholder(target)
     (tmp_path / ".matrix_generation_stock.json").write_text(
-        json.dumps({
-            "state": "publishing",
-            "generation": "stale-generation",
-            "publication_id": "stale-publication",
-            "owner_pid": 999999999,  # 不存在的 pid → 探测判定已死
-            "updated_at_ns": 0,
-        }),
+        json.dumps(
+            {
+                "state": "publishing",
+                "generation": "stale-generation",
+                "publication_id": "stale-publication",
+                "owner_pid": 999999999,  # 不存在的 pid → 探测判定已死
+                "updated_at_ns": 0,
+            }
+        ),
         encoding="utf-8",
     )
 
-    result = data_api.clear_data(_request(repo))
+    result = data_api.clear_data(_request(repo))  # type: ignore[arg-type]
 
     assert result == {"deleted_files": 1}
     assert not target.exists()
-    marker = json.loads(
-        (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
-    )
+    marker = json.loads((tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8"))
     assert marker["state"] == "ready"
     assert get_enriched_generation(tmp_path, "stock") == marker["generation"]
 
@@ -214,7 +206,7 @@ def test_clear_data_rejected_while_data_task_running(
     # 模拟一个运行中的数据任务持有重任务执行槽
     monkeypatch.setattr(pipeline_jobs, "_run_slot_owner", "pipeline-job-1")
     with pytest.raises(HTTPException) as exc_info:
-        data_api.clear_data(_request(repo))
+        data_api.clear_data(_request(repo))  # type: ignore[arg-type]
     assert exc_info.value.status_code == 409
 
     # fail-closed: 文件原样保留, 槽位持有者不变
@@ -224,7 +216,7 @@ def test_clear_data_rejected_while_data_task_running(
 
     # 槽释放后可正常清空, 且清空结束时槽位被释放 (不阻塞后续任务)
     monkeypatch.setattr(pipeline_jobs, "_run_slot_owner", None)
-    result = data_api.clear_data(_request(repo))
+    result = data_api.clear_data(_request(repo))  # type: ignore[arg-type]
     assert result == {"deleted_files": 1}
     assert not stock_file.exists()
     assert pipeline_jobs._run_slot_owner is None
@@ -236,7 +228,6 @@ def test_clear_data_pauses_and_restores_minute_refresh(
 ) -> None:
     """清空期间必须暂停全量分钟增量线程 (独立写 kline_minute, 不占 run slot),
     结束后按原运行状态恢复 — 否则"清完又被写回部分今日数据"。"""
-    from app.services import pipeline_jobs
 
     _stub_clear_side_effects(monkeypatch)
     repo = _RepoStub(tmp_path)
@@ -254,7 +245,7 @@ def test_clear_data_pauses_and_restores_minute_refresh(
 
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo)))
     request.app.state.minute_refresh = _MrsStub()
-    data_api.clear_data(request)
+    data_api.clear_data(request)  # type: ignore[arg-type]
     assert calls == ["stop", "start"]
 
     # 原本未运行则不重启
@@ -265,7 +256,7 @@ def test_clear_data_pauses_and_restores_minute_refresh(
             return {"running": False}
 
     request.app.state.minute_refresh = _MrsIdle()
-    data_api.clear_data(request)
+    data_api.clear_data(request)  # type: ignore[arg-type]
     assert calls == ["stop"]
 
 
@@ -290,7 +281,7 @@ def test_clear_discards_status_snapshot_and_rejects_inflight_old_statistics(tmp_
     try:
         cache.snapshot({"daily": old_statistics}, is_busy=lambda: False)
         assert entered.wait(1)
-        assert data_api.clear_data(_request(_RepoStub(tmp_path))) == {"deleted_files": 0}
+        assert data_api.clear_data(_request(_RepoStub(tmp_path))) == {"deleted_files": 0}  # type: ignore[arg-type]
         assert cache.snapshot(loaders, is_busy=lambda: True)["daily"] is None
     finally:
         release.set()

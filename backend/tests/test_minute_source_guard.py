@@ -1,4 +1,5 @@
 """历史分钟同步只因当前分钟源发生变化而停止。"""
+
 from contextlib import contextmanager
 from datetime import datetime
 from types import SimpleNamespace
@@ -17,7 +18,9 @@ from app.tickflow.repository import DataStore, KlineRepository
 
 
 @pytest.fixture(autouse=True)
-def isolated_settings(tmp_path, monkeypatch):
+def isolated_settings(tmp_path, monkeypatch, ck_runtime):
+    # ck_runtime 隔离全局 storage runtime：kline_sync 分钟写入镜像走 get_storage()，
+    # 全量并跑时被其他用例泄漏的 runtime 污染会导致读到错误前缀数据（flaky）。
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     preferences._invalidate_cache()
     monkeypatch.setattr(secrets_store, "_cache", None)
@@ -27,8 +30,10 @@ def isolated_settings(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("change", ["unrelated", "route", "key", "endpoint", "basis"])
-def test_backward_sync_checks_only_active_source_before_each_write(tmp_path, monkeypatch, change):
-    repo = KlineRepository(DataStore(tmp_path))
+def test_backward_sync_checks_only_active_source_before_each_write(
+    tmp_path, monkeypatch, change, ck_runtime
+):
+    repo = KlineRepository(DataStore(tmp_path), storage=ck_runtime)
     caps = CapabilitySet()
     caps.grant(Cap.KLINE_MINUTE_BATCH)
     symbol = "600000.SH"
@@ -65,7 +70,9 @@ def test_backward_sync_checks_only_active_source_before_each_write(tmp_path, mon
         assert sync() > 0
         expected = [first, second]
     else:
-        with pytest.raises(WorkBusyError, match="价格基准" if change == "basis" else "分钟数据源配置已变化"):
+        with pytest.raises(
+            WorkBusyError, match="价格基准" if change == "basis" else "分钟数据源配置已变化"
+        ):
             sync()
         expected = [first]
     assert repo.get_minute(symbol, first.date())["datetime"].to_list() == expected
@@ -73,7 +80,12 @@ def test_backward_sync_checks_only_active_source_before_each_write(tmp_path, mon
 
 def test_plugin_stamp_tracks_selected_key_and_running_version(monkeypatch):
     name = "fixture_plugin"
-    status = {"api_key_env": "FIXTURE_MINUTE_KEY", "version": "1.0", "available": True, "datasets": ["minute"]}
+    status = {
+        "api_key_env": "FIXTURE_MINUTE_KEY",
+        "version": "1.0",
+        "available": True,
+        "datasets": ["minute"],
+    }
     monkeypatch.setitem(loader._PLUGIN_STATUS, name, status)
     monkeypatch.setitem(loader._PROVIDERS, name, SimpleNamespace())
     monkeypatch.setenv("FIXTURE_MINUTE_KEY", "fixture-env-value")
@@ -91,7 +103,9 @@ def test_plugin_stamp_tracks_selected_key_and_running_version(monkeypatch):
 def test_yaml_stamp_tracks_minute_mapping_and_effective_auth(monkeypatch):
     name = "fixture_yaml"
     minute = DatasetConfig(url="https://minute.example", field_map={"close": "price"})
-    config = CustomSourceConfig(name, name, AuthConfig("bearer", "FIXTURE_MINUTE_KEY"), {"minute": minute})
+    config = CustomSourceConfig(
+        name, name, AuthConfig("bearer", "FIXTURE_MINUTE_KEY"), {"minute": minute}
+    )
     monkeypatch.setitem(loader._PROVIDERS, name, SimpleNamespace(config=config))
     monkeypatch.setenv("FIXTURE_MINUTE_KEY", "fixture-first")
     preferences.save({"minute_data_provider": name})
@@ -115,17 +129,27 @@ def test_batch_waiting_for_write_lock_rechecks_source(tmp_path, monkeypatch):
         yield
 
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path), _write_lock=lock())
-    monkeypatch.setattr(kline_sync, "sync_minute_batch", lambda *_args, **_kw: pl.DataFrame({"symbol": [symbol]}))
+    monkeypatch.setattr(
+        kline_sync, "sync_minute_batch", lambda *_args, **_kw: pl.DataFrame({"symbol": [symbol]})
+    )
     with pytest.raises(WorkBusyError, match="分钟数据源或价格基准已变化"):
         minute_shared_pull.pull(
-            repo, [symbol], asset_type="stock", start=datetime(2026, 11, 2, 9, 30),
-            end=datetime(2026, 11, 2, 15), batch_size=1, rpm=60, raw_basis=False,
+            repo,
+            [symbol],
+            asset_type="stock",
+            start=datetime(2026, 11, 2, 9, 30),
+            end=datetime(2026, 11, 2, 15),
+            batch_size=1,
+            rpm=60,
+            raw_basis=False,
         )
     assert not list((tmp_path / "kline_minute").rglob("*.parquet"))
 
 
-def test_mixed_assets_cannot_restart_with_new_source_between_groups(tmp_path, monkeypatch):
-    repo = KlineRepository(DataStore(tmp_path))
+def test_mixed_assets_cannot_restart_with_new_source_between_groups(
+    tmp_path, monkeypatch, ck_runtime
+):
+    repo = KlineRepository(DataStore(tmp_path), storage=ck_runtime)
     caps = CapabilitySet()
     caps.grant(Cap.KLINE_MINUTE_BATCH)
     stock, etf = "600000.SH", "510300.SH"
@@ -134,7 +158,11 @@ def test_mixed_assets_cannot_restart_with_new_source_between_groups(tmp_path, mo
 
     def fetch(symbols, *, on_segment, **_):
         fetched.extend(symbols)
-        on_segment(pl.DataFrame({"symbol": symbols, "datetime": datetime(2026, 11, 2, 9, 31), "close": 1.0}))
+        on_segment(
+            pl.DataFrame(
+                {"symbol": symbols, "datetime": datetime(2026, 11, 2, 9, 31), "close": 1.0}
+            )
+        )
         secrets_store.save({"tickflow_api_key": "fixture-replacement"})
 
     monkeypatch.setattr(kline_sync, "sync_minute_batch", fetch)

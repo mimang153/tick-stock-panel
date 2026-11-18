@@ -5,13 +5,22 @@
 长时间持有, 看门狗误判进程僵死。新实现只对触及 symbol 子集去重, 未触及行
 原样保留, 最终仍整体排序, 保持「按 symbol,datetime 全局有序」的文件不变量。
 """
+
 from __future__ import annotations
 
 from datetime import datetime
 
 import polars as pl
+import pytest
 
 from app.services.kline_sync import _write_minute_partition
+
+
+@pytest.fixture(autouse=True)
+def _isolated_ck_runtime(ck_runtime):
+    """隔离全局 storage runtime：_write_minute_partition 的 CK 镜像走 get_storage()，
+    全量并跑时被其他用例泄漏的 runtime 污染会读到错误前缀数据（flaky）。"""
+    return ck_runtime
 
 
 def _bars(spec: dict[str, list[tuple[str, float]]]) -> pl.DataFrame:
@@ -29,10 +38,12 @@ def _read(out) -> pl.DataFrame:
 
 def test_fresh_write_creates_sorted_partition(tmp_path):
     minute_dir = tmp_path / "kline_minute"
-    df = _bars({
-        "000001.SZ": [("2026-01-05 09:31:00", 10.0), ("2026-01-05 09:32:00", 10.1)],
-        "600000.SH": [("2026-01-05 09:31:00", 8.0)],
-    })
+    df = _bars(
+        {
+            "000001.SZ": [("2026-01-05 09:31:00", 10.0), ("2026-01-05 09:32:00", 10.1)],
+            "600000.SH": [("2026-01-05 09:31:00", 8.0)],
+        }
+    )
     written = _write_minute_partition(df, minute_dir)
 
     assert written == 3
@@ -45,18 +56,22 @@ def test_fresh_write_creates_sorted_partition(tmp_path):
 
 def test_merge_preserves_untouched_symbols_and_keeps_last_for_touched(tmp_path):
     minute_dir = tmp_path / "kline_minute"
-    first = _bars({
-        "000001.SZ": [("2026-01-05 09:31:00", 10.0), ("2026-01-05 09:32:00", 10.1)],
-        "600000.SH": [("2026-01-05 09:31:00", 8.0), ("2026-01-05 09:32:00", 8.1)],
-        "300750.SZ": [("2026-01-05 09:31:00", 20.0)],
-    })
+    first = _bars(
+        {
+            "000001.SZ": [("2026-01-05 09:31:00", 10.0), ("2026-01-05 09:32:00", 10.1)],
+            "600000.SH": [("2026-01-05 09:31:00", 8.0), ("2026-01-05 09:32:00", 8.1)],
+            "300750.SZ": [("2026-01-05 09:31:00", 20.0)],
+        }
+    )
     _write_minute_partition(first, minute_dir)
     out = minute_dir / "date=2026-01-05" / "part.parquet"
 
     # 单股补齐: 仅 000001.SZ, 含同 (symbol, datetime) 修正行与一根新增 K
-    second = _bars({
-        "000001.SZ": [("2026-01-05 09:32:00", 10.9), ("2026-01-05 09:33:00", 10.2)],
-    })
+    second = _bars(
+        {
+            "000001.SZ": [("2026-01-05 09:32:00", 10.9), ("2026-01-05 09:33:00", 10.2)],
+        }
+    )
     written = _write_minute_partition(second, minute_dir)
 
     stored = _read(out)
@@ -75,9 +90,11 @@ def test_merge_preserves_untouched_symbols_and_keeps_last_for_touched(tmp_path):
 
 def test_multi_date_input_writes_one_partition_per_day(tmp_path):
     minute_dir = tmp_path / "kline_minute"
-    df = _bars({
-        "000001.SZ": [("2026-01-05 09:31:00", 10.0), ("2026-01-06 09:31:00", 10.5)],
-    })
+    df = _bars(
+        {
+            "000001.SZ": [("2026-01-05 09:31:00", 10.0), ("2026-01-06 09:31:00", 10.5)],
+        }
+    )
     written = _write_minute_partition(df, minute_dir)
 
     assert written == 2
@@ -88,13 +105,24 @@ def test_multi_date_input_writes_one_partition_per_day(tmp_path):
 
 def test_merge_aligns_provider_columns_and_legacy_numeric_types(tmp_path):
     minute_dir = tmp_path / "kline_minute"
-    _write_minute_partition(_bars({
-        "000001.SZ": [("2026-01-05 09:31:00", 10.0)],
-        "600000.SH": [("2026-01-05 09:31:00", 8.0)],
-    }), minute_dir)
-    incoming = _bars({
-        "000001.SZ": [("2026-01-05 09:31:00", 11.0), ("2026-01-05 09:32:00", 12.0)],
-    }).with_columns(pl.col("close").cast(pl.Int64)).select("symbol", "close", "datetime")
+    _write_minute_partition(
+        _bars(
+            {
+                "000001.SZ": [("2026-01-05 09:31:00", 10.0)],
+                "600000.SH": [("2026-01-05 09:31:00", 8.0)],
+            }
+        ),
+        minute_dir,
+    )
+    incoming = (
+        _bars(
+            {
+                "000001.SZ": [("2026-01-05 09:31:00", 11.0), ("2026-01-05 09:32:00", 12.0)],
+            }
+        )
+        .with_columns(pl.col("close").cast(pl.Int64))
+        .select("symbol", "close", "datetime")
+    )
 
     assert _write_minute_partition(incoming, minute_dir) == 3
     stored = _read(minute_dir / "date=2026-01-05" / "part.parquet")
@@ -104,20 +132,19 @@ def test_merge_aligns_provider_columns_and_legacy_numeric_types(tmp_path):
 
 def test_existing_null_datetime_rows_are_dropped_on_merge(tmp_path):
     minute_dir = tmp_path / "kline_minute"
-    _write_minute_partition(
-        _bars({"000001.SZ": [("2026-01-05 09:31:00", 10.0)]}), minute_dir
-    )
+    _write_minute_partition(_bars({"000001.SZ": [("2026-01-05 09:31:00", 10.0)]}), minute_dir)
     out = minute_dir / "date=2026-01-05" / "part.parquet"
     # 模拟历史脏数据: 追加一行 datetime 为 null 的记录
-    dirty = pl.concat([
-        pl.read_parquet(out),
-        pl.DataFrame({"symbol": ["600000.SH"], "datetime": [None], "close": [9.9]}),
-    ], how="diagonal")
+    dirty = pl.concat(
+        [
+            pl.read_parquet(out),
+            pl.DataFrame({"symbol": ["600000.SH"], "datetime": [None], "close": [9.9]}),
+        ],
+        how="diagonal",
+    )
     dirty.write_parquet(out)
 
-    _write_minute_partition(
-        _bars({"000001.SZ": [("2026-01-05 09:32:00", 10.1)]}), minute_dir
-    )
+    _write_minute_partition(_bars({"000001.SZ": [("2026-01-05 09:32:00", 10.1)]}), minute_dir)
 
     stored = _read(out)
     assert stored["datetime"].null_count() == 0

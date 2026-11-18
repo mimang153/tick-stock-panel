@@ -1,9 +1,11 @@
 """FastAPI 入口。"""
+
 from __future__ import annotations
 
 import logging
 import sys
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -92,15 +94,16 @@ if not getattr(sys, "frozen", False):
     attach_rotating_log("backend.log", max_mb=10, backup_count=3)
 
 
-@asynccontextmanager
-async def _application_lifespan(app: FastAPI):
-    logger.info(
-        "Tick Stock Panel v%s starting (mode=%s)",
-        __version__, tf_client.current_mode(),
-    )
+@dataclass
+class _LifespanState:
+    """_application_lifespan 交付给关闭阶段的最小状态。"""
 
-    # 同步路由线程池容量: Starlette 默认 40, 本地多标签页/自动刷新与长计算
-    # 路由并存时容易排队。调大只影响空闲线程上限 (按需创建), 无常驻代价。
+    repo: KlineRepository
+    matrix_prewarm_owner: MatrixCachePrewarmOwner
+
+
+def _lifespan_early() -> None:
+    """同步路由线程池容量 + 用 AUTH_PASSWORD 初始化密码 (可失败降级)。"""
     try:
         import anyio.to_thread
 
@@ -108,37 +111,45 @@ async def _application_lifespan(app: FastAPI):
             settings.api_sync_thread_pool
         )
         logger.info("sync route thread pool: %d", settings.api_sync_thread_pool)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("thread pool resize failed (ignored): %s", e)
-
-    # 首次启动: 若配置了 AUTH_PASSWORD 环境变量且未设过密码, 用它初始化。
-    # 公网部署免 SSH 端口转发; 已设过密码则不覆盖 (改密码走 UI)。
     try:
         with startup_phase(logger, "auth bootstrap"):
             from app.services import auth as auth_service
+
             auth_service.bootstrap_from_env()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("auth bootstrap failed: %s", e)
 
-    # 数据层
+
+def _lifespan_data_core(app: FastAPI) -> tuple[DataStore, KlineRepository]:
+    """存储层/repository 初始化 (fail-closed: CK 连不上则启动失败)。"""
     with startup_phase(logger, "data store initialization"):
         store = DataStore()
+    with startup_phase(logger, "clickhouse storage initialization"):
+        from app.storage.runtime import init_storage
+
+        storage = init_storage()
+    app.state.storage = storage
     with startup_phase(logger, "repository initialization"):
-        repo = KlineRepository(store)
+        repo = KlineRepository(store, storage=storage.store)
     app.state.datastore = store
     app.state.repo = repo
-    # 去内置化种子迁移必须赶在下方 refresh_cache 之前: enriched 缓存构建时
-    # 编译自定义信号表达式, 晚种会让本次启动的看板/梯队引用的 signal_limit_*
-    # 列缺失 (跌停恒 0、连板梯队无数据), 直到下一次缓存刷新才自愈。
-    _seeded_signals = 0
+    return store, repo
+
+
+def _lifespan_seed_factors(store: DataStore) -> int:
+    """种子信号 + 自定义因子注册; 单个失败只跳过, 不阻断启动。"""
+    # 种子迁移必须赶在 refresh_cache 之前: 后者编译信号表达式, 晚种会让
+    # 本次启动的看板/梯队引用的 signal_limit_* 列缺失, 直到下次刷新才自愈。
+    seeded_signals = 0
     try:
         with startup_phase(logger, "signal seeding"):
             from app.strategy import custom_signals as _cs_seed
 
-            _seeded_signals = _cs_seed.seed_if_empty(store.data_dir)
-    except Exception as e:  # noqa: BLE001
+            seeded_signals = _cs_seed.seed_if_empty(store.data_dir)
+    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("signal seeding failed (ignored): %s", e)
-    # 自定义/复合因子载入注册表 (P3); 单个失败只跳过该因子 (fail-隔离)
     with startup_phase(logger, "custom factor module import"):
         from app.factors.store import load_runtime_registry
 
@@ -147,14 +158,19 @@ async def _application_lifespan(app: FastAPI):
             loaded_factors = load_runtime_registry(store.data_dir)
         if loaded_factors:
             logger.info("custom factors loaded: %s", len(loaded_factors))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("custom factors load failed: %s", exc)
+    return seeded_signals
+
+
+def _lifespan_mining_guardian(app: FastAPI, store: DataStore, repo: KlineRepository) -> None:
+    """挖掘/守护任务恢复 + enriched generation 固定 + 缓存后台预热。"""
     with startup_phase(logger, "mining manager initialization"):
         from app.services.mining_jobs import MiningRunStore
         from app.services.mining_manager import MiningJobManager
 
         mining_manager = MiningJobManager(store.data_dir)
-    # A degraded instance must never rewrite another owner's live run manifests.
+    # degraded 实例不得改写其他 owner 的 live run manifests
     with startup_phase(logger, "mining run recovery"):
         recovered_mining_runs = (
             mining_manager.recover_interrupted() if app.state.mining_lock_acquired else 0
@@ -162,8 +178,6 @@ async def _application_lifespan(app: FastAPI):
     app.state.mining_manager = mining_manager
     if recovered_mining_runs:
         logger.warning("recovered %d interrupted mining runs", recovered_mining_runs)
-    # 策略守护复验: 复用挖掘的任务编排 (线程 + spawn 子进程 + 持久 run store),
-    # 独立 namespace 存 run 记录; 与挖掘共用 heavy 槽 (避免双份全市场矩阵)。
     with startup_phase(logger, "guardian manager initialization"):
         guardian_manager = MiningJobManager(
             store.data_dir,
@@ -174,37 +188,33 @@ async def _application_lifespan(app: FastAPI):
         recovered_guardian_runs = guardian_manager.recover_interrupted()
     app.state.guardian_manager = guardian_manager
     if recovered_guardian_runs:
-        logger.warning(
-            "recovered %d interrupted guardian runs", recovered_guardian_runs
-        )
-    # 在接受回测请求前固定 managed generation，避免首批并发 worker 各自创建版本。
+        logger.warning("recovered %d interrupted guardian runs", recovered_guardian_runs)
+    # 接受回测请求前固定 managed generation, 避免首批并发 worker 各自创建版本
     if settings.backtest_matrix_disk_cache_enabled:
         try:
             with startup_phase(logger, "enriched generation initialization"):
                 repo.get_matrix_data_generation("stock")
         except EnrichedGenerationUnavailableError as exc:
             logger.warning("enriched generation requires a full rebuild: %s", exc)
-    # 指标异步预热标志: enriched 缓存在后台线程构建, 完成后置 True
     app.state.indicators_ready = False
-    repo._on_warmup_done = lambda: setattr(app.state, "indicators_ready", True)  # noqa: SLF001
-
-    # Polars 缓存预热 — enriched 的重计算 (107万行 compute_indicators) 推后台,
-    # instruments/index/ETF 仍同步 (毫秒级)。应用立即 ready, 指标算完后自动替换。
+    repo._on_warmup_done = lambda: setattr(app.state, "indicators_ready", True)
+    # enriched 重计算推后台, instruments/index/ETF 同步; 应用立即 ready
     repo.refresh_cache(background=True)
 
-    # 自定义数据源配置(可选): 失败只记录错误, 不影响 TickFlow 基准路径。
+
+def _lifespan_capabilities(app: FastAPI, store: DataStore, repo: KlineRepository):
+    """自定义源加载 + 能力探测 + 扩展冻结 + 升级守卫; 返回能力集。"""
     try:
         from app.data_providers import custom as custom_sources
+
         custom_sources.load_all()
         logger.info("custom data sources loaded: %d", len(custom_sources.list_sources()))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("custom data sources init failed: %s", e)
-
-    # 自定义源必须先注册,能力探测才能补充其数据集能力。
+    # 自定义源必须先注册, 能力探测才能补充其数据集能力。
     capset = detect_capabilities()
     app.state.capabilities = capset
     logger.info("ready; %d capabilities active", len(capset.all()))
-    # 各能力的生效源与可用性: 切换数据源后一眼看出路由落点, 无需回设置页对照
     try:
         from app.data_providers.capabilities import resolve_capability_sources
 
@@ -215,70 +225,66 @@ async def _application_lifespan(app: FastAPI):
                 row["source_display"],
                 "可用" if row["usable"] else "不可用",
             )
-    except Exception as e:  # noqa: BLE001 — 仅日志, 失败不影响启动
+    except Exception as e:  # noqa: BLE001 - 仅日志, 失败不影响启动
         logger.warning("能力路由日志输出失败: %s", e)
-
-    # 发布完整冻结快照后再启动行情与监控线程，避免首批事件使用未完成的注册表。
     from app.extensions.packages import start_managed_extensions
-    start_managed_extensions(
-        app, current_extension_context(data_dir=store.data_dir, repository=repo),
-    )
 
-    # 二次开发升级保护: 后台常备备份用户修改的程序文件 (无清单时自动停用)
+    start_managed_extensions(
+        app,
+        current_extension_context(data_dir=store.data_dir, repository=repo),
+    )
     from app.services.upgrade_guard import UpgradeGuard
 
     upgrade_guard = UpgradeGuard(store.data_dir)
     app.state.upgrade_guard = upgrade_guard
     upgrade_guard.start_background_scan()
+    return capset
 
-    # 全局行情服务
+
+def _lifespan_quote_monitor(app: FastAPI, repo: KlineRepository) -> None:
+    """全局行情服务 + 策略监控 + 五档盘口服务。"""
     qs = QuoteService()
     app.state.quote_service = qs
     qs.set_repo(repo)
     qs.boot_check()
-
-    # QuoteService 需要访问 strategy_monitor 等单例
-    # 先创建 strategy_monitor，再注入 app.state
+    # QuoteService 需要访问 strategy_monitor 等单例, 先创建再注入 app.state
     from app.strategy.monitor import StrategyMonitorService
+
     strategy_monitor = StrategyMonitorService()
     app.state.strategy_monitor = strategy_monitor
     qs.set_app_state(app.state)
-
-    # 五档盘口 sealed 服务(真假涨停/跌停, 独立旁路线)
     from app.services.depth_service import DepthService
+
     depth_service = DepthService()
     depth_service.set_repo(repo)
     depth_service.set_app_state(app.state)
     app.state.depth_service = depth_service
 
-    # 启动调度器(若 enriched 数据为空,首次启动可手动 POST /api/pipeline/run)
+
+def _lifespan_schedulers(app: FastAPI, store: DataStore, repo: KlineRepository, capset) -> None:
+    """调度器 + depth sealed 补跑 + 盘中分钟刷新 + 停机缺口自检。"""
     try:
-        daily_pipeline.set_app_state(app.state)  # 供 depth_finalize job 访问 depth_service
+        daily_pipeline.set_app_state(app.state)
         scheduler = daily_pipeline.start_scheduler(repo, capset)
         app.state.scheduler = scheduler
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("scheduler not started: %s", e)
         app.state.scheduler = None
-
-    # depth sealed: 启动补跑(当天文件不存在) + 盘中轮询(有能力时)
     try:
+        depth_service = app.state.depth_service
         depth_service.boot_check()
         depth_service.start_polling()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("depth_service init failed: %s", e)
-
-    # 盘中分钟增量刷新 (Expert 专有): 线程常驻, 开关/时段/能力门控在循环内每轮判断
     try:
         from app.services.minute_refresh import MinuteRefreshService
+
         minute_refresh = MinuteRefreshService(repo)
         minute_refresh.set_app_state(app.state)
         app.state.minute_refresh = minute_refresh
         minute_refresh.start()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("minute_refresh init failed: %s", e)
-
-    # 停机缺口自检: 延迟后台扫描, 发现最近交易日的盘中快照/缺口时自动创建
-    # 修复任务 (盘中停机→次日开实时场景, 不修则坏数据被"只刷今天"分支永久留存)
     try:
         import threading
 
@@ -287,76 +293,72 @@ async def _application_lifespan(app: FastAPI):
         timer = threading.Timer(30.0, boot_integrity_check, args=(app.state,))
         timer.daemon = True  # 不阻塞进程退出
         timer.start()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("integrity boot check scheduling failed: %s", e)
 
-    # 启动自愈: 上次进程异常退出可能残留 enriched 发布标记 (state=publishing),
-    # 会让所有读写持续报"数据正在发布", 且停止实时行情后没有写入方来接管。
-    # 本进程刚启动、不可能持有活跃发布, 因此可直接判定残留并在锁内恢复。
+
+async def _lifespan_background(
+    app: FastAPI, store: DataStore, repo: KlineRepository, capset
+) -> None:
+    """发布标记自愈 + 企业微信机器人 + 扩展表/财务/拉取调度 + 看门狗。"""
     try:
         from app.enriched_generation import recover_stale_publications
 
         recovered_publications = recover_stale_publications(store.data_dir)
         if recovered_publications:
             logger.warning(
-                "已恢复上次中断的 enriched 发布标记: %s",
-                ", ".join(recovered_publications),
+                "已恢复上次中断的 enriched 发布标记: %s", ", ".join(recovered_publications)
             )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("enriched 发布标记自愈失败 (不影响启动): %s", e)
-
-    # 企业微信智能机器人长连接(可选通道, 失败不阻断启动)
     try:
         from app.services.wecom_bot_service import WecomBotService
+
         wecom_bot_service = WecomBotService()
         wecom_bot_service.set_app_state(app.state)
         app.state.wecom_bot_service = wecom_bot_service
         wecom_bot_service.boot_check()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("wecom_bot_service init failed: %s", e)
-
-    # 内置扩展表 (概念/行业): 先创建 config (含拉取配置), 默认开启定时拉取。
-    # 必须在 pull_scheduler.refresh() 之前执行, 否则全新部署时 scheduler 读不到
-    # 刚创建的预设, 定时任务不会启动。
+    # 内置扩展表须在 pull_scheduler.refresh 之前创建, 否则新部署定时拉取读不到预设。
     try:
         from app.services.ext_presets import ensure_builtin_presets
-        await ensure_builtin_presets(store.data_dir)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("内置扩展表初始化失败 (不影响启动): %s", e)
 
-    # 扩展数据定时拉取: 在预设配置就绪后启动, 自动调度 enabled 的预设。
+        await ensure_builtin_presets(store.data_dir)
+    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
+        logger.warning("内置扩展表初始化失败 (不影响启动): %s", e)
     from app.services.ext_pull import pull_scheduler
+
     pull_scheduler.start(store.data_dir)
     pull_scheduler.refresh(store.data_dir)
     app.state.pull_scheduler = pull_scheduler
-
-    # 财务数据 (需 Expert 套餐): 仅初始化调度器供 /api/financials/sync/* 手动同步,
-    # 不启动自动调度——用户在「财务分析」页点「同步」手动拉取。
     from app.services.financial_sync import financial_scheduler
+
     financial_scheduler.start(store.data_dir, capset)
     app.state.financial_scheduler = financial_scheduler
-
-    # 自愈看门狗: 探测 polars 闸与写锁, 僵死时退出交由 supervisor 拉起 (兜底层)。
     from app.watchdog import start_watchdog
+
     app.state.watchdog = start_watchdog(app.state, repo)
 
-    # 策略引擎
+
+def _lifespan_strategy_engine(
+    app: FastAPI, store: DataStore, repo: KlineRepository, seeded_signals: int
+):
+    """策略引擎创建 + 去内置化迁移 + 旧策略归档; 返回引擎与筛选器。"""
     from app.services.screener import ScreenerService
     from app.strategy import config as strategy_config
     from app.strategy.engine import StrategyEngine
-    from app.strategy.monitor import StrategyMonitorService
 
-    _screener_svc = ScreenerService(repo)
-    _etf_screener_svc = ScreenerService(repo, asset_type="etf")
-    # 去内置化补全(仅升级用户): 原内置策略按 ID 补回 custom (一次性,
-    # 已自行迁移的不覆盖; 新装无旧版使用痕迹, 跳过保持策略库为空)。
+    screener_svc = ScreenerService(repo)
+    etf_screener_svc = ScreenerService(repo, asset_type="etf")
+    # 去内置化补全(仅升级用户): 原内置策略按 ID 补回 custom, 已自行迁移的不覆盖;
     # 必须在 StrategyEngine 创建前完成, 否则首载拿不到刚补回的文件。
-    _seeded_strategies = 0
+    seeded_strategies = 0
     try:
         from app.strategy.strategy_seeds import seed_missing_builtins
 
-        _seeded_strategies = seed_missing_builtins(store.data_dir)
-    except Exception as e:  # noqa: BLE001
+        seeded_strategies = seed_missing_builtins(store.data_dir)
+    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("strategy seeding failed (ignored): %s", e)
     strategy_dirs = [
         Path(__file__).resolve().parent / "strategy" / "research",
@@ -368,19 +370,17 @@ async def _application_lifespan(app: FastAPI):
         strategy_dirs=strategy_dirs,
         override_loader=lambda sid: strategy_config.load_override(store.data_dir, sid),
     )
-    # 去内置化一次性迁移: ①信号目录缺种子时补入 20 个默认定义;
-    # ②内置残留类加载失败 (composite 断链 / import 已删模块) 的策略文件
-    #   自动归档出扫描目录并重载。摘要挂到 app.state 供前端提示一次。
+    # 信号目录补种 + 加载失败策略自动归档出扫描目录并重载
     legacy_migration: dict = {}
     try:
         from app.strategy.legacy_migrate import archive_unloadable_strategies
 
-        if _seeded_signals:
-            legacy_migration["seeded_signals"] = _seeded_signals
-            logger.info("legacy migrate: seeded %d default signals", _seeded_signals)
-        if _seeded_strategies:
-            legacy_migration["seeded_strategies"] = _seeded_strategies
-            logger.info("legacy migrate: seeded %d builtin strategies", _seeded_strategies)
+        if seeded_signals:
+            legacy_migration["seeded_signals"] = seeded_signals
+            logger.info("legacy migrate: seeded %d default signals", seeded_signals)
+        if seeded_strategies:
+            legacy_migration["seeded_strategies"] = seeded_strategies
+            logger.info("legacy migrate: seeded %d builtin strategies", seeded_strategies)
         archived = archive_unloadable_strategies(strategy_engine.load_errors())
         if archived:
             strategy_engine.reload()
@@ -388,11 +388,17 @@ async def _application_lifespan(app: FastAPI):
             logger.info("legacy migrate: archived %d unloadable files", len(archived))
         if legacy_migration:
             app.state.legacy_migration = legacy_migration
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("legacy migrate failed (ignored): %s", e)
     app.state.strategy_engine = strategy_engine
     logger.info("strategy engine loaded: %d strategies", len(strategy_engine.list_strategies()))
+    return strategy_engine, screener_svc, etf_screener_svc
 
+
+def _lifespan_matrix_prewarm(
+    app: FastAPI, repo: KlineRepository, strategy_engine
+) -> MatrixCachePrewarmOwner:
+    """回测矩阵预热调度器; 预热在后台 heavy 槽内执行。"""
     matrix_prewarm_owner = MatrixCachePrewarmOwner()
 
     def _schedule_matrix_cache_prewarm() -> None:
@@ -416,10 +422,8 @@ async def _application_lifespan(app: FastAPI):
                 if latest is None:
                     logger.info("matrix cache prewarm skipped: no stock enriched data")
                     return
-
                 with shared_heavy_job_limiter.slot(
-                    "exclusive",
-                    cancel_event=matrix_prewarm_owner.cancel_event,
+                    "exclusive", cancel_event=matrix_prewarm_owner.cancel_event
                 ):
                     result = prewarm_matrix_cache(
                         BacktestEngine(repo),
@@ -432,33 +436,39 @@ async def _application_lifespan(app: FastAPI):
                 logger.info("matrix cache prewarm done: %s", result)
             except (HeavyJobCancelledError, MatrixPrewarmCancelledError):
                 logger.info("matrix cache prewarm cancelled")
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("matrix cache prewarm failed")
 
         if not matrix_prewarm_owner.schedule(_prewarm):
             logger.info("matrix cache prewarm already running or shutting down, skip")
 
-    repo._on_refresh_done = _schedule_matrix_cache_prewarm  # noqa: SLF001
+    repo._on_refresh_done = _schedule_matrix_cache_prewarm
     if repo.enriched_ready:
         _schedule_matrix_cache_prewarm()
+    return matrix_prewarm_owner
 
-    # 通用监控规则引擎: 启动时 reload 规则到内存态 (修复重启后告警失效)
+
+def _lifespan_monitoring(
+    app: FastAPI,
+    store: DataStore,
+    repo: KlineRepository,
+    strategy_engine,
+    screener_svc,
+    etf_screener_svc,
+) -> None:
+    """监控规则引擎 + 策略迁移 + 模拟盘绑定 + 后端扩展启动钩子。"""
     from app.services import preferences
     from app.services.sector_monitor import SectorMonitorService
     from app.strategy import monitor_rules as mr_store
     from app.strategy.monitor import MonitorRuleEngine
+
     monitor_engine = MonitorRuleEngine()
     sector_monitor_service = SectorMonitorService(repo)
     monitor_engine.set_strategy_engine(strategy_engine)
     monitor_engine.set_data_dir(store.data_dir)
     monitor_engine.set_sector_monitor_service(sector_monitor_service)
-    # 复用 ScreenerService 的历史窗口加载器 (三级缓存, 启动预计算命中 ~0ms),
-    # 让声明 filter_history 的策略 (如反包) 也能在实时监控里跑策略 → 盘中触发通知。
-    monitor_engine.set_history_loader(_screener_svc._load_enriched_history)
-    # ETF 版历史加载器: asset_type=etf 的 strategy 型规则用 (读 kline_etf_enriched)。
-    monitor_engine.set_history_loader_etf(_etf_screener_svc._load_enriched_history)
-
-    # 自动迁移: 把旧 strategy_monitor_ids 同步为 type=strategy 规则 (统一到监控页)
+    monitor_engine.set_history_loader(screener_svc._load_enriched_history)
+    monitor_engine.set_history_loader_etf(etf_screener_svc._load_enriched_history)
     try:
         if preferences.get_strategy_monitor_enabled():
             ids = preferences.get_strategy_monitor_ids()
@@ -466,73 +476,108 @@ async def _application_lifespan(app: FastAPI):
                 names = {s["id"]: s["name"] for s in strategy_engine.list_strategies()}
                 mr_store.migrate_strategy_monitors(store.data_dir, ids, names)
                 logger.info("strategy monitor migrated: %d strategies", len(ids))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("strategy monitor migration failed: %s", e)
-
     try:
         rules = mr_store.load_all(store.data_dir)
         monitor_engine.set_rules(rules)
         logger.info("monitor engine loaded: %d rules", monitor_engine.rule_count)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("monitor engine load failed: %s", e)
-    # 模拟盘「绑定即评估」: 把账户绑定但无监控规则的策略注入评估循环
-    # (set_rules 全量覆盖, 必须在其后注入; 失败不阻断启动)。
     try:
         from app.strategy import paper_watch
 
         synced = paper_watch.sync(store.data_dir, monitor_engine, strategy_engine)
         logger.info("paper watch synced at startup: %d strategies", len(synced["watching"]))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("paper watch sync failed (ignored): %s", e)
     app.state.monitor_engine = monitor_engine
     app.state.sector_monitor_service = sector_monitor_service
-
-    # 源码内二次开发启动钩子: 仅暴露稳定只读上下文, 单个扩展失败不影响核心启动。
     extension_registry = app.state.extension_registry
     start_backend_extensions(
         current_extension_context(data_dir=store.data_dir, repository=repo),
         extension_registry,
     )
+
+
+async def _lifespan_shutdown(app: FastAPI, state: _LifespanState) -> None:
+    """关闭阶段: 释放后台线程/调度器/存储, 顺序与启动相反。"""
+    repo = state.repo
+    matrix_prewarm_owner = state.matrix_prewarm_owner
+    repo._on_refresh_done = None
+    wd = getattr(app.state, "watchdog", None)
+    if wd:
+        await wd.stop()
+    if not matrix_prewarm_owner.shutdown(timeout=5.0):
+        logger.warning("matrix cache prewarm did not stop within 5 seconds")
+    mmanager = getattr(app.state, "mining_manager", None)
+    if mmanager:
+        mmanager.shutdown()
+    gmanager = getattr(app.state, "guardian_manager", None)
+    if gmanager:
+        gmanager.shutdown()
+    if app.state.scheduler:
+        app.state.scheduler.shutdown(wait=False)
+    ps = getattr(app.state, "pull_scheduler", None)
+    if ps:
+        ps.stop()
+    fsc = getattr(app.state, "financial_scheduler", None)
+    if fsc:
+        fsc.stop()
+    qs = getattr(app.state, "quote_service", None)  # type: ignore[assignment]
+    if qs:
+        qs.stop()
+    dsvc = getattr(app.state, "depth_service", None)
+    if dsvc:
+        dsvc.stop_polling()
+    wbot = getattr(app.state, "wecom_bot_service", None)
+    if wbot:
+        wbot.stop()
+    mrs = getattr(app.state, "minute_refresh", None)
+    if mrs:
+        mrs.stop()
+    # webhook/系统通知投递线程池: 放弃排队投递并关闭, 避免通知静默丢失在 daemon 线程里
+    from app.services.quote_service import shutdown_delivery_executors
+
+    shutdown_delivery_executors()
+    # 存储层最后收尾: 先把写缓冲 flush 完再断连, 避免丢已接受的写入
+    from app.storage.runtime import shutdown_storage
+
+    shutdown_storage()
+    logger.info("shutdown")
+
+
+@asynccontextmanager
+async def _application_lifespan(app: FastAPI):
+    logger.info(
+        "Tick Stock Panel v%s starting (mode=%s)",
+        __version__,
+        tf_client.current_mode(),
+    )
+    _lifespan_early()
+
+    store, repo = _lifespan_data_core(app)
+    seeded_signals = _lifespan_seed_factors(store)
+    _lifespan_mining_guardian(app, store, repo)
+
+    capset = _lifespan_capabilities(app, store, repo)
+    _lifespan_quote_monitor(app, repo)
+
+    _lifespan_schedulers(app, store, repo, capset)
+
+    await _lifespan_background(app, store, repo, capset)
+
+    strategy_engine, screener_svc, etf_screener_svc = _lifespan_strategy_engine(
+        app, store, repo, seeded_signals
+    )
+
+    matrix_prewarm_owner = _lifespan_matrix_prewarm(app, repo, strategy_engine)
+
+    _lifespan_monitoring(app, store, repo, strategy_engine, screener_svc, etf_screener_svc)
     try:
         yield
     finally:
-        repo._on_refresh_done = None  # noqa: SLF001
-        wd = getattr(app.state, "watchdog", None)
-        if wd:
-            await wd.stop()
-        if not matrix_prewarm_owner.shutdown(timeout=5.0):
-            logger.warning("matrix cache prewarm did not stop within 5 seconds")
-        mmanager = getattr(app.state, "mining_manager", None)
-        if mmanager:
-            mmanager.shutdown()
-        gmanager = getattr(app.state, "guardian_manager", None)
-        if gmanager:
-            gmanager.shutdown()
-        if app.state.scheduler:
-            app.state.scheduler.shutdown(wait=False)
-        ps = getattr(app.state, "pull_scheduler", None)
-        if ps:
-            ps.stop()
-        fsc = getattr(app.state, "financial_scheduler", None)
-        if fsc:
-            fsc.stop()
-        qs = getattr(app.state, "quote_service", None)
-        if qs:
-            qs.stop()
-        dsvc = getattr(app.state, "depth_service", None)
-        if dsvc:
-            dsvc.stop_polling()
-        wbot = getattr(app.state, "wecom_bot_service", None)
-        if wbot:
-            wbot.stop()
-        mrs = getattr(app.state, "minute_refresh", None)
-        if mrs:
-            mrs.stop()
-        # webhook/系统通知投递线程池: 放弃排队投递并关闭, 避免通知静默丢失在 daemon 线程里
-        from app.services.quote_service import shutdown_delivery_executors
-
-        shutdown_delivery_executors()
-        logger.info("shutdown")
+        await _lifespan_shutdown(app, _LifespanState(repo, matrix_prewarm_owner))
 
 
 @asynccontextmanager
@@ -568,11 +613,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
 @app.exception_handler(WorkBusyError)
 @app.exception_handler(HeavyJobLimitTimeoutError)
 async def shared_work_busy_handler(request: Request, exc: WorkBusyError) -> JSONResponse:
-    return JSONResponse(status_code=503, content={"detail": str(exc), "code": "work_busy"},
-                        headers={"Retry-After": "3"})
+    return JSONResponse(
+        status_code=503,
+        content={"detail": str(exc), "code": "work_busy"},
+        headers={"Retry-After": "3"},
+    )
 
 
 # CORS: 允许局域网访问 (自托管场景, 放开所有来源)
@@ -616,8 +665,14 @@ async def workload_middleware(request: Request, call_next):
 
     from app.services.workload import workload
 
-    group = next((name for name in ("screener", "kline", "overview", "watchlist", "backtest")
-                  if request.url.path == f"/api/{name}" or request.url.path.startswith(f"/api/{name}/")), None)
+    group = next(
+        (
+            name
+            for name in ("screener", "kline", "overview", "watchlist", "backtest")
+            if request.url.path == f"/api/{name}" or request.url.path.startswith(f"/api/{name}/")
+        ),
+        None,
+    )
     if group is None:
         return await call_next(request)
     started = time.perf_counter()
@@ -644,19 +699,25 @@ async def auth_middleware(request: Request, call_next):
     authz = request.headers.get("authorization", "")
     if authz.startswith("Bearer "):
         from app.services import api_gateway
+
         # 网络门禁先行: 默认仅本机/内网可调 Token 通道 (API_TOKEN_LOCAL_ONLY=0 放开);
         # 先于 evaluate 拦截 → 不消耗限流额度, 公网探测者也拿不到 Token 有效性信号
         gate = api_gateway.token_network_verdict(auth_api._client_ip(request))
         if gate is not None:
             return JSONResponse(
-                status_code=gate["status"], content={"detail": gate["detail"]},
+                status_code=gate["status"],
+                content={"detail": gate["detail"]},
             )
         verdict = api_gateway.evaluate(
-            settings.data_dir, request.method, path, authz[len("Bearer "):].strip(),
+            settings.data_dir,
+            request.method,
+            path,
+            authz[len("Bearer ") :].strip(),
         )
         if verdict["status"] is not None:
             return JSONResponse(
-                status_code=verdict["status"], content={"detail": verdict["detail"]},
+                status_code=verdict["status"],
+                content={"detail": verdict["detail"]},
                 headers=verdict["headers"],
             )
         response = await call_next(request)
@@ -665,6 +726,7 @@ async def auth_middleware(request: Request, call_next):
         return response
 
     from app.services import auth as auth_service
+
     # 情况 1+2: 未设密码
     if not auth_service.is_configured():
         # 本机/内网 → 放行(服务器主人可访问, 并去 /login 设密码)
@@ -739,10 +801,10 @@ app.state.extension_load_errors = extension_load_errors
 # 能力门控异常 → 403(而非默认 500)
 # 业务代码用 capset.require(Cap.X) 断言能力,缺失时抛 CapabilityDenied;
 # 若不注册 handler 会冒泡成 500 Internal Server Error,对前端不友好且语义错误。
-from fastapi import Request
-from fastapi.responses import JSONResponse
 
-from app.tickflow.capabilities import CapabilityDenied
+from app.tickflow.capabilities import (  # noqa: E402 - 延迟导入避免启动期循环依赖
+    CapabilityDenied,
+)
 
 
 @app.get("/api/openapi.json", include_in_schema=False)
@@ -760,10 +822,17 @@ async def openapi_contract_view(tier: str = "a"):
         for path, ops in spec.get("paths", {}).items():
             kept_ops = {}
             for method, op in ops.items():
-                if method in ("get", "post", "put", "delete", "patch") and api_gateway.required_scope(
-                    method.upper(), path,
+                if method in (
+                    "get",
+                    "post",
+                    "put",
+                    "delete",
+                    "patch",
+                ) and api_gateway.required_scope(
+                    method.upper(),
+                    path,
                 ):
-                    kept_ops[method] = op
+                    kept_ops[method] = op  # noqa: PERF403 - PERF403: 循环体含复杂逻辑, 推导式不适用
             if kept_ops:
                 kept_paths[path] = kept_ops
         spec["paths"] = kept_paths
@@ -785,8 +854,11 @@ async def daily_integrity_error_handler(request: Request, exc: DailyIntegrityErr
 
 
 @app.exception_handler(ProviderRequestError)
-async def provider_request_error_handler(request: Request, exc: ProviderRequestError) -> JSONResponse:
+async def provider_request_error_handler(
+    request: Request, exc: ProviderRequestError
+) -> JSONResponse:
     return JSONResponse(status_code=502, content={"detail": str(exc), "code": "provider_request"})
+
 
 # 生产期静态文件(前端 dist)
 def _register_static_routes(target: FastAPI, static_dir: Path) -> None:

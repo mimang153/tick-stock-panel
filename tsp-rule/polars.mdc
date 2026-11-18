@@ -1,0 +1,33 @@
+---
+description: "Polars 数据栈规范：lazy/流式、guarded_collect、scan 封装、Parquet 原子写（tsp 后端数据主力栈）"
+globs: backend/app/**/*.py, backend/tests/**/*.py
+alwaysApply: false
+---
+# Polars 数据栈规范
+
+## 依赖与版本
+- 锁定已验证的 Polars 大版本（当前 `polars>=1.44,<1.45`），**升级需重跑 `scripts/stress_polars_concurrency.py` 压测**（曾有并发死锁回归）才能合入
+- 老 CPU（无 AVX2/FMA）用可选 extra `legacy-cpu`（`polars[rtcompat]`），仅在需要时启用
+
+## 读取约定
+- 统一走封装的 scan 入口（如 `parquet.scan_parquet_compat` / `scan_daily_parquet` / `scan_enriched_parquet`），不要直接散用 `pl.scan_parquet` 拼写
+- `scan_parquet_compat` 兼容进式 schema 变更：`missing_columns="insert"`、`extra_columns="ignore"`；日K/富集表固定传入 `DAILY_STORAGE_SCHEMA` / `ENRICHED_STORAGE_SCHEMA` 与 `integer_cast="allow-float"` 兜底类型
+- 大数据集一律 `pl.scan_parquet(...).pipe(guarded_collect)` 延迟执行；能选列/过滤就下推，避免全量读后再裁
+- 跨文件合并：`pl.concat([pl.scan_parquet(p) for p in files], how="diagonal_relaxed")`，并保证 schema 对拢
+
+## 执行与并发（重要）
+- **只通过 `guarded_collect(lf, *, priority)` 触达 collect**（见 `polars_guard.py`），禁止直接裸调 `.collect()`
+- 并发闸采用**双车道设计**：总闸位 `polars_collect_permits` 个；`background`（预热/增量/维表加载）只能占 `polars_collect_background_permits`，把剩余闸位留给 `interactive`（页面读接口），保证后台大计算不饿死页面请求
+- 优先级用字面量 `"interactive"` 或 `"background"`；获取顺序恒为 background 车道 → 总闸，不存在环
+- 回测/优化/挖掘等 `worker` 子进程单任务串行执行，**不经过本闸**，不要对 worker 包 guarded_collect
+- 流式/大结果避免一次性落全部到内存，评估 `sink_parquet` 与流式 executor
+
+## 原子写与一致性
+- 数据落盘遵循「先暂存→校验→再原子替换」，部分失败不得破坏旧数据
+- 写分区保持幂等合并语义（同日去重）；写缓冲按行/间隔 flush
+- 时区统一：日期列补全、历史时点对齐要保持与既有实现一致
+
+## 性能与验证
+- 每次性能改动：**相同环境、相同数据量**对比前后耗时与内存，有实测数据才下结论；每项单独验证、单独提交
+- 改动后必须保留数据口径、缓存失效与原子写语义
+- 涉及 pandas 的地方仅限 `BacktestService` 边界使用（见 ADR-19），不要在数据主链路上引入 pandas

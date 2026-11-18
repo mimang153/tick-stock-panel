@@ -5,8 +5,10 @@
 enriched 的 turnover_rate 随之全空, 依赖换手率与流通市值的策略 (起爆/5连阳)
 直接筛出 0 只 —— 同一个策略换数据源结果就不同。
 """
+
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import polars as pl
@@ -15,48 +17,70 @@ import pytest
 from app.services import instrument_sync as isync
 
 
-def _write_existing(data_dir: Path) -> None:
+def _existing_frame() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "symbol": ["600000.SH", "000001.SZ"],
+            "name": ["浦发银行", "平安银行"],
+            "code": ["600000", "000001"],
+            "exchange": ["SH", "SZ"],
+            "region": ["CN", "CN"],
+            "type": ["stock", "stock"],
+            "listing_date": ["1999-11-10", "1991-04-03"],
+            "total_shares": [2.9e10, 1.9e10],
+            "float_shares": [2.9e10, 1.9e10],
+            "tick_size": [0.01, 0.01],
+            "limit_up": [11.0, 12.0],
+            "limit_down": [9.0, 10.0],
+        }
+    )
+
+
+def _write_existing(data_dir: Path, ck_runtime=None) -> None:
+    """写入既有维表（维表读/写路径已切 CK，传 ck_runtime 时写入带前缀表）。"""
+    df = _existing_frame()
+    if ck_runtime is not None:
+        ck_runtime.write_instruments("stock", df)
+        # ReplacingMergeTree 以 updated_at 定版本: 同毫秒两次写入会有平局,
+        # 留出间隔保证 seed 行的版本早于用例内的同步写入 (生产为隔日同步, 无此问题)。
+        time.sleep(0.005)
     out = data_dir / "instruments"
     out.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame({
-        "symbol": ["600000.SH", "000001.SZ"],
-        "name": ["浦发银行", "平安银行"],
-        "code": ["600000", "000001"],
-        "exchange": ["SH", "SZ"],
-        "region": ["CN", "CN"],
-        "type": ["stock", "stock"],
-        "listing_date": ["1999-11-10", "1991-04-03"],
-        "total_shares": [2.9e10, 1.9e10],
-        "float_shares": [2.9e10, 1.9e10],
-        "tick_size": [0.01, 0.01],
-        "limit_up": [11.0, 12.0],
-        "limit_down": [9.0, 10.0],
-    }).write_parquet(out / "instruments.parquet")
+    df.write_parquet(out / "instruments.parquet")
 
 
 def _provider_rows(*symbols: str) -> list[dict]:
     """模拟只提供标识字段的行情源 (无股本/交易规则)。"""
     return [
         {
-            "symbol": s, "name": s, "code": s.split(".")[0],
-            "exchange": s.split(".")[1], "region": "CN", "type": "stock",
-            "listing_date": None, "total_shares": None, "float_shares": None,
-            "tick_size": None, "limit_up": None, "limit_down": None,
+            "symbol": s,
+            "name": s,
+            "code": s.split(".")[0],
+            "exchange": s.split(".")[1],
+            "region": "CN",
+            "type": "stock",
+            "listing_date": None,
+            "total_shares": None,
+            "float_shares": None,
+            "tick_size": None,
+            "limit_up": None,
+            "limit_down": None,
         }
         for s in symbols
     ]
 
 
-def test_share_fields_restored_from_existing_table(tmp_path, monkeypatch) -> None:
-    _write_existing(tmp_path)
+def test_share_fields_restored_from_existing_table(tmp_path, monkeypatch, ck_runtime) -> None:
+    _write_existing(tmp_path, ck_runtime)
     monkeypatch.setattr(
-        isync, "_fetch_instruments_via_provider",
+        isync,
+        "_fetch_instruments_via_provider",
         lambda: _provider_rows("600000.SH", "000001.SZ"),
     )
 
     assert isync.sync_instruments(tmp_path) == 2
 
-    df = pl.read_parquet(tmp_path / "instruments" / "instruments.parquet")
+    df = ck_runtime.read_instruments("stock")
     by_symbol = {r["symbol"]: r for r in df.to_dicts()}
     assert by_symbol["600000.SH"]["float_shares"] == pytest.approx(2.9e10)
     assert by_symbol["600000.SH"]["total_shares"] == pytest.approx(2.9e10)
@@ -64,26 +88,27 @@ def test_share_fields_restored_from_existing_table(tmp_path, monkeypatch) -> Non
     assert by_symbol["000001.SZ"]["float_shares"] == pytest.approx(1.9e10)
 
 
-def test_new_symbol_keeps_null_shares_instead_of_faking(tmp_path, monkeypatch) -> None:
+def test_new_symbol_keeps_null_shares_instead_of_faking(tmp_path, monkeypatch, ck_runtime) -> None:
     """新上市标的没有历史值 → 保持 null, 不伪造股本。"""
-    _write_existing(tmp_path)
+    _write_existing(tmp_path, ck_runtime)
     monkeypatch.setattr(
-        isync, "_fetch_instruments_via_provider",
+        isync,
+        "_fetch_instruments_via_provider",
         lambda: _provider_rows("600000.SH", "301999.SZ"),
     )
 
     isync.sync_instruments(tmp_path)
 
-    df = pl.read_parquet(tmp_path / "instruments" / "instruments.parquet")
+    df = ck_runtime.read_instruments("stock")
     new = df.filter(pl.col("symbol") == "301999.SZ")
     assert new.height == 1
     assert new["float_shares"][0] is None
     assert new["total_shares"][0] is None
 
 
-def test_provider_fields_win_when_present(tmp_path, monkeypatch) -> None:
+def test_provider_fields_win_when_present(tmp_path, monkeypatch, ck_runtime) -> None:
     """provider 自带股本时以 provider 为准 (不复用旧值)。"""
-    _write_existing(tmp_path)
+    _write_existing(tmp_path, ck_runtime)
     rows = _provider_rows("600000.SH")
     rows[0]["float_shares"] = 1.0e9
     rows[0]["total_shares"] = 2.0e9
@@ -91,27 +116,28 @@ def test_provider_fields_win_when_present(tmp_path, monkeypatch) -> None:
 
     isync.sync_instruments(tmp_path)
 
-    df = pl.read_parquet(tmp_path / "instruments" / "instruments.parquet")
+    df = ck_runtime.read_instruments("stock").filter(pl.col("symbol") == "600000.SH")
     assert df["float_shares"][0] == pytest.approx(1.0e9)
     assert df["total_shares"][0] == pytest.approx(2.0e9)
 
 
-def test_no_existing_table_is_tolerated(tmp_path, monkeypatch) -> None:
+def test_no_existing_table_is_tolerated(tmp_path, monkeypatch, ck_runtime) -> None:
     """首次同步且无历史维表: 不报错, 字段保持 null。"""
     monkeypatch.setattr(
-        isync, "_fetch_instruments_via_provider",
+        isync,
+        "_fetch_instruments_via_provider",
         lambda: _provider_rows("600000.SH"),
     )
 
     assert isync.sync_instruments(tmp_path) == 1
 
-    df = pl.read_parquet(tmp_path / "instruments" / "instruments.parquet")
+    df = ck_runtime.read_instruments("stock")
     assert df["float_shares"][0] is None
 
 
-def test_partial_provider_fields_filled_per_row(tmp_path, monkeypatch) -> None:
+def test_partial_provider_fields_filled_per_row(tmp_path, monkeypatch, ck_runtime) -> None:
     """provider 只给部分标的股本时, 也要逐行补全 (不能整列跳过)。"""
-    _write_existing(tmp_path)
+    _write_existing(tmp_path, ck_runtime)
     rows = _provider_rows("600000.SH", "000001.SZ")
     rows[0]["float_shares"] = 5.0e8  # 第一只有值, 第二只仍为空
     rows[0]["total_shares"] = 6.0e8
@@ -119,53 +145,75 @@ def test_partial_provider_fields_filled_per_row(tmp_path, monkeypatch) -> None:
 
     isync.sync_instruments(tmp_path)
 
-    df = pl.read_parquet(tmp_path / "instruments" / "instruments.parquet")
+    df = ck_runtime.read_instruments("stock")
     by_symbol = {r["symbol"]: r for r in df.to_dicts()}
     assert by_symbol["600000.SH"]["float_shares"] == pytest.approx(5.0e8)
     assert by_symbol["000001.SZ"]["float_shares"] == pytest.approx(1.9e10)
 
 
 @pytest.mark.parametrize("missing_name", [None, "", "   "])
-def test_sync_preserves_known_names_when_provider_has_blanks(tmp_path, monkeypatch, missing_name):
-    _write_existing(tmp_path)
-    rows = pl.read_parquet(tmp_path / "instruments/instruments.parquet").to_dicts()
+def test_sync_preserves_known_names_when_provider_has_blanks(
+    tmp_path, monkeypatch, missing_name, ck_runtime
+):
+    _write_existing(tmp_path, ck_runtime)
+    rows = _existing_frame().to_dicts()
     rows[0]["name"] = missing_name
     rows[1]["name"] = "更新后的名称"
     monkeypatch.setattr(isync, "_fetch_instruments_via_provider", lambda: rows)
 
     isync.sync_instruments(tmp_path)
 
-    result = pl.read_parquet(tmp_path / "instruments/instruments.parquet")
-    assert result["name"].to_list() == ["浦发银行", "更新后的名称"]
+    result = ck_runtime.read_instruments("stock").sort("symbol")
+    assert result["name"].to_list() == ["更新后的名称", "浦发银行"]  # CK 读按 symbol 排序
 
 
-def test_daily_price_limits_are_not_inherited_from_old_metadata(tmp_path, monkeypatch):
-    _write_existing(tmp_path)
-    monkeypatch.setattr(isync, "_fetch_instruments_via_provider", lambda: _provider_rows("600000.SH"))
+def test_daily_price_limits_are_not_inherited_from_old_metadata(tmp_path, monkeypatch, ck_runtime):
+    _write_existing(tmp_path, ck_runtime)
+    monkeypatch.setattr(
+        isync, "_fetch_instruments_via_provider", lambda: _provider_rows("600000.SH")
+    )
 
     isync.sync_instruments(tmp_path)
-    row = pl.read_parquet(tmp_path / "instruments/instruments.parquet").row(0, named=True)
+    row = (
+        ck_runtime.read_instruments("stock")
+        .filter(pl.col("symbol") == "600000.SH")
+        .row(0, named=True)
+    )
     assert row["float_shares"] == pytest.approx(2.9e10)
     assert row["limit_up"] is None
     assert row["limit_down"] is None
 
 
-@pytest.mark.parametrize(("mode", "current_limits"), [("none", False), ("free", False), ("api_key", True)])
-def test_only_paid_metadata_can_supply_todays_price_limits(tmp_path, monkeypatch, mode, current_limits):
+@pytest.mark.parametrize(
+    ("mode", "current_limits"), [("none", False), ("free", False), ("api_key", True)]
+)
+def test_only_paid_metadata_can_supply_todays_price_limits(
+    tmp_path, monkeypatch, mode, current_limits, ck_runtime
+):
     from types import SimpleNamespace
 
     from app.tickflow import client
 
-    item = {"symbol": "002172.SZ", "name": "澳洋健康", "ext": {
-        "limit_up": 6.50, "limit_down": 5.32, "float_shares": 765140730.0,
-    }}
+    item = {
+        "symbol": "002172.SZ",
+        "name": "澳洋健康",
+        "ext": {
+            "limit_up": 6.50,
+            "limit_down": 5.32,
+            "float_shares": 765140730.0,
+        },
+    }
     monkeypatch.setattr(isync, "_fetch_instruments_via_provider", lambda: None)
-    monkeypatch.setattr(isync, "get_client", lambda: SimpleNamespace(
-        exchanges=SimpleNamespace(get_instruments=lambda *args, **kwargs: [item]),
-    ))
+    monkeypatch.setattr(
+        isync,
+        "get_client",
+        lambda: SimpleNamespace(
+            exchanges=SimpleNamespace(get_instruments=lambda *args, **kwargs: [item]),
+        ),
+    )
     monkeypatch.setattr(client, "current_mode", lambda: mode)
     isync.sync_instruments(tmp_path)
-    row = pl.read_parquet(tmp_path / "instruments/instruments.parquet").row(0, named=True)
+    row = ck_runtime.read_instruments("stock").row(0, named=True)
     assert row["limit_up"] == (6.50 if current_limits else None)
     assert row["limit_down"] == (5.32 if current_limits else None)
     assert row["float_shares"] == 765140730.0

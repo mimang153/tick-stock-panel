@@ -45,7 +45,7 @@ def test_create_and_atomic_summary_reads(tmp_path: Path) -> None:
             try:
                 value = store.read_summary("run_atomic")
                 assert isinstance(value.get("iteration"), int)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - 并发测试需收集任意线程异常
                 failures.append(exc)
                 return
 
@@ -84,7 +84,7 @@ def test_signature_is_canonical_and_covers_request_dimensions() -> None:
     )
     assert signature != compute_run_signature(first, {"daily": "v8", "enriched": "v2"})
     assert signature != compute_run_signature(
-        {**first, "symbols": list(reversed(first["symbols"]))},
+        {**first, "symbols": list(reversed(first["symbols"]))},  # type: ignore[call-overload]
         {"daily": "v7", "enriched": "v2"},
     )
 
@@ -199,15 +199,16 @@ def test_find_by_signature_can_filter_active_and_success_runs(tmp_path: Path) ->
     store.transition_status("success_match", "running")
     store.transition_status("success_match", "succeeded_with_budget_exhausted")
 
+    assert queued is not None
     assert (
-        store.find_by_signature(queued["run_signature"], statuses=ACTIVE_RUN_STATUSES)["run_id"]
+        store.find_by_signature(queued["run_signature"], statuses=ACTIVE_RUN_STATUSES)["run_id"]  # type: ignore[arg-type, index]
         == "queued_match"
     )  # type: ignore[index]
-    assert store.find_by_signature(queued["run_signature"], statuses=SUCCESS_RUN_STATUSES) is None
+    assert store.find_by_signature(queued["run_signature"], statuses=SUCCESS_RUN_STATUSES) is None  # type: ignore[arg-type]
     success = store.get("success_match")
     assert success is not None
     assert (
-        store.find_by_signature(success["run_signature"], statuses=SUCCESS_RUN_STATUSES)["run_id"]
+        store.find_by_signature(success["run_signature"], statuses=SUCCESS_RUN_STATUSES)["run_id"]  # type: ignore[arg-type, index]
         == "success_match"
     )  # type: ignore[index]
 
@@ -241,7 +242,7 @@ def test_concurrent_event_appends_have_unique_contiguous_ids(tmp_path: Path) -> 
             barrier.wait()
             for index in range(30):
                 store.append_event("concurrent", "progress", {"worker": worker, "index": index})
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 并发测试需收集任意线程异常
             failures.append(exc)
 
     threads = [

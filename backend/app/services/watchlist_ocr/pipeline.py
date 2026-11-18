@@ -1,4 +1,5 @@
 """截图 → OCR 文本 → 抽代码 → instruments 校验。"""
+
 from __future__ import annotations
 
 import logging
@@ -53,44 +54,64 @@ def extract_codes(text: str) -> list[str]:
     return codes
 
 
-def build_instrument_lookups(data_dir: Path) -> tuple[dict[str, str], dict[str, str]]:
-    """构建 code→symbol、symbol→name（股票 + ETF）。"""
+def build_instrument_lookups(data_dir: Path) -> tuple[dict[str, str], dict[str, str]]:  # noqa: C901 - C901: 分支为业务多阶段编排, 拆分会割裂上下文; 单测已覆盖
+    """构建 code→symbol、symbol→name（股票 + ETF）。
+
+    CK 为唯一读源（stock + etf 维表）；CK 无数据或未初始化时回退本地维表文件。
+    """
     code_to_symbol: dict[str, str] = {}
     symbol_to_name: dict[str, str] = {}
 
-    paths: list[Path] = [
-        data_dir / "instruments" / "instruments.parquet",
-    ]
-    etf_dir = data_dir / "instruments_etf"
-    if etf_dir.is_dir():
-        paths.extend(sorted(etf_dir.glob("*.parquet")))
+    frames: list[pl.DataFrame] = []
+    try:
+        from app.storage.runtime import get_storage
 
-    for path in paths:
-        if not path.exists():
-            continue
-        try:
-            df = pl.read_parquet(path)
-            if "symbol" not in df.columns:
-                continue
-            has_code = "code" in df.columns
-            has_name = "name" in df.columns
-            for row in df.iter_rows(named=True):
-                symbol = str(row.get("symbol") or "").strip()
-                if not symbol:
+        runtime = get_storage()
+        if runtime is not None:
+            for asset in ("stock", "etf"):
+                try:
+                    df = runtime.store.read_instruments(asset)
+                except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+                    logger.debug("read instruments %s failed: %s", asset, e)
                     continue
-                code = str(row.get("code") or "").strip() if has_code else ""
-                if not (len(code) == 6 and code.isdigit()):
-                    bare = symbol.split(".", 1)[0]
-                    if len(bare) == 6 and bare.isdigit():
-                        code = bare
-                if len(code) == 6 and code.isdigit():
-                    code_to_symbol.setdefault(code, symbol)
-                if has_name:
-                    name = str(row.get("name") or "").strip()
-                    if name:
-                        symbol_to_name.setdefault(symbol, name)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("read instruments %s failed: %s", path, e)
+                if not df.is_empty():
+                    frames.append(df)
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+        logger.debug("storage instruments unavailable: %s", e)
+
+    if not frames:
+        paths: list[Path] = [data_dir / "instruments" / "instruments.parquet"]
+        etf_dir = data_dir / "instruments_etf"
+        if etf_dir.is_dir():
+            paths.extend(sorted(etf_dir.glob("*.parquet")))
+        for path in paths:
+            if not path.exists():
+                continue
+            try:
+                frames.append(pl.read_parquet(path))
+            except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+                logger.debug("read instruments %s failed: %s", path, e)
+
+    for df in frames:
+        if "symbol" not in df.columns:
+            continue
+        has_code = "code" in df.columns
+        has_name = "name" in df.columns
+        for row in df.iter_rows(named=True):
+            symbol = str(row.get("symbol") or "").strip()
+            if not symbol:
+                continue
+            code = str(row.get("code") or "").strip() if has_code else ""
+            if not (len(code) == 6 and code.isdigit()):
+                bare = symbol.split(".", 1)[0]
+                if len(bare) == 6 and bare.isdigit():
+                    code = bare
+            if len(code) == 6 and code.isdigit():
+                code_to_symbol.setdefault(code, symbol)
+            if has_name:
+                name = str(row.get("name") or "").strip()
+                if name:
+                    symbol_to_name.setdefault(symbol, name)
 
     return code_to_symbol, symbol_to_name
 

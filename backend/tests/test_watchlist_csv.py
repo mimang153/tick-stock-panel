@@ -3,6 +3,7 @@
 导入落点统一走自选分组语义（watchlist.add_batch 的 group_ids M:N 并入），
 本测试同时覆盖该并入语义，作为前端「并入目标分组」交互的服务端依据。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -24,19 +25,29 @@ from app.services.watchlist_csv import (
 )
 
 
-def _write_instruments(data_dir: Path) -> None:
-    inst = data_dir / "instruments"
-    inst.mkdir()
-    pl.DataFrame(
+def _write_instruments(data_dir: Path, ck_runtime=None) -> None:
+    """写入维表匹配数据。
+
+    维表读路径已切 CK：传入 ``ck_runtime`` 时同步写入带前缀的 CK 表
+    （全局 runtime 被其它用例泄漏时，本地文件不会被读到）。
+    """
+    df = pl.DataFrame(
         {
             "code": ["600036", "515880"],
             "symbol": ["600036.SH", "515880.SH"],
             "name": ["招商银行", "通信ETF国泰"],
         }
-    ).write_parquet(inst / "instruments.parquet")
+    )
+    if ck_runtime is not None:
+        ck_runtime.write_instruments("stock", df)
+    inst = data_dir / "instruments"
+    inst.mkdir(exist_ok=True)
+    df.write_parquet(inst / "instruments.parquet")
 
 
-def _mock_upload(*, content: bytes, content_type: str = "text/csv", filename: str = "watchlist.csv") -> MagicMock:
+def _mock_upload(
+    *, content: bytes, content_type: str = "text/csv", filename: str = "watchlist.csv"
+) -> MagicMock:
     file = MagicMock()
     file.content_type = content_type
     file.filename = filename
@@ -54,6 +65,7 @@ def _mock_request(data_dir: Path) -> MagicMock:
 
 
 # ---- 解码 ----
+
 
 def test_decode_utf8_bom_stripped():
     raw = "代码,名称\n600036,招商银行\n".encode("utf-8-sig")
@@ -80,6 +92,7 @@ def test_decode_empty_raises():
 
 
 # ---- 解析 ----
+
 
 def test_parse_comma_csv_with_header():
     text = "股票代码,股票名称,最新价\n600036,招商银行,42.50\n515880,通信ETF,1.34\n"
@@ -118,8 +131,9 @@ def test_parse_concatenated_code_name_cell():
 
 # ---- 主数据匹配 / 名称兜底（CSV 行级） ----
 
-def test_import_matched_name_fallback_and_unmatched(tmp_path: Path):
-    _write_instruments(tmp_path)
+
+def test_import_matched_name_fallback_and_unmatched(tmp_path: Path, ck_runtime):
+    _write_instruments(tmp_path, ck_runtime)
     raw = (
         "代码,名称,现价\n"
         "600036,招商银行,42.50\n"
@@ -145,8 +159,8 @@ def test_import_matched_name_fallback_and_unmatched(tmp_path: Path):
     assert res["codes"] == ["600036", "000001", "999999"]
 
 
-def test_import_dedupe_and_header_skipped(tmp_path: Path):
-    _write_instruments(tmp_path)
+def test_import_dedupe_and_header_skipped(tmp_path: Path, ck_runtime):
+    _write_instruments(tmp_path, ck_runtime)
     raw = "代码,名称\n600036,招商银行\n600036,招商银行\n515880,通信ETF国泰\n".encode()
     res = import_watchlist_csv(raw, tmp_path)
     symbols = [c["symbol"] for c in res["candidates"]]
@@ -162,8 +176,9 @@ def test_import_junk_rows_ignored(tmp_path: Path):
 
 # ---- 粘贴代码（整段抽码，不压缩同行多码） ----
 
-def test_codes_dedupe_order_and_counts(tmp_path: Path):
-    _write_instruments(tmp_path)
+
+def test_codes_dedupe_order_and_counts(tmp_path: Path, ck_runtime):
+    _write_instruments(tmp_path, ck_runtime)
     res = import_watchlist_codes("600036\n515880\n999999\n600036", tmp_path)
     assert res["provider"] == "codes"
     assert res["codes"] == ["600036", "515880", "999999"]
@@ -209,6 +224,7 @@ def test_import_functions_do_not_write_watchlist(tmp_path: Path, monkeypatch):
 
 # ---- 分组合并语义（导入落点，M:N 并入服务端依据） ----
 
+
 def test_add_batch_merges_into_target_group_mn(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     _, g1 = watchlist.create_group("组合一")
@@ -246,6 +262,7 @@ def test_add_batch_merges_into_multiple_groups_mn(tmp_path: Path, monkeypatch):
 
 
 # ---- API 门禁：CSV ----
+
 
 @pytest.mark.asyncio
 async def test_import_csv_rejects_bad_extension(tmp_path: Path):
@@ -311,8 +328,8 @@ async def test_import_csv_maps_value_error_to_400(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_import_csv_success(tmp_path: Path, monkeypatch):
-    _write_instruments(tmp_path)
+async def test_import_csv_success(tmp_path: Path, monkeypatch, ck_runtime):
+    _write_instruments(tmp_path, ck_runtime)
     monkeypatch.setattr(watchlist, "list_symbols", lambda: [])
     request = _mock_request(tmp_path)
     file = _mock_upload(content="代码,名称\n600036,招商银行\n515880,通信ETF国泰\n".encode())
@@ -324,6 +341,7 @@ async def test_import_csv_success(tmp_path: Path, monkeypatch):
 
 
 # ---- API 门禁：粘贴代码 ----
+
 
 def test_import_codes_rejects_empty(tmp_path: Path, monkeypatch):
     request = _mock_request(tmp_path)
@@ -367,8 +385,8 @@ def test_import_codes_maps_value_error_to_400(tmp_path: Path, monkeypatch):
     assert "最多" in str(ei.value.detail)
 
 
-def test_import_codes_success(tmp_path: Path, monkeypatch):
-    _write_instruments(tmp_path)
+def test_import_codes_success(tmp_path: Path, monkeypatch, ck_runtime):
+    _write_instruments(tmp_path, ck_runtime)
     monkeypatch.setattr(watchlist, "list_symbols", lambda: [])
     request = _mock_request(tmp_path)
     res = import_from_codes(ImportCodesRequest(text="600036\n515880\n999999"), request)

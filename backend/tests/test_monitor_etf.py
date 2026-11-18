@@ -5,10 +5,10 @@ from app.strategy.monitor import MonitorRuleEngine
 def test_history_loader_selection_by_asset_type():
     eng = MonitorRuleEngine()
 
-    def stock_loader(d, l):
+    def stock_loader(d, loader_type):
         return "STOCK"
 
-    def etf_loader(d, l):
+    def etf_loader(d, loader_type):
         return "ETF"
 
     eng.set_history_loader(stock_loader)
@@ -34,33 +34,46 @@ def test_rule_model_defaults_stock():
 
 def test_normalize_preserves_and_defaults_asset_type():
     assert monitor_rules.normalize({"id": "a", "type": "price"})["asset_type"] == "stock"
-    assert monitor_rules.normalize({"id": "a", "type": "signal", "asset_type": "etf"})["asset_type"] == "etf"
+    assert (
+        monitor_rules.normalize({"id": "a", "type": "signal", "asset_type": "etf"})["asset_type"]
+        == "etf"
+    )
 
 
 def _signal_rule(rid, asset_type, sym):
     return {
-        "id": rid, "name": rid, "type": "signal", "asset_type": asset_type,
-        "scope": "symbols", "symbols": [sym], "logic": "and",
+        "id": rid,
+        "name": rid,
+        "type": "signal",
+        "asset_type": asset_type,
+        "scope": "symbols",
+        "symbols": [sym],
+        "logic": "and",
         "conditions": [{"field": "rsi_14", "op": "<", "value": 100}],
-        "cooldown_seconds": 0, "enabled": True,
+        "cooldown_seconds": 0,
+        "enabled": True,
     }
 
 
 def _etf_df():
     import polars as pl
-    return pl.DataFrame({
-        "symbol": ["510300"],
-        "close": [4.0],
-        "change_pct": [0.01],
-        "rsi_14": [40.0],
-    })
+
+    return pl.DataFrame(
+        {
+            "symbol": ["510300"],
+            "close": [4.0],
+            "change_pct": [0.01],
+            "rsi_14": [40.0],
+        }
+    )
 
 
 def test_evaluate_asset_type_filters_rules():
     """evaluate(asset_type=etf) 只评估 ETF 规则; 股票规则被过滤。"""
     eng = MonitorRuleEngine()
-    eng.set_rules([_signal_rule("r_etf", "etf", "510300"),
-                   _signal_rule("r_stock", "stock", "510300")])
+    eng.set_rules(
+        [_signal_rule("r_etf", "etf", "510300"), _signal_rule("r_stock", "stock", "510300")]
+    )
     df = _etf_df()
 
     etf_events = eng.evaluate(df, asset_type="etf")
@@ -88,6 +101,7 @@ def test_evaluate_default_asset_type_is_stock():
 
 # ---- 资产类型纠正: 误存为 stock 的 ETF 规则 ----
 
+
 class _FakeRepo:
     def resolve_asset_type(self, symbol):
         return {
@@ -112,21 +126,41 @@ def test_reconcile_etf_asset_type_keeps_stock_and_mixed():
     from app.api.monitor_rules import _reconcile_index_asset_type
 
     repo = _FakeRepo()
-    assert _reconcile_index_asset_type(
-        {"asset_type": "stock", "scope": "symbols", "symbols": ["600000.SH"]}, repo,
-    )["asset_type"] == "stock"
-    assert _reconcile_index_asset_type(
-        {"asset_type": "stock", "scope": "symbols", "symbols": ["510300.SH", "600000.SH"]}, repo,
-    )["asset_type"] == "stock"
-    assert _reconcile_index_asset_type(
-        {"asset_type": "etf", "scope": "symbols", "symbols": ["510300.SH"]}, repo,
-    )["asset_type"] == "etf"
-    assert _reconcile_index_asset_type(
-        {"asset_type": "stock", "scope": "all", "symbols": ["510300.SH"]}, repo,
-    )["asset_type"] == "stock"
-    assert _reconcile_index_asset_type(
-        {"asset_type": "stock", "scope": "symbols", "symbols": []}, repo,
-    )["asset_type"] == "stock"
+    assert (
+        _reconcile_index_asset_type(
+            {"asset_type": "stock", "scope": "symbols", "symbols": ["600000.SH"]},
+            repo,
+        )["asset_type"]
+        == "stock"
+    )
+    assert (
+        _reconcile_index_asset_type(
+            {"asset_type": "stock", "scope": "symbols", "symbols": ["510300.SH", "600000.SH"]},
+            repo,
+        )["asset_type"]
+        == "stock"
+    )
+    assert (
+        _reconcile_index_asset_type(
+            {"asset_type": "etf", "scope": "symbols", "symbols": ["510300.SH"]},
+            repo,
+        )["asset_type"]
+        == "etf"
+    )
+    assert (
+        _reconcile_index_asset_type(
+            {"asset_type": "stock", "scope": "all", "symbols": ["510300.SH"]},
+            repo,
+        )["asset_type"]
+        == "stock"
+    )
+    assert (
+        _reconcile_index_asset_type(
+            {"asset_type": "stock", "scope": "symbols", "symbols": []},
+            repo,
+        )["asset_type"]
+        == "stock"
+    )
 
 
 def test_reconcile_asset_type_resolve_error_keeps_stock():
@@ -150,15 +184,26 @@ def test_api_save_persists_reconciled_etf_asset_type(tmp_path):
     repo = MagicMock()
     repo.store.data_dir = tmp_path
     repo.resolve_asset_type.side_effect = lambda s: "etf" if s == "510300.SH" else "stock"
-    req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        repo=repo, monitor_engine=None, capabilities=None,
-    )))
-    model = monitor_rules_api.RuleModel(
-        id="etf_px", name="ETF 点位", type="price", asset_type="stock",
-        scope="symbols", symbols=["510300.SH"],
-        conditions=[{"field": "close", "op": ">=", "value": 4.0}],
+    req = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                repo=repo,
+                monitor_engine=None,
+                capabilities=None,
+            )
+        )
     )
-    resp = monitor_rules_api.save_rule(model, req)
+    model = monitor_rules_api.RuleModel(
+        id="etf_px",
+        name="ETF 点位",
+        type="price",
+        asset_type="stock",
+        scope="symbols",
+        symbols=["510300.SH"],
+        conditions=[{"field": "close", "op": ">=", "value": 4.0}],  # type: ignore[list-item]
+    )
+    resp = monitor_rules_api.save_rule(model, req)  # type: ignore[arg-type]
     assert resp["rule"]["asset_type"] == "etf"
     saved = monitor_rules.load_one(tmp_path, "etf_px")
+    assert saved is not None
     assert saved["asset_type"] == "etf"

@@ -18,7 +18,7 @@ from app.backtest.matrix import build_market_data_matrix, make_signal_matrix, ro
 
 
 @pytest.fixture
-def service_factory(tmp_path, monkeypatch):
+def service_factory(tmp_path, monkeypatch, ck_runtime):
     from app.backtest.engine import BacktestEngine
     from app.backtest.strategy import StrategyBacktestService
     from app.config import settings
@@ -29,21 +29,31 @@ def service_factory(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     install_pipeline_caches(monkeypatch)
     frame = _panel().with_columns(
-        pl.col("close").alias("raw_close"), pl.col("high").alias("raw_high"),
-        pl.col("low").alias("raw_low"), (pl.col("close") * pl.col("volume")).alias("amount"),
+        pl.col("close").alias("raw_close"),
+        pl.col("high").alias("raw_high"),
+        pl.col("low").alias("raw_low"),
+        (pl.col("close") * pl.col("volume")).alias("amount"),
         pl.lit(1.0).alias("turnover_rate"),
-        pl.lit(0).alias("consecutive_limit_ups"), pl.lit(0).alias("consecutive_limit_downs"),
+        pl.lit(0).alias("consecutive_limit_ups"),
+        pl.lit(0).alias("consecutive_limit_downs"),
     )
     for part in frame.partition_by("date"):
         path = tmp_path / "kline_daily_enriched" / f"date={part['date'][0]}" / "part.parquet"
-        path.parent.mkdir(parents=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         part.write_parquet(path)
+        ck_runtime.write_daily("kline_daily_enriched", part)
     instruments = tmp_path / "instruments" / "part.parquet"
-    instruments.parent.mkdir()
-    pl.DataFrame({
-        "symbol": ["600000.SH", "000001.SZ"], "name": ["A", "B"],
-        "float_shares": [1e8, 2e8], "total_shares": [2e8, 4e8],
-    }).write_parquet(instruments)
+    instruments.parent.mkdir(parents=True, exist_ok=True)
+    inst_df = pl.DataFrame(
+        {
+            "symbol": ["600000.SH", "000001.SZ"],
+            "name": ["A", "B"],
+            "float_shares": [1e8, 2e8],
+            "total_shares": [2e8, 4e8],
+        }
+    )
+    inst_df.write_parquet(instruments)
+    ck_runtime.write_instruments("stock", inst_df)
     strategies = tmp_path / "strategies" / "custom"
     strategies.mkdir(parents=True)
     store = DataStore(tmp_path)
@@ -51,7 +61,7 @@ def service_factory(tmp_path, monkeypatch):
 
     def build(backend="matrix_native", leak=False):
         if backend == "matrix_native":
-            source = '''
+            source = """
 import numpy as np
 from app.backtest.matrix import make_signal_matrix
 META = {"id": "audit_test", "name": "audit", "params": [{"id": "offset", "type": "int", "default": 0}], "scoring": {}}
@@ -65,42 +75,57 @@ class Strategy:
         score = SCORE + params.get("offset", 0)
         return make_signal_matrix(market.shape, entry=np.ones(market.shape), score=score)
 MATRIX_STRATEGY = Strategy()
-'''.replace("SCORE", "np.broadcast_to(market.close[-1], market.shape)" if leak else "market.close")
+""".replace("SCORE", "np.broadcast_to(market.close[-1], market.shape)" if leak else "market.close")
         else:
-            source = '''
+            source = """
 import polars as pl
 META = {"id": "audit_test", "name": "audit", "scoring": {}, "params": []}
 EXECUTION_BACKEND = "polars_expr"
 def filter(df, params):
     return EXPR
-'''.replace("EXPR", 'pl.col("close") > pl.col("close").mean().over("symbol")' if leak else 'pl.col("close") > 0')
+""".replace(
+                "EXPR",
+                'pl.col("close") > pl.col("close").mean().over("symbol")'
+                if leak
+                else 'pl.col("close") > 0',
+            )
         (strategies / "audit_test.py").write_text(source, encoding="utf-8")
-        return StrategyBacktestService(BacktestEngine(repo), StrategyEngine(strategy_dirs=[strategies]))
+        return StrategyBacktestService(
+            BacktestEngine(repo), StrategyEngine(strategy_dirs=[strategies])
+        )
 
     yield build
-    store.db.close()
 
 
 def _config(**kwargs):
     from app.backtest.strategy import StrategyBacktestConfig
+
     return StrategyBacktestConfig(
-        strategy_id="audit_test", symbols=None, start=date(2024, 1, 4), end=date(2024, 1, 12),
-        overrides={"basic_filter": {"enabled": False}}, **kwargs,
+        strategy_id="audit_test",
+        symbols=None,
+        start=date(2024, 1, 4),
+        end=date(2024, 1, 12),
+        overrides={"basic_filter": {"enabled": False}},
+        **kwargs,
     )
 
 
 def _panel() -> pl.DataFrame:
-    return pl.DataFrame([
-        {
-            "symbol": symbol,
-            "date": date(2024, 1, 1) + timedelta(days=i),
-            "open": float(i + offset), "high": float(i + offset + 1),
-            "low": float(i + offset - 1), "close": float(i + offset),
-            "volume": float(100 + i),
-        }
-        for symbol, offset in [("600000.SH", 10), ("000001.SZ", 20)]
-        for i in range(12)
-    ]).sort(["symbol", "date"])
+    return pl.DataFrame(
+        [
+            {
+                "symbol": symbol,
+                "date": date(2024, 1, 1) + timedelta(days=i),
+                "open": float(i + offset),
+                "high": float(i + offset + 1),
+                "low": float(i + offset - 1),
+                "close": float(i + offset),
+                "volume": float(100 + i),
+            }
+            for symbol, offset in [("600000.SH", 10), ("000001.SZ", 20)]
+            for i in range(12)
+        ]
+    ).sort(["symbol", "date"])
 
 
 def test_matrix_causal_rolling_passes_without_modifying_inputs():
@@ -167,7 +192,9 @@ def test_audit_insufficient_or_failed_recompute_never_passes():
     def broken(_):
         raise ValueError("bad prefix")
 
-    report = audit_matrix(market, make_signal_matrix(market.shape), broken, start="2024-01-04", end="2024-01-12")
+    report = audit_matrix(
+        market, make_signal_matrix(market.shape), broken, start="2024-01-04", end="2024-01-12"
+    )
     assert report["status"] == "error"
     assert all(c["status"] == "error" for c in report["checks"])
 
@@ -175,7 +202,10 @@ def test_audit_insufficient_or_failed_recompute_never_passes():
 def test_fingerprint_stable_across_row_and_column_order_but_changes_with_values():
     frame = _panel()
     first = fingerprint_frame(frame)
-    assert first["sha256"] == fingerprint_frame(frame.reverse().select(reversed(frame.columns)))["sha256"]
+    assert (
+        first["sha256"]
+        == fingerprint_frame(frame.reverse().select(reversed(frame.columns)))["sha256"]
+    )
     changed = frame.with_columns((pl.col("volume") + 1).alias("volume"))
     second = fingerprint_frame(changed)
     assert first["sha256"] != second["sha256"]
@@ -184,10 +214,13 @@ def test_fingerprint_stable_across_row_and_column_order_but_changes_with_values(
 
 
 def test_announcement_fingerprint_ignores_physical_order_of_same_symbol_rows():
-    frame = pl.DataFrame({
-        "symbol": ["600000.SH", "600000.SH"],
-        "announce_date": ["2024-01-04", "2024-01-05"], "value": [1.0, 2.0],
-    })
+    frame = pl.DataFrame(
+        {
+            "symbol": ["600000.SH", "600000.SH"],
+            "announce_date": ["2024-01-04", "2024-01-05"],
+            "value": [1.0, 2.0],
+        }
+    )
     assert fingerprint_frame(frame)["sha256"] == fingerprint_frame(frame.reverse())["sha256"]
 
 
@@ -205,7 +238,9 @@ def test_manifest_persists_and_rejects_unsafe_ids_and_overwrites(tmp_path):
 
 @pytest.mark.parametrize("backend", ["matrix_native", "polars_expr"])
 @pytest.mark.parametrize("leak", [False, True])
-def test_real_service_checks_and_persists_exact_result_inputs(service_factory, tmp_path, backend, leak):
+def test_real_service_checks_and_persists_exact_result_inputs(
+    service_factory, tmp_path, backend, leak
+):
     service = service_factory(backend, leak)
     result = service.run_with_evidence(_config())
     assert result.error is None
@@ -229,6 +264,7 @@ def test_versions_separate_data_parameters_and_strategy_changes(service_factory,
     assert params["strategy"]["sha256"] == first["strategy"]["sha256"]
 
     from app.enriched_generation import bump_enriched_generation
+
     path = tmp_path / "kline_daily_enriched" / "date=2024-01-08" / "part.parquet"
     pl.read_parquet(path).with_columns((pl.col("volume") + 5).alias("volume")).write_parquet(path)
     bump_enriched_generation(tmp_path, "stock")
@@ -244,7 +280,9 @@ def test_versions_separate_data_parameters_and_strategy_changes(service_factory,
     assert strategy["strategy"]["sha256"] != data["strategy"]["sha256"]
 
 
-def test_unwritable_manifest_is_visible_and_normal_trials_do_not_audit(service_factory, monkeypatch):
+def test_unwritable_manifest_is_visible_and_normal_trials_do_not_audit(
+    service_factory, monkeypatch
+):
     service = service_factory()
     assert service.run(_config()).evidence is None
 
@@ -272,7 +310,9 @@ def test_nondeterministic_strategy_is_inconclusive_not_a_future_leak_verdict():
     assert result["checks"][-1]["kind"] == "repeat"
 
 
-def test_evidence_api_reads_saved_manifest_and_handles_missing_invalid_and_corrupt(tmp_path, monkeypatch):
+def test_evidence_api_reads_saved_manifest_and_handles_missing_invalid_and_corrupt(
+    tmp_path, monkeypatch
+):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -304,16 +344,24 @@ def test_real_post_api_returns_same_persisted_report_as_worker(service_factory, 
     app.state.strategy_engine = service.strategy_engine
     app.include_router(router)
     client = TestClient(app)
-    response = client.post("/api/backtest/strategy/run", json={
-        "strategy_id": "audit_test", "start": "2024-01-04", "end": "2024-01-12",
-        "overrides": {"basic_filter": {"enabled": False}},
-    })
+    response = client.post(
+        "/api/backtest/strategy/run",
+        json={
+            "strategy_id": "audit_test",
+            "start": "2024-01-04",
+            "end": "2024-01-12",
+            "overrides": {"basic_filter": {"enabled": False}},
+        },
+    )
     assert response.status_code == 200
     result = response.json()
     assert result["error"] is None
     assert result["evidence"]["lookahead"]["status"] == "passed"
     assert load_evidence(tmp_path, result["run_id"]) == result["evidence"]
-    assert client.get(f"/api/backtest/strategy/runs/{result['run_id']}/evidence").json() == result["evidence"]
+    assert (
+        client.get(f"/api/backtest/strategy/runs/{result['run_id']}/evidence").json()
+        == result["evidence"]
+    )
 
 
 def test_panel_audit_freezes_external_timeseries_values(service_factory, monkeypatch):
@@ -363,13 +411,28 @@ def test_trade_timing_checks_future_dates_and_next_open_but_respects_minute_entr
     trade = {"symbol": "600000.SH", "entry_signal_date": "2024-01-05", "entry_date": "2024-01-04"}
     assert audit_trade_timing([trade], {}, "matrix_native")["status"] == "failed"
     trade["entry_date"] = "2024-01-05"
-    assert audit_trade_timing([trade], {"entry_fill": "open_t+1"}, "matrix_native")["status"] == "failed"
-    assert audit_trade_timing([trade], {"entry_fill": "close_t"}, "matrix_native")["status"] == "passed"
-    assert audit_trade_timing([trade], {"entry_fill": "open_t+1"}, "minute_filter")["status"] == "passed"
+    assert (
+        audit_trade_timing([trade], {"entry_fill": "open_t+1"}, "matrix_native")["status"]
+        == "failed"
+    )
+    assert (
+        audit_trade_timing([trade], {"entry_fill": "close_t"}, "matrix_native")["status"]
+        == "passed"
+    )
+    assert (
+        audit_trade_timing([trade], {"entry_fill": "open_t+1"}, "minute_filter")["status"]
+        == "passed"
+    )
     trade.update(exit_signal_date="2024-01-08", exit_date="2024-01-08", exit_reason="signal")
-    assert audit_trade_timing([trade], {"exit_fill": "open_t+1"}, "matrix_native")["status"] == "failed"
+    assert (
+        audit_trade_timing([trade], {"exit_fill": "open_t+1"}, "matrix_native")["status"]
+        == "failed"
+    )
     trade["exit_reason"] = "forced_close"
-    assert audit_trade_timing([trade], {"exit_fill": "open_t+1"}, "matrix_native")["status"] == "passed"
+    assert (
+        audit_trade_timing([trade], {"exit_fill": "open_t+1"}, "matrix_native")["status"]
+        == "passed"
+    )
 
 
 def test_unknown_strategy_keeps_legacy_error_contract(service_factory):
@@ -391,11 +454,15 @@ def test_perturbation_also_exercises_zero_valued_future_fields():
     market = build_market_data_matrix(_panel().with_columns(pl.lit(0.0).alias("volume")))
 
     def evaluate(data):
-        return make_signal_matrix(data.shape, score=np.broadcast_to(data.volume.mean(axis=0), data.shape))
+        return make_signal_matrix(
+            data.shape, score=np.broadcast_to(data.volume.mean(axis=0), data.shape)
+        )
 
     result = audit_matrix(market, evaluate(market), evaluate, start="2024-01-04", end="2024-01-12")
     assert result["status"] == "failed"
-    assert any(check["kind"] == "perturb" and check["differences"] > 0 for check in result["checks"])
+    assert any(
+        check["kind"] == "perturb" and check["differences"] > 0 for check in result["checks"]
+    )
 
 
 def test_cancelled_checks_are_not_reported_as_passed():
@@ -404,8 +471,14 @@ def test_cancelled_checks_are_not_reported_as_passed():
     event = threading.Event()
     event.set()
     market = build_market_data_matrix(_panel())
-    result = audit_matrix(market, make_signal_matrix(market.shape), lambda _: None,
-                          start="2024-01-04", end="2024-01-12", cancel_event=event)
+    result = audit_matrix(
+        market,
+        make_signal_matrix(market.shape),
+        lambda _: None,  # type: ignore
+        start="2024-01-04",
+        end="2024-01-12",
+        cancel_event=event,
+    )
     assert result["status"] == "cancelled"
 
 
@@ -433,7 +506,7 @@ def test_minute_replay_checks_intraday_future_and_tracks_minute_inputs(tmp_path,
         for day in days[5:9]
     }
     service = _make_service(tmp_path, frame, minutes)
-    service.engine.repo.store = SimpleNamespace(data_dir=tmp_path)
+    service.engine.repo.store = SimpleNamespace(data_dir=tmp_path)  # type: ignore[assignment]
     if leak:
         source = TEST_STRATEGY_SOURCE.replace(
             'joined = df.join(prev, on="symbol", how="inner")',
@@ -443,5 +516,10 @@ def test_minute_replay_checks_intraday_future_and_tracks_minute_inputs(tmp_path,
         service.strategy_engine.reload()
     result = service.run_with_evidence(minute_config(days[5], days[8]))
     assert result.error is None
-    assert result.evidence["lookahead"]["status"] == ("failed" if leak else "passed")
-    assert len([key for key in result.evidence["data"]["datasets"] if key.startswith("minute_replay/")]) == 4
+    assert result.evidence["lookahead"]["status"] == ("failed" if leak else "passed")  # type: ignore[index]
+    assert (
+        len(
+            [key for key in result.evidence["data"]["datasets"] if key.startswith("minute_replay/")]  # type: ignore[index]
+        )
+        == 4
+    )

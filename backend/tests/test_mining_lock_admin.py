@@ -1,4 +1,5 @@
 """挖掘锁持有者记录 / 陈旧判定 / 强制释放 + 撞锁降级启动测试。"""
+
 from __future__ import annotations
 
 import json
@@ -71,11 +72,11 @@ def _spawn_holder(data_dir: Path) -> subprocess.Popen:
         env=env,
         cwd=str(_BACKEND_ROOT),
     )
-    line = proc.stdout.readline()
-    assert line.startswith("HELD "), f"外部持锁进程未就绪: {line!r} {proc.stderr.read()}"
+    line = proc.stdout.readline()  # type: ignore[union-attr]
+    assert line.startswith("HELD "), f"外部持锁进程未就绪: {line!r} {proc.stderr.read()}"  # type: ignore[union-attr]
     # Windows venv launchers may have a different PID from the Python process
     # executing the script. Verify termination against the script's own identity.
-    proc.holder_process = psutil.Process(int(line.split()[1]))
+    proc.holder_process = psutil.Process(int(line.split()[1]))  # type: ignore[attr-defined]
     return proc
 
 
@@ -90,16 +91,16 @@ def _spawn_legacy_holder(data_dir: Path) -> subprocess.Popen:
         env=env,
         cwd=str(_BACKEND_ROOT),
     )
-    line = proc.stdout.readline()
-    assert line.strip() == "HELD", f"旧格式持锁进程未就绪: {line!r} {proc.stderr.read()}"
-    proc.holder_process = psutil.Process(proc.pid)
+    line = proc.stdout.readline()  # type: ignore[union-attr]
+    assert line.strip() == "HELD", f"旧格式持锁进程未就绪: {line!r} {proc.stderr.read()}"  # type: ignore[union-attr]
+    proc.holder_process = psutil.Process(proc.pid)  # type: ignore[attr-defined]
     return proc
 
 
 def _kill(proc: subprocess.Popen) -> None:
     # Keep the original Process object so cleanup also checks for PID reuse.
     with suppress(psutil.NoSuchProcess):
-        proc.holder_process.kill()
+        proc.holder_process.kill()  # type: ignore[attr-defined]
     if proc.poll() is None:
         proc.kill()
     proc.wait(timeout=10)
@@ -162,33 +163,44 @@ def test_status_reports_mine(tmp_path):
 
 def test_classify_matrix():
     base = dict(
-        held=True, mine=False, holder_known=True, holder_alive=True,
-        pid_consistent=True, active_runs=0, store_idle=None, stale_after=600.0,
+        held=True,
+        mine=False,
+        holder_known=True,
+        holder_alive=True,
+        pid_consistent=True,
+        active_runs=0,
+        store_idle=None,
+        stale_after=600.0,
     )
-    ok, reason = _classify(**base)
+    ok, reason = _classify(**base)  # type: ignore[arg-type]
     assert ok and reason is None
 
     not_held = {**base, "held": False}
-    assert _classify(**not_held) == (False, "锁未被持有")
+    assert _classify(**not_held) == (False, "锁未被持有")  # type: ignore[arg-type]
 
     legacy = {**base, "holder_known": False}
-    ok, reason = _classify(**legacy)
+    ok, reason = _classify(**legacy)  # type: ignore[arg-type]
+    assert reason is not None
     assert not ok and "无法确认占用进程" in reason
 
     reused = {**base, "pid_consistent": False}
-    ok, reason = _classify(**reused)
+    ok, reason = _classify(**reused)  # type: ignore[arg-type]
+    assert reason is not None
     assert not ok and "复用" in reason
 
     active = {**base, "active_runs": 2}
-    ok, reason = _classify(**active)
+    ok, reason = _classify(**active)  # type: ignore[arg-type]
+    assert reason is not None
     assert not ok and "2 个进行中" in reason
 
     fresh = {**base, "store_idle": 12.0}
-    ok, reason = _classify(**fresh)
+    ok, reason = _classify(**fresh)  # type: ignore[arg-type]
+    assert reason is not None
     assert not ok and "陈旧阈值" in reason
 
     dead = {**base, "holder_alive": False}
-    ok, reason = _classify(**dead)
+    ok, reason = _classify(**dead)  # type: ignore[arg-type]
+    assert reason is not None
     assert not ok and "已不存在" in reason
 
 
@@ -232,7 +244,7 @@ def test_force_release_kills_external_holder_and_takes_over(tmp_path):
         lock = MiningProcessLock(tmp_path)
         report = force_release(tmp_path, lock)
         assert report["released"] is True
-        assert report["terminated_pid"] == proc.holder_process.pid
+        assert report["terminated_pid"] == proc.holder_process.pid  # type: ignore[attr-defined]
         assert report["reacquired"] is True
         assert lock.acquired is True
         proc.wait(timeout=10)
@@ -368,7 +380,7 @@ def test_lock_endpoints_full_recovery_loop(tmp_path):
         assert resp.status_code == 200
         assert resp.json() == {
             "released": True,
-            "terminated_pid": proc.holder_process.pid,
+            "terminated_pid": proc.holder_process.pid,  # type: ignore[attr-defined]
             "reacquired": True,
         }
         proc.wait(timeout=10)
@@ -482,7 +494,9 @@ def test_opening_workbench_only_reads_lock_status(tmp_path, monkeypatch, externa
         lock.acquire()
     send_signal = Mock()
     monkeypatch.setattr(
-        admin, "os", SimpleNamespace(name=os.name, getpid=os.getpid, kill=send_signal),
+        admin,
+        "os",
+        SimpleNamespace(name=os.name, getpid=os.getpid, kill=send_signal),
     )
     run_dir = tmp_path / "research" / "mining" / "runs" / "live"
     run_dir.mkdir(parents=True)
@@ -503,7 +517,7 @@ def test_opening_workbench_only_reads_lock_status(tmp_path, monkeypatch, externa
         assert manifest.read_bytes() == original
         assert lock.acquired is (not external_owner)
         if proc is not None:
-            assert proc.holder_process.is_running()
+            assert proc.holder_process.is_running()  # type: ignore[attr-defined]
     finally:
         lock.release()
         if proc is not None:
@@ -526,12 +540,12 @@ def test_recover_endpoint_acquires_free_lock_and_recovers_orphans_once(tmp_path)
         assert response.status_code == 200
         assert response.json()["mine"] is True
         assert client.app.state.mining_lock_acquired is True
-        assert manager.store.get("orphan")["status"] == "interrupted"
+        assert manager.store.get("orphan")["status"] == "interrupted"  # type: ignore[index]
         assert artifact.read_bytes() == b"existing artifact must be preserved"
         manager.store.create({}, "fixture", run_id="new_live_run")
         manager.store.transition_status("new_live_run", "running")
         assert client.post("/api/backtest/mining/lock/recover").json()["mine"] is True
-        assert manager.store.get("new_live_run")["status"] == "running"
+        assert manager.store.get("new_live_run")["status"] == "running"  # type: ignore[index]
     finally:
         lock.release()
 
@@ -578,7 +592,7 @@ def test_recover_refuses_live_owner_then_restores_after_exit(tmp_path):
         response = client.post("/api/backtest/mining/lock/recover")
         assert response.status_code == 200
         assert response.json()["mine"] is True
-        assert manager.store.get("external_live")["status"] == "interrupted"
+        assert manager.store.get("external_live")["status"] == "interrupted"  # type: ignore[index]
     finally:
         client.app.state.mining_process_lock.release()
         _kill(proc)
@@ -649,7 +663,7 @@ def test_force_release_rechecks_confirmed_pid(tmp_path):
     try:
         response = client.post(
             "/api/backtest/mining/lock/force-release",
-            json={"expected_pid": proc.holder_process.pid + 1},
+            json={"expected_pid": proc.holder_process.pid + 1},  # type: ignore[attr-defined]
         )
         assert response.status_code == 409
         assert "持有者已变化" in response.json()["detail"]

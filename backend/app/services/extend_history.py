@@ -14,6 +14,7 @@
   - pipeline_jobs.JobStore
   - tickflow.repository.KlineRepository
 """
+
 from __future__ import annotations
 
 import logging
@@ -21,19 +22,19 @@ from collections.abc import Callable
 from datetime import date, datetime, timedelta
 
 from app.services import kline_sync
-from app.services.pipeline_jobs import job_store
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
 
 
-def _noop(stage: str, pct: int, msg: str, **kwargs) -> None:  # noqa: ARG001
+def _noop(stage: str, pct: int, msg: str, **kwargs) -> None:
     pass
 
 
 def _invalidate(table: str | None = None) -> None:
     from app.api.data import invalidate_data_cache
+
     invalidate_data_cache(table)
 
 
@@ -43,40 +44,19 @@ def _resolve_universe(capset: CapabilitySet, repo=None) -> list[str]:
     不再拉 CN_Equity_A 池 (含 SW1 聚合兜底); 维表由盘后管道同步维护。
     repo 传入时过滤自选里的指数 symbol (指数日K走独立存储)。
     """
-    from pathlib import Path
-
-    import polars as pl
-
-    from app.config import settings
     from app.tickflow.pools import get_pool
 
     base: set[str] = set(get_pool("watchlist"))
-    inst_path = Path(settings.data_dir) / "instruments" / "instruments.parquet"
-    if inst_path.exists():
-        try:
-            inst = pl.read_parquet(inst_path, columns=["symbol"])
-            base.update(inst["symbol"].to_list())
-        except Exception as e:  # noqa: BLE001
-            logger.warning("instruments 维表读取失败, 标的池仅剩自选: %s", e)
+    try:
+        from app.services.instrument_sync import load_instruments
+
+        inst = load_instruments()
+        base.update(inst["symbol"].drop_nulls().to_list())
+    except Exception as e:  # noqa: BLE001 - 维表不可用时退化为仅自选
+        logger.warning("instruments 维表读取失败, 标的池仅剩自选: %s", e)
     if repo is not None:
         base -= set(repo.get_index_symbol_set())
     return sorted(base)
-
-
-def _refresh_single_view(repo: KlineRepository, name: str) -> None:
-    """刷新单个 DuckDB 视图。"""
-    d = repo.store.data_dir.as_posix()
-    paths = {
-        "kline_daily": f"{d}/kline_daily/**/*.parquet",
-        "kline_enriched": f"{d}/kline_daily_enriched/**/*.parquet",
-        "kline_minute": f"{d}/kline_minute/**/*.parquet",
-        "adj_factor": f"{d}/adj_factor/**/*.parquet",
-        "instruments": f"{d}/instruments/**/*.parquet",
-    }
-    path = paths.get(name)
-    if not path:
-        return
-    repo.refresh_view(name, path)
 
 
 def compute_offset(value: int, unit: str) -> timedelta:
@@ -89,6 +69,98 @@ def compute_offset(value: int, unit: str) -> timedelta:
         return timedelta(days=value * 365)
     else:
         raise ValueError(f"不支持的单位: {unit}")
+
+
+# ---- run_extend_history 分段 helper ----
+
+
+def _extend_daily(universe, repo, capset, new_start, earliest, emit):
+    start_str = new_start.strftime("%Y-%m-%d")
+    end_str = earliest.strftime("%Y-%m-%d")
+    # 3. 拉日 K
+    emit("extend_history", 10, f"获取日K [{start_str} ~ {end_str}]…")
+    logger.info("extend_history: daily K [%s ~ %s], %d symbols", start_str, end_str, len(universe))
+
+    def _daily_chunk(cur: int, tot: int) -> None:
+        emit(
+            "extend_history",
+            10 + int(35 * cur / tot),
+            f"日K 批次 {cur}/{tot}",
+            stage_pct=int(100 * cur / tot),
+            skip_log=True,
+        )
+
+    written_daily = kline_sync.sync_and_persist_daily_batch(
+        universe,
+        repo,
+        capset,
+        start_date=datetime.combine(new_start, datetime.min.time()),
+        end_date=datetime.combine(earliest, datetime.min.time()),
+        on_chunk_done=_daily_chunk,
+    )
+    emit("extend_history", 45, f"日K 完成,写入 {written_daily} 行")
+    logger.info("extend_history: daily K done, %d rows", written_daily)
+    _invalidate("daily")
+    return written_daily
+
+
+def _extend_adj(universe, repo, capset, new_start, today, emit):
+    written_adj = 0
+    # 4. 拉除权因子 (新范围)
+    adj_start = datetime.combine(new_start, datetime.min.time())
+    adj_end = datetime.combine(today, datetime.min.time())
+    adj_start_str = new_start.strftime("%Y-%m-%d")
+    adj_end_str = today.strftime("%Y-%m-%d")
+
+    from app.services import preferences as _prefs
+
+    adj_provider = _prefs.get_adj_factor_provider()
+    can_sync_adj = capset.has(Cap.ADJ_FACTOR) or adj_provider != "tickflow"
+    if can_sync_adj:
+        emit("extend_history", 48, f"获取除权因子 [{adj_start_str} ~ {adj_end_str}]…")
+        logger.info("extend_history: adj_factor [%s ~ %s]", adj_start_str, adj_end_str)
+
+        def _adj_chunk(cur: int, tot: int) -> None:
+            emit(
+                "extend_history",
+                48 + int(10 * cur / tot),
+                f"除权因子批次 {cur}/{tot}",
+                stage_pct=int(100 * cur / tot),
+                skip_log=True,
+            )
+
+        written_adj, _affected = kline_sync.sync_adj_factor(
+            universe,
+            repo,
+            capset,
+            start_time=adj_start,
+            end_time=adj_end,
+            on_chunk_done=_adj_chunk,
+        )
+        emit("extend_history", 60, f"除权因子完成,{written_adj} 行")
+        logger.info("extend_history: adj_factor done, %d rows", written_adj)
+        _invalidate("adj_factor")
+    else:
+        emit("extend_history", 60, "除权因子跳过(无权限)")
+        logger.info("extend_history: adj_factor skipped, no ADJ_FACTOR capability")
+    return written_adj
+
+
+def _extend_enriched(repo, emit):
+    # 5. 全量重算 enriched
+    emit("extend_history", 65, "全量计算 enriched…")
+    logger.info("extend_history: full enriched rebuild start")
+
+    from app.indicators.pipeline import run_pipeline
+
+    run_pipeline()
+
+    enriched_dir = repo.store.data_dir / "kline_daily_enriched"
+    enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_dir.exists() else 0
+    emit("extend_history", 92, f"enriched 完成,覆盖 {enriched_days} 天")
+    logger.info("extend_history: enriched done, %d days", enriched_days)
+    _invalidate("enriched")
+    return enriched_days
 
 
 def run_extend_history(
@@ -128,78 +200,12 @@ def run_extend_history(
         return {"error": "标的池为空"}
     emit("extend_history", 8, f"标的池: {len(universe)} 只")
 
-    start_str = new_start.strftime("%Y-%m-%d")
-    end_str = earliest.strftime("%Y-%m-%d")
+    written_daily = _extend_daily(universe, repo, capset, new_start, earliest, emit)
+    written_adj = _extend_adj(universe, repo, capset, new_start, today, emit)
+    enriched_days = _extend_enriched(repo, emit)
 
-    # 3. 拉日 K
-    emit("extend_history", 10, f"获取日K [{start_str} ~ {end_str}]…")
-    logger.info("extend_history: daily K [%s ~ %s], %d symbols", start_str, end_str, len(universe))
-
-    def _daily_chunk(cur: int, tot: int) -> None:
-        emit("extend_history", 10 + int(35 * cur / tot),
-             f"日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
-
-    written_daily = kline_sync.sync_and_persist_daily_batch(
-        universe, repo, capset,
-        start_date=datetime.combine(new_start, datetime.min.time()),
-        end_date=datetime.combine(earliest, datetime.min.time()),
-        on_chunk_done=_daily_chunk,
-    )
-    emit("extend_history", 45, f"日K 完成,写入 {written_daily} 行")
-    logger.info("extend_history: daily K done, %d rows", written_daily)
-    _refresh_single_view(repo, "kline_daily")
-    _invalidate("daily")
-
-    # 4. 拉除权因子 (新范围)
-    written_adj = 0
-    adj_start = datetime.combine(new_start, datetime.min.time())
-    adj_end = datetime.combine(today, datetime.min.time())
-    adj_start_str = new_start.strftime("%Y-%m-%d")
-    adj_end_str = today.strftime("%Y-%m-%d")
-
-    from app.services import preferences as _prefs
-    adj_provider = _prefs.get_adj_factor_provider()
-    can_sync_adj = capset.has(Cap.ADJ_FACTOR) or adj_provider != "tickflow"
-    if can_sync_adj:
-        emit("extend_history", 48, f"获取除权因子 [{adj_start_str} ~ {adj_end_str}]…")
-        logger.info("extend_history: adj_factor [%s ~ %s]", adj_start_str, adj_end_str)
-
-        def _adj_chunk(cur: int, tot: int) -> None:
-            emit("extend_history", 48 + int(10 * cur / tot),
-                 f"除权因子批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
-
-        written_adj, _affected = kline_sync.sync_adj_factor(
-            universe, repo, capset,
-            start_time=adj_start, end_time=adj_end,
-            on_chunk_done=_adj_chunk,
-        )
-        emit("extend_history", 60, f"除权因子完成,{written_adj} 行")
-        logger.info("extend_history: adj_factor done, %d rows", written_adj)
-        _refresh_single_view(repo, "adj_factor")
-        _invalidate("adj_factor")
-    else:
-        emit("extend_history", 60, "除权因子跳过(无权限)")
-        logger.info("extend_history: adj_factor skipped, no ADJ_FACTOR capability")
-
-    # 5. 全量重算 enriched
-    emit("extend_history", 65, "全量计算 enriched…")
-    logger.info("extend_history: full enriched rebuild start")
-
-    from app.indicators.pipeline import run_pipeline
-    written_enriched = run_pipeline()
-
-    enriched_dir = repo.store.data_dir / "kline_daily_enriched"
-    enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_dir.exists() else 0
-    emit("extend_history", 92, f"enriched 完成,覆盖 {enriched_days} 天")
-    logger.info("extend_history: enriched done, %d days", enriched_days)
-    _refresh_single_view(repo, "kline_enriched")
-    _invalidate("enriched")
-
-    # 6. 刷新视图
+    # 6. 刷新视图 (CK 权威读源下 _refresh_single_view 已是兼容空壳, 缓存失效由下方 _invalidate 覆盖)
     emit("extend_history", 95, "刷新视图…")
-    _refresh_single_view(repo, "kline_daily")
-    _refresh_single_view(repo, "kline_enriched")
-    _refresh_single_view(repo, "adj_factor")
     _invalidate(None)
 
     # 7. 统计结果

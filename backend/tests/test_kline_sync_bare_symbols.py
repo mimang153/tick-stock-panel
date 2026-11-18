@@ -4,6 +4,7 @@
 修复后: 裸符号按 instruments 维表补全后缀, 无法识别的显式跳过并告警;
 批量同步结束统计 0 行标的 (zero_row_out / API zero_row_symbols)。
 """
+
 from __future__ import annotations
 
 import logging
@@ -11,22 +12,52 @@ from datetime import date, datetime
 from types import SimpleNamespace
 
 import polars as pl
+import pytest
 
 from app.services import kline_sync
 from app.tickflow.repository import DataStore, KlineRepository
 
 
-def _write_instruments(data_dir, symbols: list[str]) -> None:
-    out = data_dir / "instruments" / "instruments.parquet"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame({"symbol": symbols}).write_parquet(out)
+@pytest.fixture()
+def repo(tmp_path, ck_store):
+    return KlineRepository(DataStore(tmp_path), storage=ck_store)
+
+
+def _write_instruments(repo, symbols: list[str]) -> None:
+    repo.save_instruments(
+        pl.DataFrame(
+            {
+                "symbol": symbols,
+                "name": symbols,
+                "code": [s[:6] for s in symbols],
+                "exchange": [s.split(".")[-1] for s in symbols],
+                "region": ["CN"] * len(symbols),
+                "type": ["stock"] * len(symbols),
+                "listing_date": [None] * len(symbols),
+                "total_shares": [None] * len(symbols),
+                "float_shares": [None] * len(symbols),
+                "tick_size": [None] * len(symbols),
+                "limit_up": [None] * len(symbols),
+                "limit_down": [None] * len(symbols),
+                "as_of": [date(2026, 9, 10)] * len(symbols),
+            }
+        )
+    )
 
 
 def _daily(symbol: str, day: date) -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": [symbol], "date": [day], "open": [10.0], "high": [11.0],
-        "low": [9.0], "close": [10.5], "volume": [100.0], "amount": [1050.0],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": [symbol],
+            "date": [day],
+            "open": [10.0],
+            "high": [11.0],
+            "low": [9.0],
+            "close": [10.5],
+            "volume": [100.0],
+            "amount": [1050.0],
+        }
+    )
 
 
 class _Provider:
@@ -44,17 +75,18 @@ class _Provider:
 def _route_provider(monkeypatch, provider):
     monkeypatch.setattr(kline_sync.preferences, "get_daily_data_provider", lambda: "fuyao")
     from app.data_providers import custom
+
     monkeypatch.setattr(
         custom, "provider_has_dataset", lambda name, dataset: name == "fuyao" and dataset == "daily"
     )
     monkeypatch.setattr(custom, "get_provider", lambda name: provider)
 
 
-def test_normalize_maps_bare_via_instruments_and_dedups(tmp_path):
-    _write_instruments(tmp_path, ["600000.SH", "000001.SZ"])
+def test_normalize_maps_bare_via_instruments_and_dedups(repo):
+    _write_instruments(repo, ["600000.SH", "000001.SZ"])
 
     out, resolved, skipped = kline_sync._normalize_bare_symbols(
-        ["600000", "000001.SZ", "600000.SH"], tmp_path
+        ["600000", "000001.SZ", "600000.SH"], repo
     )
 
     assert out == ["600000.SH", "000001.SZ"]
@@ -62,8 +94,8 @@ def test_normalize_maps_bare_via_instruments_and_dedups(tmp_path):
     assert skipped == []
 
 
-def test_normalize_without_instruments_skips_all_bare(tmp_path, caplog):
-    out, resolved, skipped = kline_sync._normalize_bare_symbols(["600000", "000001.SZ"], tmp_path)
+def test_normalize_without_instruments_skips_all_bare(repo, caplog):
+    out, resolved, skipped = kline_sync._normalize_bare_symbols(["600000", "000001.SZ"], repo)
 
     assert out == ["000001.SZ"]
     assert resolved == {}
@@ -71,27 +103,29 @@ def test_normalize_without_instruments_skips_all_bare(tmp_path, caplog):
     assert any("维表不可用" in r.message for r in caplog.records)
 
 
-def test_normalize_skips_ambiguous_bare(tmp_path):
-    _write_instruments(tmp_path, ["830001.BJ", "830001.SH", "600000.SH"])
+def test_normalize_skips_ambiguous_bare(repo):
+    _write_instruments(repo, ["830001.BJ", "830001.SH", "600000.SH"])
 
-    out, resolved, skipped = kline_sync._normalize_bare_symbols(["830001", "600000"], tmp_path)
+    out, resolved, skipped = kline_sync._normalize_bare_symbols(["830001", "600000"], repo)
 
     assert out == ["600000.SH"]
     assert resolved == {"600000": "600000.SH"}
     assert skipped == ["830001"]
 
 
-def test_sync_reports_zero_rows_in_caller_spelling(monkeypatch, tmp_path, caplog):
+def test_sync_reports_zero_rows_in_caller_spelling(monkeypatch, repo, caplog):
     """裸符号无维表可补 → 跳过; 带后缀但上游空 payload → 0 行; 均按原始写法回报。"""
     caplog.set_level(logging.WARNING, logger="app.services.kline_sync")
-    repo = KlineRepository(DataStore(tmp_path))
     provider = _Provider([_daily("000001.SZ", date(2026, 9, 10))])
     _route_provider(monkeypatch, provider)
     zero: list[str] = []
 
     written = kline_sync.sync_and_persist_daily_batch(
-        ["600000", "000001.SZ", "999999.SZ"], repo, object(),
-        start_date=datetime(2026, 9, 1), end_date=datetime(2026, 9, 10),
+        ["600000", "000001.SZ", "999999.SZ"],
+        repo,
+        object(),  # type: ignore[arg-type]
+        start_date=datetime(2026, 9, 1),
+        end_date=datetime(2026, 9, 10),
         zero_row_out=zero,
     )
 
@@ -100,9 +134,8 @@ def test_sync_reports_zero_rows_in_caller_spelling(monkeypatch, tmp_path, caplog
     assert any("入库 0 行" in r.message for r in caplog.records)
 
 
-def test_sync_tickflow_path_normalizes_and_reports_zero(monkeypatch, tmp_path):
-    _write_instruments(tmp_path, ["600000.SH"])
-    repo = KlineRepository(DataStore(tmp_path))
+def test_sync_tickflow_path_normalizes_and_reports_zero(monkeypatch, repo):
+    _write_instruments(repo, ["600000.SH"])
     captured: dict = {}
 
     def _fake_sync_daily_batch(symbols, **kwargs):
@@ -110,15 +143,16 @@ def test_sync_tickflow_path_normalizes_and_reports_zero(monkeypatch, tmp_path):
         return pl.DataFrame()  # 上游 200 空 payload → 全部 0 行
 
     monkeypatch.setattr(kline_sync, "sync_daily_batch", _fake_sync_daily_batch)
-    monkeypatch.setattr(
-        kline_sync.preferences, "get_daily_data_provider", lambda: "tickflow"
-    )
+    monkeypatch.setattr(kline_sync.preferences, "get_daily_data_provider", lambda: "tickflow")
     capset = SimpleNamespace(has=lambda cap: True, limits=lambda cap: None)
     zero: list[str] = []
 
     written = kline_sync.sync_and_persist_daily_batch(
-        ["600000", "000001.SH"], repo, capset,
-        start_date=datetime(2026, 9, 1), end_date=datetime(2026, 9, 10),
+        ["600000", "000001.SH"],
+        repo,
+        capset,  # type: ignore[arg-type]
+        start_date=datetime(2026, 9, 1),
+        end_date=datetime(2026, 9, 10),
         zero_row_out=zero,
     )
 
@@ -129,22 +163,22 @@ def test_sync_tickflow_path_normalizes_and_reports_zero(monkeypatch, tmp_path):
     assert zero == ["600000", "000001.SH"]
 
 
-def test_api_sync_batch_returns_zero_row_symbols(monkeypatch, tmp_path):
+def test_api_sync_batch_returns_zero_row_symbols(monkeypatch, repo):
     from app.api import kline as kline_api
 
-    _write_instruments(tmp_path, ["600000.SH"])
-    repo = KlineRepository(DataStore(tmp_path))
-    monkeypatch.setattr(
-        kline_sync, "sync_daily_batch", lambda symbols, **kwargs: pl.DataFrame()
+    _write_instruments(repo, ["600000.SH"])
+    monkeypatch.setattr(kline_sync, "sync_daily_batch", lambda symbols, **kwargs: pl.DataFrame())
+    monkeypatch.setattr(kline_sync.preferences, "get_daily_data_provider", lambda: "tickflow")
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                repo=repo,
+                capabilities=SimpleNamespace(has=lambda cap: True, limits=lambda cap: None),
+            )
+        )
     )
-    monkeypatch.setattr(
-        kline_sync.preferences, "get_daily_data_provider", lambda: "tickflow"
-    )
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        repo=repo, capabilities=SimpleNamespace(has=lambda cap: True, limits=lambda cap: None),
-    )))
 
-    resp = kline_api.sync_batch(request, symbols=["600000", "000001.SH"], days=250)
+    resp = kline_api.sync_batch(request, symbols=["600000", "000001.SH"], days=250)  # type: ignore[arg-type]
 
     assert resp["rows_written"] == 0
     assert resp["zero_row_symbols"] == ["600000", "000001.SH"]

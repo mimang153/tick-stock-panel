@@ -67,7 +67,9 @@ def _create_run(
     store = MiningRunStore(tmp_path)
     store.create(
         {
-            "factor_names": factor_names if factor_names is not None else ["turnover_rate", "rsi_14"],
+            "factor_names": factor_names
+            if factor_names is not None
+            else ["turnover_rate", "rsi_14"],
             "strategy_ids": ["existing_daily", "ma_golden_cross"],
             "asset_type": "stock",
             "start": "2025-01-01",
@@ -80,44 +82,50 @@ def _create_run(
         fingerprint if fingerprint is not None else {"generation": "test"},
         run_id=run_id,
     )
-    frame = pl.DataFrame({
-        "signature": [signature],
-        "name": ["因子组合候选"],
-        "kind": [
-            "existing_strategy"
-            if definition["kind"] == "existing_strategy"
-            else "factor_combination"
-        ],
-        "factor_names_json": [json.dumps(definition.get("factor_names", []))],
-        "strategy_id": [definition.get("strategy_id")],
-        "definition_json": [json.dumps(definition, sort_keys=True)],
-        "regime_state": ["overall"],
-        "score": [0.9],
-        "oos_return": [0.08],
-        "oos_sharpe": [0.9],
-        "oos_max_drawdown": [-0.12],
-        "oos_positive_fold_ratio": [1.0],
-        "oos_n_trades": [70],
-        "confidence": ["standard"],
-        "valid_folds": [3],
-        "skipped_folds": [0],
-        "promoted_candidate_id": [None],
-        "published_strategy_id": [None],
-    }, schema_overrides={
-        "strategy_id": pl.String,
-        "promoted_candidate_id": pl.String,
-        "published_strategy_id": pl.String,
-    })
+    frame = pl.DataFrame(
+        {
+            "signature": [signature],
+            "name": ["因子组合候选"],
+            "kind": [
+                "existing_strategy"
+                if definition["kind"] == "existing_strategy"
+                else "factor_combination"
+            ],
+            "factor_names_json": [json.dumps(definition.get("factor_names", []))],
+            "strategy_id": [definition.get("strategy_id")],
+            "definition_json": [json.dumps(definition, sort_keys=True)],
+            "regime_state": ["overall"],
+            "score": [0.9],
+            "oos_return": [0.08],
+            "oos_sharpe": [0.9],
+            "oos_max_drawdown": [-0.12],
+            "oos_positive_fold_ratio": [1.0],
+            "oos_n_trades": [70],
+            "confidence": ["standard"],
+            "valid_folds": [3],
+            "skipped_folds": [0],
+            "promoted_candidate_id": [None],
+            "published_strategy_id": [None],
+        },
+        schema_overrides={
+            "strategy_id": pl.String,
+            "promoted_candidate_id": pl.String,
+            "published_strategy_id": pl.String,
+        },
+    )
     frame.write_parquet(store.artifact_path(run_id, "candidates"))
     store.register_artifact(run_id, "candidates")
-    store.write_summary(run_id, {
-        "data_as_of": "2026-01-09",
-        "algorithm_version": "mining-v1",
-        "methodology_version": "factor_v2",
-    })
+    store.write_summary(
+        run_id,
+        {
+            "data_as_of": "2026-01-09",
+            "algorithm_version": "mining-v1",
+            "methodology_version": "factor_v2",
+        },
+    )
     if status != "queued":
         store.transition_status(run_id, "running")
-        store.transition_status(run_id, status)
+        store.transition_status(run_id, status)  # type: ignore[arg-type]
     return store, run_id, signature
 
 
@@ -126,7 +134,7 @@ def _service(tmp_path, store: MiningRunStore) -> MiningCandidateService:
         tmp_path,
         store,
         CandidateStore(tmp_path),
-        _StrategyEngine(),
+        _StrategyEngine(),  # type: ignore[arg-type]
         strategy_cache_invalidator=lambda _data_dir: None,
     )
 
@@ -182,28 +190,53 @@ def test_promote_and_publish_runtime_registered_factor(tmp_path, kind) -> None:
 
     with isolated_registry():
         custom = "uf_promote_test"
-        register_definition({"id": custom, "kind": "custom", "label": "换手率",
-                             "formula": "turnover_rate * 2"})
+        register_definition(
+            {"id": custom, "kind": "custom", "label": "换手率", "formula": "turnover_rate * 2"}
+        )
         factor = custom
         if kind == "composite":
             factor = "cf_promote_test"
-            register_definition({"id": factor, "kind": "composite", "label": "组合",
-                                 "members": {custom: 1.0, "turnover_rate": 0.5}})
-        definition = {"kind": "factor_rank", "factor_names": [factor],
-                      "scoring": {factor: 1.0}, "directions": {factor: "high"}}
-        store, run_id, signature = _create_run(tmp_path, definition=definition, factor_names=[factor])
+            register_definition(
+                {
+                    "id": factor,
+                    "kind": "composite",
+                    "label": "组合",
+                    "members": {custom: 1.0, "turnover_rate": 0.5},
+                }
+            )
+        definition = {
+            "kind": "factor_rank",
+            "factor_names": [factor],
+            "scoring": {factor: 1.0},
+            "directions": {factor: "high"},
+        }
+        store, run_id, signature = _create_run(
+            tmp_path, definition=definition, factor_names=[factor]
+        )
         service, engine = _real_service(tmp_path, store)
         candidate = service.promote(run_id, signature)
         assert candidate["config"]["factor_names"] == [factor]
         assert service.promote(run_id, signature)["id"] == candidate["id"]
         published = service.publish(run_id, signature)
         strategy = engine.get(published["strategy_id"])
-        market = build_market_data_matrix(pl.DataFrame({
-            "symbol": ["A", "B", "C"], "date": [date(2026, 1, 2)] * 3,
-            "open": [10.0] * 3, "high": [11.0] * 3, "low": [9.0] * 3,
-            "close": [10.0] * 3, "volume": [1000.0] * 3, "turnover_rate": [1.0, 2.0, 3.0],
-        }), field_columns={"turnover_rate"})
-        signals = strategy.matrix_strategy.compute_signals(market, {"entry_score": 70.0, "exit_score": 40.0, "top_rank": 1})
+        market = build_market_data_matrix(
+            pl.DataFrame(
+                {
+                    "symbol": ["A", "B", "C"],
+                    "date": [date(2026, 1, 2)] * 3,
+                    "open": [10.0] * 3,
+                    "high": [11.0] * 3,
+                    "low": [9.0] * 3,
+                    "close": [10.0] * 3,
+                    "volume": [1000.0] * 3,
+                    "turnover_rate": [1.0, 2.0, 3.0],
+                }
+            ),
+            field_columns={"turnover_rate"},
+        )
+        signals = strategy.matrix_strategy.compute_signals(  # type: ignore[union-attr]
+            market, {"entry_score": 70.0, "exit_score": 40.0, "top_rank": 1}
+        )
         assert signals.entry.tolist() == [[0, 0, 1]]
         unregister_factor(factor)
         with pytest.raises(ValueError, match="unknown factors"):
@@ -249,12 +282,16 @@ def test_promote_rejects_tampered_definition_before_candidate_write(tmp_path) ->
     store, run_id, signature = _create_run(tmp_path)
     path = store.artifact_path(run_id, "candidates")
     frame = pl.read_parquet(path).with_columns(
-        pl.lit(json.dumps({
-            "kind": "factor_rank",
-            "factor_names": ["turnover_rate"],
-            "scoring": {"turnover_rate": 1.0},
-            "directions": {"turnover_rate": "high"},
-        })).alias("definition_json")
+        pl.lit(
+            json.dumps(
+                {
+                    "kind": "factor_rank",
+                    "factor_names": ["turnover_rate"],
+                    "scoring": {"turnover_rate": 1.0},
+                    "directions": {"turnover_rate": "high"},
+                }
+            )
+        ).alias("definition_json")
     )
     frame.write_parquet(path)
 
@@ -295,7 +332,7 @@ def test_publish_existing_strategy_returns_verified_id_and_repairs_backlink(tmp_
     first = service.publish(run_id, signature)
     second = service.publish(run_id, signature)
     with pytest.raises(TypeError):
-        service.publish(run_id, signature, "existing_daily")
+        service.publish(run_id, signature, "existing_daily")  # type: ignore[call-arg]
 
     assert first == second == {"ok": True, "strategy_id": "existing_daily"}
     persisted = pl.read_parquet(store.artifact_path(run_id, "candidates")).row(0, named=True)
@@ -318,10 +355,12 @@ def test_promote_concurrent_calls_create_one_authoritative_candidate(tmp_path) -
     service = _service(tmp_path, store)
 
     with ThreadPoolExecutor(max_workers=8) as executor:
-        items = list(executor.map(
-            lambda _index: service.promote(run_id, signature),
-            range(16),
-        ))
+        items = list(
+            executor.map(
+                lambda _index: service.promote(run_id, signature),
+                range(16),
+            )
+        )
 
     assert len({item["id"] for item in items}) == 1
     assert len(CandidateStore(tmp_path).list()) == 1
@@ -480,18 +519,18 @@ def test_publish_factor_discovers_public_strategy_and_repairs_runtime_state(tmp_
     assert strategy.meta["candidate_signature"] == signature
     assert strategy.meta["research_only"] is False
     assert strategy.meta["asset_types"] == ["stock"]
-    assert strategy.matrix_strategy._scoring == {"turnover_rate": 1.0, "rsi_14": 2.0}
-    assert strategy.matrix_strategy._directions == {
+    assert strategy.matrix_strategy._scoring == {"turnover_rate": 1.0, "rsi_14": 2.0}  # type: ignore[union-attr]
+    assert strategy.matrix_strategy._directions == {  # type: ignore[union-attr]
         "turnover_rate": "high",
         "rsi_14": "low",
     }
-    assert result["strategy_id"] in {
-        meta["id"] for meta in engine.list_strategies()
+    assert result["strategy_id"] in {meta["id"] for meta in engine.list_strategies()}
+    assert strategy_config.load_override(tmp_path, "factor_rank_research") == {
+        "params": {"entry_score": 99.0}
     }
-    assert strategy_config.load_override(
-        tmp_path, "factor_rank_research"
-    ) == {"params": {"entry_score": 99.0}}
-    assert not (tmp_path / "user_data" / "strategy_overrides" / f"{result['strategy_id']}.json").exists()
+    assert not (
+        tmp_path / "user_data" / "strategy_overrides" / f"{result['strategy_id']}.json"
+    ).exists()
     persisted = pl.read_parquet(store.artifact_path(run_id, "candidates")).row(0, named=True)
     assert persisted["published_strategy_id"] == result["strategy_id"]
     assert invalidations == [tmp_path, "monitor", tmp_path, "monitor"]
@@ -530,7 +569,7 @@ def test_publish_factor_uses_server_run_scoped_id_and_refuses_collision(tmp_path
     expected_id = _published_strategy_id(run_id, signature)
 
     with pytest.raises(TypeError):
-        service.publish(run_id, signature, "mined_factor_caller_selected")
+        service.publish(run_id, signature, "mined_factor_caller_selected")  # type: ignore[call-arg]
 
     target = tmp_path / "strategies" / "custom" / f"{expected_id}.py"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -658,6 +697,7 @@ def test_publish_existing_does_not_reload_or_invalidate(tmp_path) -> None:
     assert engine.get("ma_golden_cross") is original
     assert invalidations == []
 
+
 def _rewrite_candidate_metric(
     store: MiningRunStore,
     run_id: str,
@@ -740,7 +780,8 @@ def test_publish_factor_records_guardian_baseline(tmp_path) -> None:
     # 档案上积累的复验历史在重复发布 (幂等路径) 后必须保留
     guardian.append_check(result["strategy_id"], {"verdict": "healthy"})
     service.publish(run_id, signature)
-    assert len(guardian.get(result["strategy_id"])["checks"]) == 1
+    assert result is not None
+    assert len(guardian.get(result["strategy_id"])["checks"]) == 1  # type: ignore[index]
 
 
 @pytest.mark.parametrize("mutation", ["delete", "edit", "metadata_only"])
@@ -753,12 +794,24 @@ def test_candidate_uses_the_transitive_factor_definition_that_was_mined(tmp_path
     with isolated_registry():
         register_definition(child)
         register_definition({"id": "uf_middle", "label": "middle", "formula": "uf_leaf * 2"})
-        register_definition({"id": "cf_outer", "label": "outer", "kind": "composite",
-                             "members": {"uf_middle": 1, "turnover_rate": 1}})
-        definition = {"kind": "factor_rank", "factor_names": ["cf_outer"],
-                      "scoring": {"cf_outer": 1}, "directions": {"cf_outer": "high"}}
+        register_definition(
+            {
+                "id": "cf_outer",
+                "label": "outer",
+                "kind": "composite",
+                "members": {"uf_middle": 1, "turnover_rate": 1},
+            }
+        )
+        definition = {
+            "kind": "factor_rank",
+            "factor_names": ["cf_outer"],
+            "scoring": {"cf_outer": 1},
+            "directions": {"cf_outer": "high"},
+        }
         store, run_id, signature = _create_run(
-            tmp_path, definition=definition, factor_names=["cf_outer"],
+            tmp_path,
+            definition=definition,
+            factor_names=["cf_outer"],
             fingerprint={"generation": "test", "factors": mining_factor_snapshot(["cf_outer"])},
         )
         service, _ = _real_service(tmp_path, store)

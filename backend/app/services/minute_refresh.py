@@ -38,6 +38,7 @@
 自定义: fetch_intraday_custom_batch / fetch_intraday_custom_latest),
 保持插件化边界不泄漏。
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -80,17 +81,17 @@ class _RefreshState:
     """服务运行状态 (status() 的内存镜像, 循环线程内更新)。"""
 
     rounds: int = 0
-    last_round_at: float | None = None      # epoch 秒
-    last_round_ms: float | None = None      # 单轮耗时
-    last_rows: int = 0                      # 上轮写入行数 (合并后)
-    last_symbols: int = 0                   # 上轮覆盖标的数
-    last_requests: int = 0                  # 上轮请求数 (增量恒 1, 修复=分块数+重试)
-    last_mode: str | None = None            # 上轮模式: "increment" / "full"
+    last_round_at: float | None = None  # epoch 秒
+    last_round_ms: float | None = None  # 单轮耗时
+    last_rows: int = 0  # 上轮写入行数 (合并后)
+    last_symbols: int = 0  # 上轮覆盖标的数
+    last_requests: int = 0  # 上轮请求数 (增量恒 1, 修复=分块数+重试)
+    last_mode: str | None = None  # 上轮模式: "increment" / "full"
     last_error: str | None = None
-    next_round_at: float | None = None      # epoch 秒
+    next_round_at: float | None = None  # epoch 秒
     extra: dict[str, Any] = field(default_factory=dict)
-    minute_basis_raw: bool | None = None   # 上轮落盘时本地库是否 raw 基准
-    basis_warned: bool = False             # 混基准风险只警告一次
+    minute_basis_raw: bool | None = None  # 上轮落盘时本地库是否 raw 基准
+    basis_warned: bool = False  # 混基准风险只警告一次
 
 
 class MinuteRefreshService:
@@ -103,7 +104,7 @@ class MinuteRefreshService:
         self._stop = threading.Event()
         self._state = _RefreshState()
         self._round_lock = threading.Lock()  # 同时只允许一轮 (手动触发与定时轮互斥)
-        self._empty_rounds = 0               # 连续空轮计数 (escalate 到全天修复)
+        self._empty_rounds = 0  # 连续空轮计数 (escalate 到全天修复)
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -121,7 +122,9 @@ class MinuteRefreshService:
             return True
         self._stop.clear()
         self._thread = threading.Thread(
-            target=self._loop, name="minute-refresh", daemon=True,
+            target=self._loop,
+            name="minute-refresh",
+            daemon=True,
         )
         self._thread.start()
         return True
@@ -148,18 +151,20 @@ class MinuteRefreshService:
             from app.tickflow.capabilities import Cap
 
             return capset.has(Cap.INTRADAY_UNIVERSE)
-        except Exception:
+        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             return False
 
     def active_provider(self) -> str:
         """全量分钟生效源名；失效的自定义源不得静默伪装成 TickFlow。"""
         try:
-            saved = str(preferences.load().get("full_minute_data_provider", "tickflow") or "tickflow").lower()
+            saved = str(
+                preferences.load().get("full_minute_data_provider", "tickflow") or "tickflow"
+            ).lower()
             selected = preferences.get_full_minute_data_provider()
             if saved != "tickflow" and selected == "tickflow":
                 return f"unavailable:{saved}"
             return selected
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             return "unavailable:unknown"
 
     def _resolve_custom(self) -> tuple[object | None, str]:
@@ -175,14 +180,17 @@ class MinuteRefreshService:
         if name == "tickflow":
             return (None, "tickflow")
         if name.startswith("unavailable:"):
-            logger.warning("full_minute provider %s unavailable; not falling back to TickFlow",
-                           name.removeprefix("unavailable:"))
+            logger.warning(
+                "full_minute provider %s unavailable; not falling back to TickFlow",
+                name.removeprefix("unavailable:"),
+            )
             return (None, name)
         provider, _use_tickflow, err = kline_sync._resolve_full_minute_provider(name)
         if err is not None or provider is None:
             logger.warning(
                 "full_minute provider %s unavailable; not falling back to TickFlow: %s",
-                name, err,
+                name,
+                err,
             )
             return (None, f"unavailable:{name}")
         return (provider, name)
@@ -243,9 +251,11 @@ class MinuteRefreshService:
                             break  # 门控关闭 → 回外层等待重评估
                         if now >= self._state.next_round_at:
                             break
-                        self._stop.wait(min(_LOOP_STEP_S, max(0.0, self._state.next_round_at - now)))
+                        self._stop.wait(
+                            min(_LOOP_STEP_S, max(0.0, self._state.next_round_at - now))
+                        )
                     continue
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
                 self._state.last_error = f"round failed: {e}"
                 logger.warning("全量分钟轮次异常: %s", e)
             self._stop.wait(_LOOP_STEP_S)
@@ -261,16 +271,13 @@ class MinuteRefreshService:
         本轮走全天修复, 不会因探测失败而丢增量。
         """
         with contextlib.suppress(Exception):
-            part = (
-                self._repo.store.data_dir / "kline_minute"
-                / f"date={cn_today().isoformat()}" / "part.parquet"
-            )
-            if not part.exists():
+            from app.storage.runtime import require_storage
+
+            today = cn_today()
+            _lo, mx = require_storage().store.minute_bounds("kline_minute")
+            if mx is None or mx.date() != today:
                 return None
-            mx = pl.read_parquet(part, columns=["datetime"])["datetime"].max()
-            if mx is None:
-                return None
-            # 分区 datetime 为北京墙钟 naive, cn_now 带时区 → 剥齐再比
+            # 分钟K datetime 为北京墙钟 naive, cn_now 带时区 → 剥齐再比
             return (cn_now().replace(tzinfo=None) - mx).total_seconds() / 60
         return None
 
@@ -287,79 +294,91 @@ class MinuteRefreshService:
             return "full"
         return "increment"
 
-    def _run_round(self) -> None:
+    def _fetch_round_data(self, custom, provider_name: str, mode: str, mode_label: str):
         from app.services import kline_sync
 
+        fetch_started = time.perf_counter()
+        if mode == "increment":
+            if custom is not None:
+                latest = kline_sync.fetch_intraday_custom_latest(custom, provider_name)
+                df, requests = latest if latest is not None else (pl.DataFrame(), 0)
+            else:
+                df, requests = kline_sync.fetch_intraday_universe_increment()
+            self._state.last_symbols = df["symbol"].n_unique() if not df.is_empty() else 0
+        else:
+            symbols = self._universe()
+            self._state.last_symbols = len(symbols)
+            if not symbols:
+                self._state.last_error = "empty universe (instruments 未加载)"
+                logger.warning("全量分钟[%s] 本轮中止: 标的池为空 (instruments 未加载)", mode_label)
+                return None
+            if custom is not None:
+                df, requests = kline_sync.fetch_intraday_custom_batch(
+                    custom, provider_name, symbols
+                )
+            else:
+                capset = getattr(self._app_state, "capabilities", None) if self._app_state else None
+                df, requests = kline_sync.fetch_intraday_full_market_burst(symbols, capset)
+        fetch_ms = (time.perf_counter() - fetch_started) * 1000
+        self._state.last_requests = requests
+        return df, requests, fetch_ms
+
+    def _write_round_data(self, df, mode: str, mode_label: str, fetch_ms: float, requests: int):
+        from app.services import kline_sync
+
+        if df.is_empty():
+            self._empty_rounds += 1
+            self._state.last_error = f"intraday {mode} returned no data"
+            logger.warning(
+                "全量分钟[%s] 本轮返回空数据: %d 请求, 取数 %.0fms",
+                mode_label,
+                requests,
+                fetch_ms,
+            )
+            return None
+        self._empty_rounds = 0
+        basis_raw = minute_adjust.minute_basis_is_raw(self._repo.store.data_dir)
+        if not basis_raw and not self._state.basis_warned:
+            logger.warning(
+                "全量分钟: 本地分钟库未迁移 raw 基准 (.raw_basis 缺失), intraday "
+                "价格基准未签约, 服务写入可能与端点补拉混基准; 建议先运行分钟基准迁移"
+            )
+            self._state.basis_warned = True
+        self._state.minute_basis_raw = basis_raw
+        write_started = time.perf_counter()
+        with self._repo._write_lock:
+            written = kline_sync._write_minute_partition(
+                df, self._repo.store.data_dir / "kline_minute"
+            )
+        return written, (time.perf_counter() - write_started) * 1000
+
+    def _run_round(self) -> None:
         t0 = time.perf_counter()
         custom, provider_name = self._resolve_custom()
         if provider_name.startswith("unavailable:"):
-            self._state.last_error = f"full_minute provider unavailable: {provider_name.removeprefix('unavailable:')}"
+            self._state.last_error = (
+                f"full_minute provider unavailable: {provider_name.removeprefix('unavailable:')}"
+            )
             self._state.last_requests = 0
             self._state.last_symbols = 0
             return
         mode = self._select_mode()
-        if mode == "increment" and custom is not None and not self._custom_supports_increment(custom):
-            # 无廉价增量端点的源: 增量轮退化为修复轮 (全天批量幂等覆盖, 数据不丢)
+        if (
+            mode == "increment"
+            and custom is not None
+            and not self._custom_supports_increment(custom)
+        ):
             mode = "full"
         mode_label = "增量" if mode == "increment" else "全天修复"
         with self._round_lock:
-            if mode == "increment":
-                # fetch 计时只覆盖网络取数; full 分支的 universe 维表读取不计入
-                fetch_started = time.perf_counter()
-                if custom is not None:
-                    latest = kline_sync.fetch_intraday_custom_latest(custom, provider_name)
-                    df, requests = latest if latest is not None else (pl.DataFrame(), 0)
-                else:
-                    df, requests = kline_sync.fetch_intraday_universe_increment()
-                self._state.last_symbols = (
-                    df["symbol"].n_unique() if not df.is_empty() else 0
-                )
-            else:
-                symbols = self._universe()
-                self._state.last_symbols = len(symbols)
-                if not symbols:
-                    self._state.last_error = "empty universe (instruments 未加载)"
-                    logger.warning("全量分钟[%s] 本轮中止: 标的池为空 (instruments 未加载)", mode_label)
-                    return
-                fetch_started = time.perf_counter()
-                if custom is not None:
-                    df, requests = kline_sync.fetch_intraday_custom_batch(
-                        custom, provider_name, symbols,
-                    )
-                else:
-                    capset = getattr(self._app_state, "capabilities", None) if self._app_state else None
-                    df, requests = kline_sync.fetch_intraday_full_market_burst(symbols, capset)
-            fetch_ms = (time.perf_counter() - fetch_started) * 1000
-            self._state.last_requests = requests
-            if df.is_empty():
-                self._empty_rounds += 1
-                self._state.last_error = f"intraday {mode} returned no data"
-                logger.warning(
-                    "全量分钟[%s] 本轮返回空数据: %d 请求, 取数 %.0fms",
-                    mode_label, requests, fetch_ms,
-                )
+            fetched = self._fetch_round_data(custom, provider_name, mode, mode_label)
+            if fetched is None:
                 return
-            self._empty_rounds = 0
-            # 基准可见性: intraday 端点的价格基准未签约 (SDK 无 adjust 参数),
-            # 本地库未迁移 raw (.raw_basis 缺失) 时服务写入与端点补拉 (forward)
-            # 可能混基准 —— 只暴露状态与一次性警告, 不阻断 (阻断属功能变更, 另行决策)。
-            basis_raw = minute_adjust.minute_basis_is_raw(self._repo.store.data_dir)
-            if not basis_raw and not self._state.basis_warned:
-                logger.warning(
-                    "全量分钟: 本地分钟库未迁移 raw 基准 (.raw_basis 缺失), intraday "
-                    "价格基准未签约, 服务写入可能与端点补拉混基准; 建议先运行分钟基准迁移"
-                )
-                self._state.basis_warned = True
-            self._state.minute_basis_raw = basis_raw
-            write_started = time.perf_counter()
-            # 读-改-写必须持仓库写锁 (与 minute-batch 补拉 / 盘后同步同一纪律):
-            # 无互斥的两个写者并发替换同一分区时, 后写者以过期基底覆盖丢整批行,
-            # 且会共用同一 tmp 文件交错损坏。实测增量轮落盘 ~10ms, 锁占用可忽略。
-            with self._repo._write_lock:
-                written = kline_sync._write_minute_partition(
-                    df, self._repo.store.data_dir / "kline_minute",
-                )
-            write_ms = (time.perf_counter() - write_started) * 1000
+            df, requests, fetch_ms = fetched
+            written_result = self._write_round_data(df, mode, mode_label, fetch_ms, requests)
+            if written_result is None:
+                return
+            written, write_ms = written_result
 
         self._state.rounds += 1
         self._state.last_round_at = time.time()
@@ -370,8 +389,14 @@ class MinuteRefreshService:
         logger.info(
             "全量分钟[%s] 第 %d 轮: 取数 %.0fms (%d 请求, %d 标的), "
             "落盘 %.0fms (%d 行), 总计 %.0fms",
-            mode_label, self._state.rounds, fetch_ms, self._state.last_requests,
-            self._state.last_symbols, write_ms, written, self._state.last_round_ms,
+            mode_label,
+            self._state.rounds,
+            fetch_ms,
+            self._state.last_requests,
+            self._state.last_symbols,
+            write_ms,
+            written,
+            self._state.last_round_ms,
         )
 
     def _universe(self) -> list[str]:

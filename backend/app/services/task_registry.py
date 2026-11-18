@@ -11,6 +11,7 @@
 容量与时效: ≤20 条 (超限裁 updated_at 最旧); running 超过 24h 视为孤儿
 (进程重启遗留), 读取时静默剔除并落盘回收。
 """
+
 from __future__ import annotations
 
 import json
@@ -30,8 +31,6 @@ MAX_ITEMS = 20
 ORPHAN_RUNNING_SECONDS = 24 * 3600
 _FILENAME = "task_registry.json"
 
-_cache: dict[str, Any] | None = None
-_cache_sig: tuple[int, int] | None = None
 # 串行化读-改-写 (upsert/delete/孤儿清理): 两个前端 fire-and-forget 上报并发时
 # 后写者会覆盖先写者 (丢终态翻转或丢整条); 文件写入本身原子, 锁只保护 RMW 段。
 _MUTATION_LOCK = threading.Lock()
@@ -41,14 +40,6 @@ def _path(data_dir: Path) -> Path:
     p = data_dir / "user_data" / _FILENAME
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
-
-
-def _signature(p: Path) -> tuple[int, int] | None:
-    try:
-        st = p.stat()
-        return (st.st_mtime_ns, st.st_size)
-    except OSError:
-        return None
 
 
 def _sanitize_items(data: Any) -> list[dict]:
@@ -65,15 +56,17 @@ def _sanitize_items(data: Any) -> list[dict]:
             continue
         if not isinstance(it.get("id"), str) or not it["id"]:
             continue
-        out.append({
-            "id": it["id"],
-            "kind": it["kind"],
-            "status": it["status"],
-            "label": it["label"] if isinstance(it.get("label"), str) else "",
-            "payload": it["payload"] if isinstance(it.get("payload"), dict) else {},
-            "started_at": it.get("started_at") or 0,
-            "updated_at": it.get("updated_at") or 0,
-        })
+        out.append(
+            {
+                "id": it["id"],
+                "kind": it["kind"],
+                "status": it["status"],
+                "label": it["label"] if isinstance(it.get("label"), str) else "",
+                "payload": it["payload"] if isinstance(it.get("payload"), dict) else {},
+                "started_at": it.get("started_at") or 0,
+                "updated_at": it.get("updated_at") or 0,
+            }
+        )
     return out
 
 
@@ -98,30 +91,29 @@ def _prune_orphans(items: list[dict]) -> tuple[list[dict], int]:
     return kept, orphans
 
 
-def _load_raw(data_dir: Path) -> list[dict] | None:
-    global _cache, _cache_sig
+def _load_raw(data_dir: Path) -> list[dict]:
+    """读取注册表条目 (损坏文件视为空)。
+
+    不做基于 (mtime, size) 的缓存: 文件时间戳取自粗粒度时钟, 同一 tick 内的
+    等长原地改写不会改变 mtime —— 缓存会把这类外部改动 (配置备份回滚等) 漏掉,
+    孤儿 running 项因此得不到回收。注册表 ≤20 条, GET 每次页面挂载才调一次,
+    直接读足够快。
+    """
     p = _path(data_dir)
-    sig = _signature(p)
-    if sig is None:
-        return []
-    if _cache is not None and sig == _cache_sig:
-        return _cache["items"]
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
     except Exception as e:  # noqa: BLE001 — 损坏文件视为空注册表
         logger.warning("task registry 文件损坏, 视为空: %s", e)
         return []
-    items = _sorted_trimmed(_sanitize_items(data))
-    _cache, _cache_sig = {"items": items}, sig
-    return items
+    return _sorted_trimmed(_sanitize_items(data))
 
 
 def _save(data_dir: Path, items: list[dict]) -> None:
-    global _cache, _cache_sig
     trimmed = _sorted_trimmed(items)
     p = _path(data_dir)
     atomic_write_text(p, json.dumps({"items": trimmed}, ensure_ascii=False))
-    _cache, _cache_sig = {"items": trimmed}, _signature(p)
 
 
 def list_items(data_dir: Path, kind: str | None = None) -> list[dict]:
@@ -130,8 +122,6 @@ def list_items(data_dir: Path, kind: str | None = None) -> list[dict]:
     # 整条覆盖丢失 (与 upsert 要修的丢更新同源)。
     with _MUTATION_LOCK:
         items = _load_raw(data_dir)
-        if items is None:
-            return []
         kept, orphans = _prune_orphans(items)
         if orphans:
             _save(data_dir, kept)
@@ -156,16 +146,16 @@ def upsert(
         raise ValueError(f"未知的任务状态: {status}")
     now = time.time()
     with _MUTATION_LOCK:
-        items = _load_raw(data_dir) or []
+        items = _load_raw(data_dir)
         entry = {
-        "id": task_id,
-        "kind": kind,
-        "status": status,
-        "label": label,
-        "payload": payload or {},
-        "started_at": now,
-        "updated_at": now,
-    }
+            "id": task_id,
+            "kind": kind,
+            "status": status,
+            "label": label,
+            "payload": payload or {},
+            "started_at": now,
+            "updated_at": now,
+        }
         for i, it in enumerate(items):
             if it["id"] == task_id:
                 entry["started_at"] = it.get("started_at") or now
@@ -179,7 +169,7 @@ def upsert(
 
 def delete(data_dir: Path, task_id: str) -> bool:
     with _MUTATION_LOCK:
-        items = _load_raw(data_dir) or []
+        items = _load_raw(data_dir)
         remaining = [it for it in items if it["id"] != task_id]
         if len(remaining) == len(items):
             return False

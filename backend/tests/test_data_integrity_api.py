@@ -21,14 +21,17 @@ from app.services import (
 
 
 @pytest.fixture
-def app_env(tmp_path, monkeypatch):
+def app_env(tmp_path, monkeypatch, ck_runtime):
     from app.tickflow.repository import DataStore, KlineRepository
+
     store = pipeline_jobs.JobStore(store_dir=tmp_path / "jobs")
     monkeypatch.setattr(data, "job_store", store)
     monkeypatch.setattr(pipeline_jobs, "job_store", store)
     monkeypatch.setattr(pipeline_jobs, "_CANCEL_FLAGS", {})
     monkeypatch.setattr(pipeline_jobs, "_run_slot_owner", None)
-    monkeypatch.setattr(heavy_job_limiter, "shared_heavy_job_limiter", heavy_job_limiter.HeavyJobLimiter())
+    monkeypatch.setattr(
+        heavy_job_limiter, "shared_heavy_job_limiter", heavy_job_limiter.HeavyJobLimiter()
+    )
     monkeypatch.setattr(heavy_job_limiter, "_memory_admission_ok", lambda: True)
     monkeypatch.setattr(preferences, "load", lambda: {})
     monkeypatch.setattr(integrity_check, "cn_today", lambda: date(2026, 10, 30))
@@ -45,8 +48,13 @@ def app_env(tmp_path, monkeypatch):
 
     app = FastAPI()
     app.include_router(data.router)
-    app.state.repo = KlineRepository(DataStore(tmp_path))
-    monkeypatch.setattr(app.state.repo, "get_instruments_asset", lambda asset: pl.DataFrame({"symbol": ["600001.SH"]}))
+    # 修补链路 (指标重算 / CK 镜像) 需要 CK 门面
+    app.state.repo = KlineRepository(DataStore(tmp_path), storage=ck_runtime)
+    monkeypatch.setattr(
+        app.state.repo,
+        "get_instruments_asset",
+        lambda asset: pl.DataFrame({"symbol": ["600001.SH"]}),
+    )
     app.state.capabilities = SimpleNamespace(has=lambda cap: True)
     app.state.quote_service = SimpleNamespace(paused=pause)
     return app, store, tmp_path, paused
@@ -72,16 +80,25 @@ def test_api_scan_and_repair_publish_rechecked_report(app_env, monkeypatch):
 
     def fetch(*args, **kwargs):
         assert kwargs["asset_type"] == "stock"
-        yield pl.DataFrame({
-            "symbol": ["600001.SH"], "date": [date(2026, 10, 29)],
-            "open": [10.0], "high": [11.0], "low": [9.0], "close": [10.0],
-            "volume": [100.0], "amount": [100000.0],
-        })
+        yield pl.DataFrame(
+            {
+                "symbol": ["600001.SH"],
+                "date": [date(2026, 10, 29)],
+                "open": [10.0],
+                "high": [11.0],
+                "low": [9.0],
+                "close": [10.0],
+                "volume": [100.0],
+                "amount": [100000.0],
+            }
+        )
 
     monkeypatch.setattr(kline_sync, "iter_daily_frames", fetch)
     with TestClient(app) as client:
         assert client.get("/api/data/integrity").json()["report"] is None
-        response = client.post("/api/data/integrity/scan", json={"lookback_days": 7, "asset_types": ["stock"]})
+        response = client.post(
+            "/api/data/integrity/scan", json={"lookback_days": 7, "asset_types": ["stock"]}
+        )
         assert response.status_code == 200
         job = finished(store, response.json()["job_id"])
         assert job["status"] == "succeeded"
@@ -107,11 +124,18 @@ def test_api_repair_reports_old_history_and_next_attempt_repairs_it(app_env, mon
     monkeypatch.setattr(data_integrity, "_trading_calendar", lambda: {old, recent})
 
     def frame(day, bad=False):
-        return pl.DataFrame({
-            "symbol": [symbol], "date": [day], "open": [10.0], "high": [11.0],
-            "low": [9.0], "close": [999.0 if bad else 10.0],
-            "volume": [100.0], "amount": [1000.0],
-        })
+        return pl.DataFrame(
+            {
+                "symbol": [symbol],
+                "date": [day],
+                "open": [10.0],
+                "high": [11.0],
+                "low": [9.0],
+                "close": [999.0 if bad else 10.0],
+                "volume": [100.0],
+                "amount": [1000.0],
+            }
+        )
 
     for day in (old, recent):
         app.state.repo.append_daily(frame(day, bad=day == old))
@@ -127,7 +151,9 @@ def test_api_repair_reports_old_history_and_next_attempt_repairs_it(app_env, mon
 
     monkeypatch.setattr(kline_sync, "iter_daily_frames", fetch)
     with TestClient(app) as client:
-        response = client.post("/api/data/integrity/scan", json={"lookback_days": 30, "asset_types": ["stock"]})
+        response = client.post(
+            "/api/data/integrity/scan", json={"lookback_days": 30, "asset_types": ["stock"]}
+        )
         assert finished(store, response.json()["job_id"])["status"] == "succeeded"
         report = client.get("/api/data/integrity").json()["report"]
         response = client.post("/api/data/integrity/repair", json={"report_id": report["id"]})
@@ -139,7 +165,9 @@ def test_api_repair_reports_old_history_and_next_attempt_repairs_it(app_env, mon
         historical = next(i for i in result["report"]["issues"] if i["date"] == old.isoformat())
         assert historical["symbols"] == [symbol] and "最高价" in historical["reason"]
         assert fetched == []
-        response = client.post("/api/data/integrity/repair", json={"report_id": result["report"]["id"]})
+        response = client.post(
+            "/api/data/integrity/repair", json={"report_id": result["report"]["id"]}
+        )
         assert finished(store, response.json()["job_id"])["status"] == "succeeded"
         final = client.get("/api/data/integrity").json()
         assert final["report"]["status"] == "clean" and final["blocking_assets"] == []
@@ -148,10 +176,15 @@ def test_api_repair_reports_old_history_and_next_attempt_repairs_it(app_env, mon
         assert paused == ["pause", "resume", "pause", "resume"]
 
 
-@pytest.mark.parametrize("body", [
-    {"lookback_days": 0}, {"lookback_days": 367}, {"asset_types": []},
-    {"asset_types": ["../../outside"]},
-])
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"lookback_days": 0},
+        {"lookback_days": 367},
+        {"asset_types": []},
+        {"asset_types": ["../../outside"]},
+    ],
+)
 def test_api_rejects_invalid_scan_scope(app_env, body):
     app, _, _, _ = app_env
     with TestClient(app) as client:

@@ -29,8 +29,6 @@ import re
 from datetime import date as date_cls
 from pathlib import Path
 
-import polars as pl
-
 from app.market_time import cn_today
 
 logger = logging.getLogger(__name__)
@@ -39,20 +37,17 @@ _DATE_DIR_RE = re.compile(r"^date=(\d{4}-\d{2}-\d{2})$")
 
 
 def _local_trading_days(data_dir: Path) -> list[date_cls]:
-    """本地日K分区日期 = 已知交易日集合 (升序)。扫描失败返回空。"""
-    root = data_dir / "kline_daily"
-    out: list[date_cls] = []
-    try:
-        for d in root.iterdir():
-            m = _DATE_DIR_RE.match(d.name)
-            if d.is_dir() and m:
-                try:
-                    out.append(date_cls.fromisoformat(m.group(1)))
-                except ValueError:
-                    continue
-    except OSError:
+    """本地日K覆盖的交易日（升序，CK 为唯一来源）。查询失败返回空。"""
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is None:
         return []
-    return sorted(out)
+    try:
+        return runtime.store.list_daily_dates("kline_daily")
+    except Exception as exc:  # noqa: BLE001 - 交易日缺失时由调用方回退到供应商
+        logger.warning("auction_benchmark: 交易日枚举失败: %s", exc)
+        return []
 
 
 def resolve_trade_date(data_dir: Path, target: date_cls | None) -> date_cls | None:
@@ -110,16 +105,25 @@ def _raw_items(data: dict) -> list[dict]:
 
 
 def _read_kline_closes(data_dir: Path, d: date_cls) -> dict[str, float]:
-    """某交易日全市场 {symbol: close}; 无分区/读失败返回空。"""
-    root = data_dir / "kline_daily" / f"date={d.isoformat()}"
-    try:
-        files = sorted(root.glob("*.parquet"))
-        if not files:
-            return {}
-        df = pl.concat([pl.read_parquet(f, columns=["symbol", "close"]) for f in files])
-        return dict(zip(df["symbol"].to_list(), df["close"].to_list()))
-    except (OSError, pl.exceptions.PolarsError):
+    """某交易日全市场 {symbol: close}; 无数据/读失败返回空。"""
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is None:
         return {}
+    try:
+        df = runtime.store.read_daily(
+            "kline_daily",
+            start=d,
+            end=d,
+            columns=["symbol", "close"],
+        )
+    except Exception as exc:  # noqa: BLE001 - 单日缺失只影响收益增强, 不阻断名单
+        logger.warning("auction_benchmark: 日K读取失败 %s: %s", d, exc)
+        return {}
+    if df.is_empty():
+        return {}
+    return dict(zip(df["symbol"].to_list(), df["close"].to_list(), strict=True))
 
 
 def _enrich(data_dir: Path, trade_date: date_cls, items: list[dict]) -> list[dict]:
@@ -127,15 +131,28 @@ def _enrich(data_dir: Path, trade_date: date_cls, items: list[dict]) -> list[dic
 
     用相邻 kline_daily 分区现算, 不落缓存 — 次日分区晚到时先给 None, 到了自然补上。
     """
-    root = data_dir / "kline_daily" / f"date={trade_date.isoformat()}"
     day0: dict[str, tuple[float, float]] = {}  # symbol -> (open, close)
-    try:
-        files = sorted(root.glob("*.parquet"))
-        if files:
-            df = pl.concat([pl.read_parquet(f, columns=["symbol", "open", "close"]) for f in files])
-            day0 = dict(zip(df["symbol"].to_list(), zip(df["open"].to_list(), df["close"].to_list())))
-    except (OSError, pl.exceptions.PolarsError):
-        day0 = {}
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is not None:
+        try:
+            df = runtime.store.read_daily(
+                "kline_daily",
+                start=trade_date,
+                end=trade_date,
+                columns=["symbol", "open", "close"],
+            )
+            if not df.is_empty():
+                day0 = dict(
+                    zip(
+                        df["symbol"].to_list(),
+                        zip(df["open"].to_list(), df["close"].to_list(), strict=True),
+                        strict=True,
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001 - 收益增强失败只留 None
+            logger.warning("auction_benchmark: 当日日K读取失败 %s: %s", trade_date, exc)
 
     prev = _prev_trading_day(data_dir, trade_date)
     prev_close = _read_kline_closes(data_dir, prev) if prev else {}
@@ -156,16 +173,18 @@ def _enrich(data_dir: Path, trade_date: date_cls, items: list[dict]) -> list[dic
             nc = next_close.get(sym)
             if c and c > 0 and nc is not None:
                 d1 = nc / c - 1.0
-        out.append({
-            "thscode": sym,
-            "ticker": r.get("ticker"),
-            "name": r.get("name"),
-            "auction_pct": r.get("auction_pct"),
-            "tags": [str(t) for t in (r.get("tags") or [])],
-            "day0_oc": oc,
-            "day0_pct": pct,
-            "d1_pct": d1,
-        })
+        out.append(
+            {
+                "thscode": sym,
+                "ticker": r.get("ticker"),
+                "name": r.get("name"),
+                "auction_pct": r.get("auction_pct"),
+                "tags": [str(t) for t in (r.get("tags") or [])],
+                "day0_oc": oc,
+                "day0_pct": pct,
+                "d1_pct": d1,
+            }
+        )
     return out
 
 
@@ -209,7 +228,7 @@ def get_auction_benchmark(data_dir: Path, target: date_cls | None = None) -> dic
         try:
             actual = date_cls.fromisoformat(str(data.get("date")))
         except ValueError:
-            actual = trade_date
+            actual = trade_date  # type: ignore[assignment]
         base = _base_payload(data_dir, actual, data)
         # 历史日不可变 → 落缓存; 当日不缓存 (竞价阶段名单可能变动)
         if actual is not None and actual < today:
@@ -224,14 +243,14 @@ def get_auction_benchmark(data_dir: Path, target: date_cls | None = None) -> dic
                 try:
                     cached_prev = _load_cache(_cache_path(data_dir, prev))
                     if cached_prev is not None:
-                        return _respond(data_dir, prev, cached_prev, "fallback_prev",
-                                        requested=explicit)
+                        return _respond(
+                            data_dir, prev, cached_prev, "fallback_prev", requested=explicit
+                        )
                     data_prev = provider.short_term_benchmark(prev.isoformat())
                     base = _base_payload(data_dir, prev, data_prev)
                     with contextlib.suppress(OSError):
                         _store_cache(_cache_path(data_dir, prev), base)
-                    return _respond(data_dir, prev, base, "fallback_prev",
-                                    requested=explicit)
+                    return _respond(data_dir, prev, base, "fallback_prev", requested=explicit)
                 except FuyaoError:
                     pass
         logger.warning("短线风向标拉取失败: %s", e)
@@ -271,17 +290,19 @@ def build_recap_context(data_dir: Path) -> str:
         lines = [f"(数据日期: {trade_date})"]
         segs = []
         for i in items:
-            seg = (f"{i.get('name')}({i.get('thscode')}) 竞价{(i.get('auction_pct') or 0):+.2f}%"
-                   f"[{'·'.join(i.get('tags') or [])}]")
+            seg = (
+                f"{i.get('name')}({i.get('thscode')}) 竞价{(i.get('auction_pct') or 0):+.2f}%"
+                f"[{'·'.join(i.get('tags') or [])}]"
+            )
             if i.get("day0_oc") is not None:
-                seg += f" → 当日开盘买{i['day0_oc']*100:+.2f}%"
+                seg += f" → 当日开盘买{i['day0_oc'] * 100:+.2f}%"
             if i.get("d1_pct") is not None:
-                seg += f", 次日{i['d1_pct']*100:+.2f}%"
+                seg += f", 次日{i['d1_pct'] * 100:+.2f}%"
             segs.append(seg)
         lines.append("盘前风向标名单: " + "; ".join(segs))
         ocs = [i["day0_oc"] for i in items if i.get("day0_oc") is not None]
         if ocs:
-            lines.append(f"名单当日(开盘买→收盘卖)均值 {sum(ocs)/len(ocs)*100:+.2f}%")
+            lines.append(f"名单当日(开盘买→收盘卖)均值 {sum(ocs) / len(ocs) * 100:+.2f}%")
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001 — 摘要失败不影响复盘主流程
         logger.debug("盘前风向标复盘摘要构建失败: %s", e)

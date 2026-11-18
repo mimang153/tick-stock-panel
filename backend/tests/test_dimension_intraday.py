@@ -3,15 +3,26 @@
 夹具: snapshot 扩展配置 (所属概念) + kline_minute/kline_daily 分区,
 验证等权口径、停牌 ffill、prev_close/首根基准与各降级状态。
 """
+
 from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from app.api.ext_data import _dimension_intraday_compute
 from app.services.ext_data import ExtConfig
+
+_CK = {"store": None}
+
+
+@pytest.fixture(autouse=True)
+def _ck(ck_runtime):
+    _CK["store"] = ck_runtime
+    yield
+    _CK["store"] = None
 
 
 def _mk_config() -> ExtConfig:
@@ -22,10 +33,12 @@ def _write_ext(data_dir: Path, values: dict[str, str]) -> None:
     """snapshot 扩展数据: symbol → 所属概念 标签串。"""
     cfg_dir = data_dir / "ext_data" / "ext_gn"
     cfg_dir.mkdir(parents=True, exist_ok=True)
-    df = pl.DataFrame({
-        "symbol": list(values.keys()),
-        "所属概念": list(values.values()),
-    })
+    df = pl.DataFrame(
+        {
+            "symbol": list(values.keys()),
+            "所属概念": list(values.values()),
+        }
+    )
     df.write_parquet(cfg_dir / "part.parquet")
 
 
@@ -41,15 +54,25 @@ def _write_minute(data_dir: Path, day: str, rows: list[tuple[str, str, float]]) 
         schema_overrides={"datetime": pl.Datetime("us")},
     )
     df.write_parquet(part)
+    if _CK["store"] is not None:
+        # dimension-intraday 的分钟K从 CK 读
+        _CK["store"].write_minute("kline_minute", df)
 
 
 def _write_daily(data_dir: Path, day: str, closes: dict[str, float]) -> None:
     part = data_dir / "kline_daily" / f"date={day}" / "part.parquet"
     part.parent.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame({
-        "symbol": list(closes.keys()),
-        "close": list(closes.values()),
-    }).write_parquet(part)
+    daily_df = pl.DataFrame(
+        {
+            "symbol": list(closes.keys()),
+            "date": [datetime.fromisoformat(day).date()] * len(closes),
+            "close": list(closes.values()),
+        }
+    )
+    daily_df.write_parquet(part)
+    if _CK["store"] is not None:
+        # prev_close 从 CK kline_daily 读
+        _CK["store"].write_daily("kline_daily", daily_df)
 
 
 def test_dimension_intraday_equal_weight_and_ffill(tmp_path: Path) -> None:
@@ -58,16 +81,20 @@ def test_dimension_intraday_equal_weight_and_ffill(tmp_path: Path) -> None:
     # 前收: 000001=10.0 (+5%/+6%/+4%), 000002=20.0, 600000 非成分股
     _write_daily(data_dir, "2026-08-27", {"000001.SZ": 10.0, "000002.SZ": 20.0, "600000.SH": 5.0})
     # 000002 在 09:32 无成交 (停牌分钟) → ffill 沿用 20.4
-    _write_minute(data_dir, "2026-08-28", [
-        ("000001.SZ", "2026-08-28T09:31:00", 10.5),
-        ("000002.SZ", "2026-08-28T09:31:00", 20.4),
-        ("600000.SH", "2026-08-28T09:31:00", 5.05),
-        ("000001.SZ", "2026-08-28T09:32:00", 10.6),
-        ("600000.SH", "2026-08-28T09:32:00", 5.10),
-        ("000001.SZ", "2026-08-28T09:33:00", 10.4),
-        ("000002.SZ", "2026-08-28T09:33:00", 20.8),
-        ("600000.SH", "2026-08-28T09:33:00", 5.20),
-    ])
+    _write_minute(
+        data_dir,
+        "2026-08-28",
+        [
+            ("000001.SZ", "2026-08-28T09:31:00", 10.5),
+            ("000002.SZ", "2026-08-28T09:31:00", 20.4),
+            ("600000.SH", "2026-08-28T09:31:00", 5.05),
+            ("000001.SZ", "2026-08-28T09:32:00", 10.6),
+            ("600000.SH", "2026-08-28T09:32:00", 5.10),
+            ("000001.SZ", "2026-08-28T09:33:00", 10.4),
+            ("000002.SZ", "2026-08-28T09:33:00", 20.8),
+            ("600000.SH", "2026-08-28T09:33:00", 5.20),
+        ],
+    )
 
     payload = _dimension_intraday_compute(_mk_config(), data_dir, "所属概念", "人工智能", None)
 
@@ -109,7 +136,9 @@ def test_dimension_intraday_requested_date_absent(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     _write_ext(data_dir, {"000001.SZ": "人工智能"})
     _write_minute(data_dir, "2026-08-28", [("000001.SZ", "2026-08-28T09:31:00", 10.5)])
-    payload = _dimension_intraday_compute(_mk_config(), data_dir, "所属概念", "人工智能", "2026-08-27")
+    payload = _dimension_intraday_compute(
+        _mk_config(), data_dir, "所属概念", "人工智能", "2026-08-27"
+    )
     assert payload["status"] == "no_data"
     assert payload["reason"] == "minute_missing"
 
@@ -130,10 +159,14 @@ def test_dimension_intraday_first_close_basis(tmp_path: Path) -> None:
     """无前一交易日日K → 基准退化为当日首根 close, 曲线起点 ≈ 0。"""
     data_dir = tmp_path / "data"
     _write_ext(data_dir, {"000001.SZ": "人工智能"})
-    _write_minute(data_dir, "2026-08-28", [
-        ("000001.SZ", "2026-08-28T09:31:00", 10.0),
-        ("000001.SZ", "2026-08-28T09:32:00", 10.3),
-    ])
+    _write_minute(
+        data_dir,
+        "2026-08-28",
+        [
+            ("000001.SZ", "2026-08-28T09:31:00", 10.0),
+            ("000001.SZ", "2026-08-28T09:32:00", 10.3),
+        ],
+    )
     payload = _dimension_intraday_compute(_mk_config(), data_dir, "所属概念", "人工智能", None)
     assert payload["status"] == "ok"
     assert payload["basis"] == "first_close"
@@ -153,7 +186,9 @@ def test_dimension_intraday_explicit_date_uses_that_partition(tmp_path: Path) ->
     assert latest["date"] == "2026-08-28"
     assert latest["points"][0]["sector"] == 0.1
     # 显式指定 08-27 → prev 为 08-26 的 10.0 → +5%
-    explicit = _dimension_intraday_compute(_mk_config(), data_dir, "所属概念", "人工智能", "2026-08-27")
+    explicit = _dimension_intraday_compute(
+        _mk_config(), data_dir, "所属概念", "人工智能", "2026-08-27"
+    )
     assert explicit["date"] == "2026-08-27"
     assert explicit["points"][0]["sector"] == 0.05
 
@@ -165,14 +200,18 @@ def test_dimension_intraday_dirty_point_filtered_gh473(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     _write_ext(data_dir, {"000001.SZ": "人工智能", "000002.SZ": "人工智能"})
     _write_daily(data_dir, "2026-08-27", {"000001.SZ": 10.0, "000002.SZ": 20.0})
-    _write_minute(data_dir, "2026-08-28", [
-        ("000001.SZ", "2026-08-28T09:31:00", 10.5),
-        ("000002.SZ", "2026-08-28T09:31:00", 20.4),
-        ("000001.SZ", "2026-08-28T09:32:00", 190.0),  # 脏点: +1800%
-        ("000002.SZ", "2026-08-28T09:32:00", 20.4),
-        ("000001.SZ", "2026-08-28T09:33:00", 10.4),
-        ("000002.SZ", "2026-08-28T09:33:00", 20.8),
-    ])
+    _write_minute(
+        data_dir,
+        "2026-08-28",
+        [
+            ("000001.SZ", "2026-08-28T09:31:00", 10.5),
+            ("000002.SZ", "2026-08-28T09:31:00", 20.4),
+            ("000001.SZ", "2026-08-28T09:32:00", 190.0),  # 脏点: +1800%
+            ("000002.SZ", "2026-08-28T09:32:00", 20.4),
+            ("000001.SZ", "2026-08-28T09:33:00", 10.4),
+            ("000002.SZ", "2026-08-28T09:33:00", 20.8),
+        ],
+    )
 
     payload = _dimension_intraday_compute(_mk_config(), data_dir, "所属概念", "人工智能", None)
 

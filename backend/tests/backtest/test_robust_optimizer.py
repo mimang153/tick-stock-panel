@@ -7,6 +7,7 @@
 - guards: 主目标白名单 + 最小交易数门槛 (fail-closed)
 - RobustOptimizeService.robust_optimize: K 段回测 → 三层排序 → 取消
 """
+
 from __future__ import annotations
 
 import math
@@ -29,6 +30,7 @@ from app.backtest.robust_optimizer import (
 # ---------------------------------------------------------------
 # 切窗
 # ---------------------------------------------------------------
+
 
 def test_windows_cover_span_contiguously():
     start, end = date(2024, 1, 1), date(2024, 12, 31)
@@ -62,6 +64,7 @@ def test_windows_reject_short_span():
 # ---------------------------------------------------------------
 # 稳健分
 # ---------------------------------------------------------------
+
 
 def test_robust_score_formula_odd_count():
     sc = robust_score([1.0, 5.0, 3.0])
@@ -102,6 +105,7 @@ def test_robust_score_penalizes_one_hot_segment():
 # 护栏
 # ---------------------------------------------------------------
 
+
 def test_validate_primary_objective():
     for obj in ("sortino", "sharpe", "max_drawdown", "profit_factor"):
         guards.validate_primary_objective(obj)  # 不抛
@@ -125,6 +129,7 @@ def test_trades_ok_fail_closed():
 # ---------------------------------------------------------------
 # 冠军收敛诊断
 # ---------------------------------------------------------------
+
 
 def _conv_row(params, values, **kw):
     return {"params": params, "oos_values": values, "disqualified": False, "error": None, **kw}
@@ -187,6 +192,7 @@ def test_champion_convergence_no_data():
 # 编排 (假 service / 引擎, 模式同 test_optimizer_run)
 # ---------------------------------------------------------------
 
+
 @dataclass
 class _FakeDef:
     meta: dict
@@ -223,12 +229,14 @@ class _FakeService:
         self.result_policies = []
 
     def run(self, config, progress_cb=None, cancel_event=None, result_policy=None, prepared=None):
-        self.calls.append({
-            "params": dict(config.params or {}),
-            "start": config.start,
-            "end": config.end,
-            "is_full": config.start == self.FULL_START and config.end == self.FULL_END,
-        })
+        self.calls.append(
+            {
+                "params": dict(config.params or {}),
+                "start": config.start,
+                "end": config.end,
+                "is_full": config.start == self.FULL_START and config.end == self.FULL_END,
+            }
+        )
         self.result_policies.append(result_policy)
         if self.error_fn is not None and self.error_fn(config.params, config.start, config.end):
             raise RuntimeError("分段回测炸了")
@@ -243,13 +251,17 @@ _PARAMS_META = [
 
 def _cfg(**kw):
     base = dict(
-        strategy_id="s", symbols=None,
-        start=date(2024, 1, 1), end=date(2024, 12, 31),
+        strategy_id="s",
+        symbols=None,
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
         param_grid={"p": [1, 2, 3]},
-        objective="sortino", k_segments=4, min_trades_total=30,
+        objective="sortino",
+        k_segments=4,
+        min_trades_total=30,
     )
     base.update(kw)
-    return RobustOptimizeConfig(**base)
+    return RobustOptimizeConfig(**base)  # type: ignore[arg-type]
 
 
 def test_robust_optimize_ranks_by_robust_score():
@@ -273,10 +285,12 @@ def test_robust_optimize_ranks_by_robust_score():
 def test_robust_optimize_lucky_one_segment_loses_to_steady():
     """p=1 只在首段爆发 (9.0) 其余 0.1; p=2 四段稳定 2.0 → 中位+最差让稳定者登顶。
     旧样本内优化会选峰值 (9.0 > 2.0), 这是本设计要堵的过拟合路径。"""
+
     def score(params, start, end):
         if params["p"] == 1:
             return 9.0 if start == date(2024, 1, 1) and end != _FakeService.FULL_END else 0.1
         return 2.0
+
     svc = _FakeService(score)
     out = RobustOptimizeService(svc, _FakeStrategyEngine(_PARAMS_META)).robust_optimize(_cfg())
 
@@ -290,8 +304,10 @@ def test_robust_optimize_lucky_one_segment_loses_to_steady():
 
 def test_robust_optimize_trades_gate_disqualifies():
     """K 段合计交易数不足的组合即使得分最高也不得冠军, 垫到合格组之后。"""
+
     def score(params, start, end):
         return float(params["p"])
+
     svc = _FakeService(score)
     # 每段 20 笔 × 4 段 = 80 笔; p=3 只有 5 笔/段 × 4 = 20 < 30 → 除名
     orig_run = svc.run
@@ -302,7 +318,7 @@ def test_robust_optimize_trades_gate_disqualifies():
             res.stats["n_trades"] = 5
         return res
 
-    svc.run = gated_run
+    svc.run = gated_run  # type: ignore[assignment, method-assign]
     out = RobustOptimizeService(svc, _FakeStrategyEngine(_PARAMS_META)).robust_optimize(_cfg())
 
     top = out["results"][0]
@@ -316,8 +332,10 @@ def test_robust_optimize_trades_gate_disqualifies():
 
 def test_robust_optimize_segment_error_isolated():
     """单组单段回测异常: 该组记 error 垫底, 其余组照常完成。"""
+
     def boom_on(params, start, end):
         return params["p"] == 2 and start == date(2024, 1, 1) and end != _FakeService.FULL_END
+
     svc = _FakeService(lambda params, start, end: float(params["p"]), error_fn=boom_on)
     out = RobustOptimizeService(svc, _FakeStrategyEngine(_PARAMS_META)).robust_optimize(_cfg())
 
@@ -329,27 +347,32 @@ def test_robust_optimize_segment_error_isolated():
 
 
 def test_robust_optimize_progress_and_cancel():
-    events = []
+    events = []  # type: ignore[var-annotated]
     cancel = threading.Event()
 
     def score(params, start, end):
-        if params["p"] == 1:   # 首组首段跑完即请求取消
+        if params["p"] == 1:  # 首组首段跑完即请求取消
             cancel.set()
         return float(params["p"])
+
     svc = _FakeService(score)
     out = RobustOptimizeService(svc, _FakeStrategyEngine(_PARAMS_META)).robust_optimize(
-        _cfg(), progress_cb=events.append, cancel_event=cancel,
+        _cfg(),
+        progress_cb=events.append,
+        cancel_event=cancel,
     )
 
     assert out["cancelled"] is True
-    assert len(out["results"]) == 1          # 只完成了首组
-    assert out["n_combinations"] == 3        # 计划数不变
+    assert len(out["results"]) == 1  # 只完成了首组
+    assert out["n_combinations"] == 3  # 计划数不变
     assert events[-1]["done"] == 1 and events[-1]["total"] == 3
     assert all(e["type"] == "robust_optimizer_progress" for e in events)
 
 
 def test_robust_optimize_result_windows_match_split():
-    out = RobustOptimizeService(_FakeService(lambda p, s, e: 1.0), _FakeStrategyEngine(_PARAMS_META)).robust_optimize(_cfg())
+    out = RobustOptimizeService(
+        _FakeService(lambda p, s, e: 1.0), _FakeStrategyEngine(_PARAMS_META)
+    ).robust_optimize(_cfg())
     wins = split_validation_windows(date(2024, 1, 1), date(2024, 12, 31), 4)
     assert out["windows"] == [{"start": s.isoformat(), "end": e.isoformat()} for s, e in wins]
     # 每组带各段明细 (段区间 + 原始目标值)
@@ -369,8 +392,10 @@ def test_robust_optimize_rejects_degenerate_objective():
 def test_robust_optimize_explicit_min_direction_reverses_ranking():
     """显式 direction="min" 覆盖: 归一分数 = -raw, 排名应反转 (方向感知)。
     白名单主目标默认全为 max (回撤类为负值, 最大化带符号值 = 回撤越小越好)。"""
+
     def score(params, start, end):
         return float(params["p"])  # 值越大越差
+
     svc = _FakeService(score)
     out = RobustOptimizeService(svc, _FakeStrategyEngine(_PARAMS_META)).robust_optimize(
         _cfg(direction="min"),
@@ -385,14 +410,19 @@ def test_robust_optimize_explicit_min_direction_reverses_ranking():
 # P2: 阶段二 Top-N 全窗 IS 细化 + 高原判据
 # ---------------------------------------------------------------
 
+
 def test_stage2_full_window_is_and_degradation():
     """阶段二对合格组跑 [S,E] 全窗: IS 分 vs 稳健分差 = 样本内乐观偏差。"""
     # 段分 = 参数值; 全窗 IS 分固定 5.0 → 退化 = 5.0 - score
-    svc = _FakeService(lambda p, s, e: float(p["p"]) if not (s == _FakeService.FULL_START and e == _FakeService.FULL_END) else 5.0)
+    svc = _FakeService(
+        lambda p, s, e: float(p["p"])
+        if not (s == _FakeService.FULL_START and e == _FakeService.FULL_END)
+        else 5.0
+    )
     out = RobustOptimizeService(svc, _FakeStrategyEngine(_PARAMS_META)).robust_optimize(_cfg())
 
     assert out["stage2"] == {"top_n": 20, "evaluated": 3}
-    top = out["results"][0]           # p=3, score=3.0
+    top = out["results"][0]  # p=3, score=3.0
     assert top["is_full"]["objective_raw"] == 5.0
     assert top["degradation"] == pytest.approx(5.0 - 3.0)
     assert top["degradation_pct"] == pytest.approx(2.0 / 5.0)
@@ -425,11 +455,11 @@ def test_stage2_skips_disqualified_and_error_rows():
 
     def gated_run(config, **kw):
         res = orig_run(config, **kw)
-        if config.params["p"] == 3:          # 冠军除名
+        if config.params["p"] == 3:  # 冠军除名
             res.stats["n_trades"] = 5
         return res
 
-    svc.run = gated_run
+    svc.run = gated_run  # type: ignore[assignment, method-assign]
     out = RobustOptimizeService(svc, _FakeStrategyEngine(_PARAMS_META)).robust_optimize(_cfg())
     # p=3 除名 → 阶段二只细化 p=2, p=1 (合格前二)
     full_rows = [r for r in out["results"] if "is_full" in r]
@@ -438,8 +468,12 @@ def test_stage2_skips_disqualified_and_error_rows():
 
 def test_stage2_error_isolated():
     """全窗回测异常只影响该行的 is_full.error, 不拖垮整体结果。"""
+
     def boom_full(params, start, end):
-        return params["p"] == 3 and start == _FakeService.FULL_START and end == _FakeService.FULL_END
+        return (
+            params["p"] == 3 and start == _FakeService.FULL_START and end == _FakeService.FULL_END
+        )
+
     svc = _FakeService(lambda p, s, e: float(p["p"]), error_fn=boom_full)
     out = RobustOptimizeService(svc, _FakeStrategyEngine(_PARAMS_META)).robust_optimize(_cfg())
 
@@ -453,10 +487,11 @@ def test_stage2_error_isolated():
 
 
 def test_stage2_progress_events():
-    events = []
+    events = []  # type: ignore[var-annotated]
     svc = _FakeService(lambda p, s, e: float(p["p"]))
     RobustOptimizeService(svc, _FakeStrategyEngine(_PARAMS_META)).robust_optimize(
-        _cfg(), progress_cb=events.append,
+        _cfg(),
+        progress_cb=events.append,
     )
     s2 = [e for e in events if e["type"] == "robust_optimizer_stage2"]
     assert len(s2) == 3
@@ -469,7 +504,8 @@ def test_stage2_skipped_when_cancelled():
     cancel.set()  # 一开始就取消: 阶段一 0 组
     svc = _FakeService(lambda p, s, e: float(p["p"]))
     out = RobustOptimizeService(svc, _FakeStrategyEngine(_PARAMS_META)).robust_optimize(
-        _cfg(), cancel_event=cancel,
+        _cfg(),
+        cancel_event=cancel,
     )
     assert out["cancelled"] is True
     assert out["stage2"]["evaluated"] == 0
@@ -480,6 +516,7 @@ def test_stage2_skipped_when_cancelled():
 # P2: 高原判据 (纯函数)
 # ---------------------------------------------------------------
 
+
 def _prow(p_val, score, **kw):
     return {"params": {"p": p_val}, "score": score, "disqualified": False, "error": None, **kw}
 
@@ -487,15 +524,20 @@ def _prow(p_val, score, **kw):
 def test_plateau_flat_grid_is_plateau():
     rows = [_prow(1, 1.0), _prow(2, 0.99), _prow(3, 0.98)]
     out = neighborhood_plateau(rows, rows[0])
+    assert out is not None
     assert out["label"] == "plateau"
+    assert out is not None
     assert out["ratio"] == 1.0
+    assert out is not None
     assert out["n_valid"] == 1  # p=1 的直接邻居只有 p=2
 
 
 def test_plateau_cliff_is_peak():
     rows = [_prow(1, 1.0), _prow(2, 0.2), _prow(3, 0.1)]
     out = neighborhood_plateau(rows, rows[0])
+    assert out is not None
     assert out["label"] == "peak"
+    assert out is not None
     assert out["ratio"] == 0.0
 
 
@@ -503,18 +545,28 @@ def test_plateau_mixed_is_slope():
     """2 参数 3×3 网格 (笛卡尔积序): 冠军 (1,1) 的直接邻居 = a±1 与 b±1 共 4 个,
     其中 2 个在容差内 (slope)。"""
     scores = {
-        (0, 0): 0.5, (0, 1): 0.2, (0, 2): 0.5,
-        (1, 0): 0.1, (1, 1): 1.0, (1, 2): 0.98,
-        (2, 0): 0.5, (2, 1): 0.99, (2, 2): 0.5,
+        (0, 0): 0.5,
+        (0, 1): 0.2,
+        (0, 2): 0.5,
+        (1, 0): 0.1,
+        (1, 1): 1.0,
+        (1, 2): 0.98,
+        (2, 0): 0.5,
+        (2, 1): 0.99,
+        (2, 2): 0.5,
     }
     rows = [
         {"params": {"a": a, "b": b}, "score": scores[(a, b)], "disqualified": False, "error": None}
-        for a in (0, 1, 2) for b in (0, 1, 2)
+        for a in (0, 1, 2)
+        for b in (0, 1, 2)
     ]
     champion = next(r for r in rows if r["params"] == {"a": 1, "b": 1})
     out = neighborhood_plateau(rows, champion)
+    assert out is not None
     assert out["n_valid"] == 4
-    assert out["label"] == "slope"       # (2,1)=0.99 与 (1,2)=0.98 在内容差内 → 2/4
+    assert out is not None
+    assert out["label"] == "slope"  # (2,1)=0.99 与 (1,2)=0.98 在内容差内 → 2/4
+    assert out is not None
     assert out["ratio"] == 0.5
 
 
@@ -523,19 +575,23 @@ def test_plateau_neighbor_is_one_grid_step_both_sides():
     p=1 与 p=3 互不为邻居 (中间隔着 p=2)。"""
     rows = [_prow(1, 0.99), _prow(2, 1.0), _prow(3, 0.98)]
     mid = neighborhood_plateau(rows, rows[1])
-    assert mid["n_valid"] == 2           # p=2 (冠军) 双侧邻居都算
+    assert mid is not None
+    assert mid["n_valid"] == 2  # p=2 (冠军) 双侧邻居都算
     edge = neighborhood_plateau(rows, rows[0])
-    assert edge["n_valid"] == 1          # p=1 只有 p=2 一个邻居, p=3 隔步不算
+    assert edge is not None
+    assert edge["n_valid"] == 1  # p=1 只有 p=2 一个邻居, p=3 隔步不算
 
 
 def test_plateau_ignores_invalid_neighbors():
     rows = [
         _prow(1, 1.0),
-        _prow(2, 0.9, disqualified=True),   # 除名 → 不计入
-        _prow(3, 0.5, error="boom"),        # 错误 → 不计入
+        _prow(2, 0.9, disqualified=True),  # 除名 → 不计入
+        _prow(3, 0.5, error="boom"),  # 错误 → 不计入
     ]
     out = neighborhood_plateau(rows, rows[0])
+    assert out is not None
     assert out["label"] == "isolated"  # 唯一直接邻居无效
+    assert out is not None
     assert out["n_valid"] == 0
 
 
@@ -543,7 +599,9 @@ def test_plateau_negative_score_scale():
     """负值目标 (如回撤类归一分): 尺度取绝对值/极差, 判据同样成立。"""
     rows = [_prow(1, -3.0), _prow(2, -3.05), _prow(3, -6.0)]
     out = neighborhood_plateau(rows, rows[0])
-    assert out["label"] == "plateau"   # 衰减 0.05 <= 0.05×max(3.0, 3.0)=0.15
+    assert out is not None
+    assert out["label"] == "plateau"  # 衰减 0.05 <= 0.05×max(3.0, 3.0)=0.15
+    assert out is not None
     assert out["tolerance"] == pytest.approx(0.15)
 
 
@@ -560,8 +618,10 @@ def test_robust_optimize_result_contains_plateau():
 # P2: 折预览端点 (不回测, 只切窗)
 # ---------------------------------------------------------------
 
+
 def _run(coro):
     import asyncio
+
     return asyncio.run(coro)
 
 
@@ -573,7 +633,7 @@ def test_robust_preview_returns_windows():
     assert len(out["windows"]) == 4
     # 366 天 / 4 段 = 92/92/91/91 (余数摊给前面的段)
     assert out["windows"][0] == {"start": "2024-01-01", "end": "2024-04-01", "days": 92}
-    assert out["warnings"] == []          # 4 段无告警
+    assert out["warnings"] == []  # 4 段无告警
 
 
 def test_robust_preview_warns_few_segments():
@@ -603,9 +663,15 @@ def test_robust_preview_rejects_bad_input():
 def test_walkforward_preview_returns_folds():
     from app.api.backtest import walkforward_preview
 
-    out = _run(walkforward_preview(
-        start="2024-01-01", end="2024-12-31", train_days=90, test_days=30, step_days=30,
-    ))
+    out = _run(
+        walkforward_preview(
+            start="2024-01-01",
+            end="2024-12-31",
+            train_days=90,
+            test_days=30,
+            step_days=30,
+        )
+    )
     assert out["n_folds"] == len(out["folds"]) > 3
     f0 = out["folds"][0]
     assert f0["train_start"] == "2024-01-01" and f0["test_start"] > f0["train_end"]
@@ -617,16 +683,28 @@ def test_walkforward_preview_warns_and_rejects():
 
     from app.api.backtest import walkforward_preview
 
-    out = _run(walkforward_preview(
-        start="2024-01-01", end="2024-06-30", train_days=120, test_days=30, step_days=90,
-    ))
+    out = _run(
+        walkforward_preview(
+            start="2024-01-01",
+            end="2024-06-30",
+            train_days=120,
+            test_days=30,
+            step_days=90,
+        )
+    )
     assert out["n_folds"] < 3
     assert any("统计意义不足" in w for w in out["warnings"])
 
     with pytest.raises(HTTPException) as ei:  # 放不下一折
-        _run(walkforward_preview(
-            start="2024-01-01", end="2024-02-01", train_days=90, test_days=30, step_days=30,
-        ))
+        _run(
+            walkforward_preview(
+                start="2024-01-01",
+                end="2024-02-01",
+                train_days=90,
+                test_days=30,
+                step_days=30,
+            )
+        )
     assert ei.value.status_code == 400
 
 
@@ -639,15 +717,16 @@ def test_robust_cancel_by_echoed_job_key():
     class _Req:
         def __init__(self, body):
             self._body = body
+
         async def json(self):
             return self._body
 
     key = "robust_cancel_test_1"
     _running_jobs[key] = _BacktestJob(key)
     try:
-        res = asyncio.run(optimize_robust_cancel(_Req({"job_key": key})))
+        res = asyncio.run(optimize_robust_cancel(_Req({"job_key": key})))  # type: ignore[arg-type]
         assert res["ok"] is True
         assert _running_jobs[key].cancel_event.is_set()
-        assert asyncio.run(optimize_robust_cancel(_Req({"job_key": "nope"})))["ok"] is False
+        assert asyncio.run(optimize_robust_cancel(_Req({"job_key": "nope"})))["ok"] is False  # type: ignore[arg-type]
     finally:
         _running_jobs.pop(key, None)

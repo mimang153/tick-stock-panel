@@ -6,6 +6,7 @@
 资金流读取与降级 (flow 不可用退化为纯涨幅)、成分数去重、
 非法参数 fail-closed、无分钟/无成分的明确 no_data。
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -31,13 +32,28 @@ def _reset_caches() -> None:
     sector_rotation.invalidate_cache()
 
 
+_CK = {"store": None}
+
+
 def _write_minute(data_dir: Path) -> None:
     """A 组先涨后平 (09:35 起涨到 10:00 后走平), B 组 10:00 后直线拉升 → 领涨从 A 切到 B。"""
     rows = []
-    stamps = [datetime.fromisoformat(f"{DAY}T{h:02d}:{m:02d}:00") for h, m in [
-        (9, 35), (9, 40), (9, 45), (9, 50), (9, 55),
-        (10, 0), (10, 5), (10, 10), (10, 20), (10, 30), (10, 35),
-    ]]
+    stamps = [
+        datetime.fromisoformat(f"{DAY}T{h:02d}:{m:02d}:00")
+        for h, m in [
+            (9, 35),
+            (9, 40),
+            (9, 45),
+            (9, 50),
+            (9, 55),
+            (10, 0),
+            (10, 5),
+            (10, 10),
+            (10, 20),
+            (10, 30),
+            (10, 35),
+        ]
+    ]
     for ts in stamps:
         late = ts.hour > 10 or (ts.hour == 10 and ts.minute >= 5)
         for sym in SYMS_A:
@@ -47,17 +63,36 @@ def _write_minute(data_dir: Path) -> None:
             price = 100.2 if not late else 106.0
             rows.append({"symbol": sym, "datetime": ts, "close": price})
     out = data_dir / "kline_minute" / f"date={DAY}"
-    out.mkdir(parents=True)
-    pl.DataFrame(rows).write_parquet(out / "part.parquet")
+    out.mkdir(parents=True, exist_ok=True)
+    df = pl.DataFrame(rows)
+    df.write_parquet(out / "part.parquet")
+    if _CK["store"] is not None:
+        _CK["store"].write_minute("kline_minute", df)
+
+
+def _write_minute_frame(data_dir: Path, df: pl.DataFrame) -> None:
+    """当日分钟双写本地分区 + CK（自造数用例共用）。"""
+    out = data_dir / "kline_minute" / f"date={DAY}"
+    out.mkdir(parents=True, exist_ok=True)
+    df.write_parquet(out / "part.parquet")
+    if _CK["store"] is not None:
+        _CK["store"].write_minute("kline_minute", df)
 
 
 def _write_prev_daily(data_dir: Path) -> None:
     out = data_dir / "kline_daily" / f"date={PREV}"
-    out.mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": SYMS_A + SYMS_B,
-        "close": [100.0] * 4,
-    }).write_parquet(out / "part.parquet")
+    out.mkdir(parents=True, exist_ok=True)
+    df = pl.DataFrame(
+        {
+            "symbol": SYMS_A + SYMS_B,
+            "close": [100.0] * 4,
+        }
+    )
+    df.write_parquet(out / "part.parquet")
+    if _CK["store"] is not None:
+        _CK["store"].write_daily(
+            "kline_daily", df.with_columns(pl.lit(PREV).cast(pl.Date).alias("date"))
+        )
 
 
 def _write_concept_ext(data_dir: Path) -> None:
@@ -69,10 +104,12 @@ def _write_concept_ext(data_dir: Path) -> None:
     )
     ExtConfigStore(data_dir).upsert(config)
     write_ext_parquet(
-        pl.DataFrame({
-            "symbol": SYMS_A + SYMS_B,
-            "所属概念": ["A题材", "A题材", "B题材", "B题材"],
-        }),
+        pl.DataFrame(
+            {
+                "symbol": SYMS_A + SYMS_B,
+                "所属概念": ["A题材", "A题材", "B题材", "B题材"],
+            }
+        ),
         config,
         data_dir,
     )
@@ -87,18 +124,31 @@ def _write_flow_ext(data_dir: Path) -> None:
     )
     ExtConfigStore(data_dir).upsert(config)
     write_ext_parquet(
-        pl.DataFrame({
-            "symbol": SYMS_A + SYMS_B,
-            "净流入": [1000.0, 500.0, 100.0, 50.0],  # A 题材合计 1500, B 题材合计 150
-        }),
+        pl.DataFrame(
+            {
+                "symbol": SYMS_A + SYMS_B,
+                "净流入": [1000.0, 500.0, 100.0, 50.0],  # A 题材合计 1500, B 题材合计 150
+            }
+        ),
         config,
         data_dir,
     )
 
 
-@pytest.fixture()
-def repo(tmp_path: Path):
+@pytest.fixture(autouse=True)
+def _ck(ck_runtime):
+    """全局注入 CK store; 个别用例自造数时经 helper 双写。"""
+    _CK["store"] = ck_runtime
     _reset_caches()
+    yield
+    _CK["store"] = None
+    _reset_caches()
+
+
+@pytest.fixture()
+def repo(tmp_path: Path, ck_runtime):
+    _reset_caches()
+    _CK["store"] = ck_runtime
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     _write_minute(data_dir)
@@ -106,6 +156,7 @@ def repo(tmp_path: Path):
     _write_concept_ext(data_dir)
     _write_flow_ext(data_dir)
     yield SimpleNamespace(store=SimpleNamespace(data_dir=data_dir))
+    _CK["store"] = None
     _reset_caches()
 
 
@@ -151,10 +202,22 @@ def test_rotation_index_with_wide_universe(tmp_path):
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     rows = []
-    stamps = [datetime.fromisoformat(f"{DAY}T{h:02d}:{m:02d}:00") for h, m in [
-        (9, 35), (9, 40), (9, 45), (9, 50), (9, 55),
-        (10, 0), (10, 5), (10, 10), (10, 20), (10, 30), (10, 35),
-    ]]
+    stamps = [
+        datetime.fromisoformat(f"{DAY}T{h:02d}:{m:02d}:00")
+        for h, m in [
+            (9, 35),
+            (9, 40),
+            (9, 45),
+            (9, 50),
+            (9, 55),
+            (10, 0),
+            (10, 5),
+            (10, 10),
+            (10, 20),
+            (10, 30),
+            (10, 35),
+        ]
+    ]
     for index in range(20):
         sym = f"{index + 1:06d}.SZ"
         for ts in stamps:
@@ -162,12 +225,15 @@ def test_rotation_index_with_wide_universe(tmp_path):
             # 早段 S01-S10 领涨 +2% / S11-S20 平淡 +0.2%; 末段整体对调 (回落 -1% / 拉升 +6%)
             price = (102.0 if not late else 99.0) if index < 10 else (100.2 if not late else 106.0)
             rows.append({"symbol": sym, "datetime": ts, "close": price})
-    (data_dir / "kline_minute" / f"date={DAY}").mkdir(parents=True)
-    pl.DataFrame(rows).write_parquet(data_dir / "kline_minute" / f"date={DAY}" / "part.parquet")
-    (data_dir / "kline_daily" / f"date={PREV}").mkdir(parents=True)
-    pl.DataFrame({"symbol": [f"{i + 1:06d}.SZ" for i in range(20)], "close": [100.0] * 20}).write_parquet(
-        data_dir / "kline_daily" / f"date={PREV}" / "part.parquet"
-    )
+    _write_minute_frame(data_dir, pl.DataFrame(rows))
+    daily = pl.DataFrame({"symbol": [f"{i + 1:06d}.SZ" for i in range(20)], "close": [100.0] * 20})
+    out = data_dir / "kline_daily" / f"date={PREV}"
+    out.mkdir(parents=True, exist_ok=True)
+    daily.write_parquet(out / "part.parquet")
+    if _CK["store"] is not None:
+        _CK["store"].write_daily(
+            "kline_daily", daily.with_columns(pl.lit(PREV).cast(pl.Date).alias("date"))
+        )
     config = ExtConfig(
         id="ext_gn",
         label="宽域概念",
@@ -176,10 +242,12 @@ def test_rotation_index_with_wide_universe(tmp_path):
     )
     ExtConfigStore(data_dir).upsert(config)
     write_ext_parquet(
-        pl.DataFrame({
-            "symbol": [f"{i + 1:06d}.SZ" for i in range(20)],
-            "所属概念": [f"S{i + 1:02d}" for i in range(20)],
-        }),
+        pl.DataFrame(
+            {
+                "symbol": [f"{i + 1:06d}.SZ" for i in range(20)],
+                "所属概念": [f"S{i + 1:02d}" for i in range(20)],
+            }
+        ),
         config,
         data_dir,
     )
@@ -203,7 +271,9 @@ def test_rotation_index_with_wide_universe(tmp_path):
 def test_flow_from_selected_ext_and_score(repo):
     """资金流按用户选择的扩展列聚合到板块, 与涨幅各占 50%。"""
     result = sector_rotation.build_sector_rotation(
-        repo, kind="concept", flow_field="ext_flow.净流入",
+        repo,
+        kind="concept",
+        flow_field="ext_flow.净流入",
     )
     assert result["status"] == "ok"
     assert result["flow_available"] is True
@@ -219,7 +289,9 @@ def test_flow_from_selected_ext_and_score(repo):
 def test_flow_missing_degrades_to_pure_pct(repo):
     """资金流指向不存在的表/列 → 不阻断, flow_available=False, score 退化为纯涨幅归一。"""
     result = sector_rotation.build_sector_rotation(
-        repo, kind="concept", flow_field="ext_nope.净流入",
+        repo,
+        kind="concept",
+        flow_field="ext_nope.净流入",
     )
     assert result["status"] == "ok"
     assert result["flow_available"] is False
@@ -238,6 +310,7 @@ def test_no_minute_partition_gives_no_data(repo, tmp_path):
 
 def test_no_member_map_gives_no_data(repo):
     import shutil
+
     shutil.rmtree(repo.store.data_dir / "ext_data" / "ext_gn")
     result = sector_rotation.build_sector_rotation(repo, kind="concept")
     assert result["status"] == "no_data"
@@ -267,18 +340,43 @@ def test_activity_ranking_and_custom_series(tmp_path):
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     rows = []
-    stamps = [datetime.fromisoformat(f"{DAY}T{h:02d}:{m:02d}:00") for h, m in [
-        (9, 35), (9, 40), (9, 45), (9, 50), (9, 55),
-        (10, 0), (10, 5), (10, 10), (10, 20), (10, 30), (10, 35),
-    ]]
+    stamps = [
+        datetime.fromisoformat(f"{DAY}T{h:02d}:{m:02d}:00")
+        for h, m in [
+            (9, 35),
+            (9, 40),
+            (9, 45),
+            (9, 50),
+            (9, 55),
+            (10, 0),
+            (10, 5),
+            (10, 10),
+            (10, 20),
+            (10, 30),
+            (10, 35),
+        ]
+    ]
     for ts in stamps:
         late = ts.hour > 10 or (ts.hour == 10 and ts.minute >= 5)
         for sym in SYMS_A:
-            rows.append({"symbol": sym, "datetime": ts, "close": 102.0 if not late else 101.5, "amount": 1_000_000.0})
+            rows.append(  # noqa: PERF401 - PERF401: 循环内含多行处理/异常, 改写推导式损可读性
+                {
+                    "symbol": sym,
+                    "datetime": ts,
+                    "close": 102.0 if not late else 101.5,
+                    "amount": 1_000_000.0,
+                }
+            )
         for sym in SYMS_B:
-            rows.append({"symbol": sym, "datetime": ts, "close": 100.2 if not late else 106.0, "amount": 100_000.0})
-    (data_dir / "kline_minute" / f"date={DAY}").mkdir(parents=True)
-    pl.DataFrame(rows).write_parquet(data_dir / "kline_minute" / f"date={DAY}" / "part.parquet")
+            rows.append(  # noqa: PERF401 - PERF401: 循环内含多行处理/异常, 改写推导式损可读性
+                {
+                    "symbol": sym,
+                    "datetime": ts,
+                    "close": 100.2 if not late else 106.0,
+                    "amount": 100_000.0,
+                }
+            )
+    _write_minute_frame(data_dir, pl.DataFrame(rows))
     _write_prev_daily(data_dir)
     _write_concept_ext(data_dir)
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=data_dir))
@@ -296,7 +394,9 @@ def test_activity_ranking_and_custom_series(tmp_path):
 
     # 自定义展示行: 去重 + 当日无行情板块剔除, matrix 与该板块桶涨幅一致
     custom = sector_rotation.build_sector_rotation(
-        repo, kind="concept", bucket_minutes=5,
+        repo,
+        kind="concept",
+        bucket_minutes=5,
         series_names=["B题材", "不存在的板块", "B题材"],
     )
     assert custom["series"]["sectors"] == ["B题材"]
@@ -317,32 +417,13 @@ GIANT_ALL = [f"98{i:04d}.SZ" for i in range(400)]  # 巨盘概念: 400 成员, �
 GIANT_BARS = GIANT_ALL[:2]
 
 
-def _write_activity_data(tmp_path: Path):
-    """带量额 + 属性类大桶的活跃度 fixture: 近 30 分钟窗口合计
-    融资融券 60M > 巨盘概念 24M > A题材 12M > B题材 1.2M。"""
-    _reset_caches()
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    stamps = [datetime.fromisoformat(f"{DAY}T{h:02d}:{m:02d}:00") for h, m in [
-        (9, 35), (9, 40), (9, 45), (9, 50), (9, 55),
-        (10, 0), (10, 5), (10, 10), (10, 20), (10, 30), (10, 35),
-    ]]
-    rows = []
-    for ts in stamps:
-        late = ts.hour > 10 or (ts.hour == 10 and ts.minute >= 5)
-        for syms, amount, early_close, late_close in (
-            (GYMS, 5_000_000.0, 99.0, 101.0),        # 融资融券: -1% → +1% (动量 +2.0)
-            (GIANT_BARS, 2_000_000.0, 101.0, 99.0),  # 巨盘概念: +1% → -1% (动量 -2.0)
-            (SYMS_A, 1_000_000.0, 102.0, 101.5),     # A题材: +2% → +1.5% (动量 -0.5)
-            (SYMS_B, 100_000.0, 100.2, 106.0),       # B题材: +0.2% → +6% (动量 +5.8)
-        ):
-            for sym in syms:
-                rows.append({
-                    "symbol": sym, "datetime": ts,
-                    "close": late_close if late else early_close, "amount": amount,
-                })
-    (data_dir / "kline_minute" / f"date={DAY}").mkdir(parents=True)
-    pl.DataFrame(rows).write_parquet(data_dir / "kline_minute" / f"date={DAY}" / "part.parquet")
+def _write_activity_rows(data_dir: Path, rows: list[dict]) -> Path:
+    _write_minute_frame(data_dir, pl.DataFrame(rows))
+    return data_dir
+
+
+def _write_activity_configs(data_dir: Path):
+    """写入活跃度测试用的概念/资金流扩展表。"""
     bar_syms = SYMS_A + SYMS_B + GYMS + GIANT_BARS
     (data_dir / "kline_daily" / f"date={PREV}").mkdir(parents=True)
     pl.DataFrame({"symbol": bar_syms, "close": [100.0] * len(bar_syms)}).write_parquet(
@@ -356,11 +437,17 @@ def _write_activity_data(tmp_path: Path):
     )
     ExtConfigStore(data_dir).upsert(config)
     write_ext_parquet(
-        pl.DataFrame({
-            "symbol": SYMS_A + SYMS_B + GYMS + GIANT_ALL,
-            "所属概念": (["A题材"] * len(SYMS_A) + ["B题材"] * len(SYMS_B)
-                        + ["融资融券"] * len(GYMS) + ["巨盘概念"] * len(GIANT_ALL)),
-        }),
+        pl.DataFrame(
+            {
+                "symbol": SYMS_A + SYMS_B + GYMS + GIANT_ALL,
+                "所属概念": (
+                    ["A题材"] * len(SYMS_A)
+                    + ["B题材"] * len(SYMS_B)
+                    + ["融资融券"] * len(GYMS)
+                    + ["巨盘概念"] * len(GIANT_ALL)
+                ),
+            }
+        ),
         config,
         data_dir,
     )
@@ -372,13 +459,58 @@ def _write_activity_data(tmp_path: Path):
     )
     ExtConfigStore(data_dir).upsert(flow_config)
     write_ext_parquet(
-        pl.DataFrame({
-            "symbol": SYMS_A + SYMS_B + GYMS + GIANT_BARS,
-            "净流入": [1000.0, 500.0, 100.0, 50.0, 10000.0, 10000.0, 10.0, 10.0],
-        }),
+        pl.DataFrame(
+            {
+                "symbol": SYMS_A + SYMS_B + GYMS + GIANT_BARS,
+                "净流入": [1000.0, 500.0, 100.0, 50.0, 10000.0, 10000.0, 10.0, 10.0],
+            }
+        ),
         flow_config,
         data_dir,
     )
+
+
+def _write_activity_data(tmp_path: Path):
+    """带量额 + 属性类大桶的活跃度 fixture。"""
+    _reset_caches()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    stamps = [
+        datetime.fromisoformat(f"{DAY}T{h:02d}:{m:02d}:00")
+        for h, m in [
+            (9, 35),
+            (9, 40),
+            (9, 45),
+            (9, 50),
+            (9, 55),
+            (10, 0),
+            (10, 5),
+            (10, 10),
+            (10, 20),
+            (10, 30),
+            (10, 35),
+        ]
+    ]
+    rows = []
+    for ts in stamps:
+        late = ts.hour > 10 or (ts.hour == 10 and ts.minute >= 5)
+        for syms, amount, early_close, late_close in (
+            (GYMS, 5_000_000.0, 99.0, 101.0),
+            (GIANT_BARS, 2_000_000.0, 101.0, 99.0),
+            (SYMS_A, 1_000_000.0, 102.0, 101.5),
+            (SYMS_B, 100_000.0, 100.2, 106.0),
+        ):
+            for sym in syms:
+                rows.append(  # noqa: PERF401 - 循环内含多行处理/异常, 改写推导式损可读性
+                    {
+                        "symbol": sym,
+                        "datetime": ts,
+                        "close": late_close if late else early_close,
+                        "amount": amount,
+                    }
+                )
+    data_dir = _write_activity_rows(data_dir, rows)
+    _write_activity_configs(data_dir)
     return SimpleNamespace(store=SimpleNamespace(data_dir=data_dir))
 
 
@@ -386,11 +518,18 @@ def test_auto_exclude_default_and_universe_flag(tmp_path):
     """默认排除名单生效: 融资融券 (名称命中) 与巨盘概念 (成员数>上限) 不进自动活跃榜;
     universe 永不剔除但带 excluded 标记; 响应下发默认名单与上限。"""
     repo = _write_activity_data(tmp_path)
-    result = sector_rotation.build_sector_rotation(repo, kind="concept", bucket_minutes=5, auto_rows=2)
+    result = sector_rotation.build_sector_rotation(
+        repo, kind="concept", bucket_minutes=5, auto_rows=2
+    )
     assert result["status"] == "ok"
     # 活跃榜 (60M/24M/12M/1.2M) 未过滤时应为 融资融券/巨盘概念 在前, 过滤后取 A/B
     assert result["series"]["sectors"] == ["A题材", "B题材"]
-    assert [item["name"] for item in result["universe"]] == ["融资融券", "巨盘概念", "A题材", "B题材"]
+    assert [item["name"] for item in result["universe"]] == [
+        "融资融券",
+        "巨盘概念",
+        "A题材",
+        "B题材",
+    ]
     uni = {item["name"]: item for item in result["universe"]}
     assert uni["融资融券"]["excluded"] is True
     assert uni["巨盘概念"]["excluded"] is True
@@ -406,20 +545,31 @@ def test_exclude_param_replaces_default_and_empty_clears(tmp_path):
 
     # 替换默认名单: 仅排除 A题材 → 活跃第一的融资融券得以入选
     replaced = sector_rotation.build_sector_rotation(
-        repo, kind="concept", bucket_minutes=5, exclude_sectors=["A题材"], auto_rows=1,
+        repo,
+        kind="concept",
+        bucket_minutes=5,
+        exclude_sectors=["A题材"],
+        auto_rows=1,
     )
     assert replaced["series"]["sectors"] == ["融资融券"]
 
     # 空数组 = 清空名称过滤: 融资融券入选, 巨盘概念仍被成员数上限挡住
     cleared = sector_rotation.build_sector_rotation(
-        repo, kind="concept", bucket_minutes=5, exclude_sectors=[], auto_rows=3,
+        repo,
+        kind="concept",
+        bucket_minutes=5,
+        exclude_sectors=[],
+        auto_rows=3,
     )
     assert cleared["series"]["sectors"] == ["融资融券", "A题材", "B题材"]
 
     # 全部排除 → 过滤后不足展示行数, 回退不过滤 (避免展示行开天窗)
     all_excluded = sector_rotation.build_sector_rotation(
-        repo, kind="concept", bucket_minutes=5,
-        exclude_sectors=["A题材", "B题材", "融资融券", "巨盘概念"], auto_rows=2,
+        repo,
+        kind="concept",
+        bucket_minutes=5,
+        exclude_sectors=["A题材", "B题材", "融资融券", "巨盘概念"],
+        auto_rows=2,
     )
     assert all_excluded["series"]["sectors"] == ["融资融券", "巨盘概念"]
 
@@ -428,7 +578,10 @@ def test_custom_series_unaffected_by_exclude(tmp_path):
     """自定义监控清单不参与任何自动过滤: 黑名单命中的板块仍可手动展示。"""
     repo = _write_activity_data(tmp_path)
     result = sector_rotation.build_sector_rotation(
-        repo, kind="concept", bucket_minutes=5, series_names=["融资融券", "不存在的板块", "融资融券"],
+        repo,
+        kind="concept",
+        bucket_minutes=5,
+        series_names=["融资融券", "不存在的板块", "融资融券"],
     )
     assert result["series"]["sectors"] == ["融资融券"]
 
@@ -439,7 +592,9 @@ def test_zero_cross_up_down_stats(tmp_path):
     _reset_caches()
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    stamps = [datetime.fromisoformat(f"{DAY}T{h:02d}:{m:02d}:00") for h, m in [(9, 35), (9, 40), (9, 45)]]
+    stamps = [
+        datetime.fromisoformat(f"{DAY}T{h:02d}:{m:02d}:00") for h, m in [(9, 35), (9, 40), (9, 45)]
+    ]
     groups = {
         "A题材": (["000001.SZ", "000002.SZ"], [102.0, 102.0, 102.0]),
         "B题材": (["000003.SZ", "000004.SZ"], [99.0, 101.0, 101.0]),
@@ -449,24 +604,39 @@ def test_zero_cross_up_down_stats(tmp_path):
     for index, ts in enumerate(stamps):
         for syms, closes in groups.values():
             for sym in syms:
-                rows.append({"symbol": sym, "datetime": ts, "close": closes[index]})
-    (data_dir / "kline_minute" / f"date={DAY}").mkdir(parents=True)
-    pl.DataFrame(rows).write_parquet(data_dir / "kline_minute" / f"date={DAY}" / "part.parquet")
+                rows.append({"symbol": sym, "datetime": ts, "close": closes[index]})  # noqa: PERF401 - PERF401: 循环内含多行处理/异常, 改写推导式损可读性
+    _write_minute_frame(data_dir, pl.DataFrame(rows))
     (data_dir / "kline_daily" / f"date={PREV}").mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": [sym for syms, _ in groups.values() for sym in syms],
-        "close": [100.0] * 6,
-    }).write_parquet(data_dir / "kline_daily" / f"date={PREV}" / "part.parquet")
+    pl.DataFrame(
+        {
+            "symbol": [sym for syms, _ in groups.values() for sym in syms],
+            "close": [100.0] * 6,
+        }
+    ).write_parquet(data_dir / "kline_daily" / f"date={PREV}" / "part.parquet")
+    if _CK["store"] is not None:
+        _CK["store"].write_daily(
+            "kline_daily",
+            pl.DataFrame(
+                {
+                    "symbol": SYMS_A + SYMS_B,
+                    "close": [100.0] * 4,
+                }
+            ).with_columns(pl.lit(PREV).cast(pl.Date).alias("date")),
+        )
     config = ExtConfig(
-        id="ext_gn", label="穿越测试概念", mode="snapshot",
+        id="ext_gn",
+        label="穿越测试概念",
+        mode="snapshot",
         fields=[ExtField("symbol", "string", "代码"), ExtField("所属概念", "string", "所属概念")],
     )
     ExtConfigStore(data_dir).upsert(config)
     write_ext_parquet(
-        pl.DataFrame({
-            "symbol": [sym for syms, _ in groups.values() for sym in syms],
-            "所属概念": [name for name, (syms, _) in groups.items() for _ in syms],
-        }),
+        pl.DataFrame(
+            {
+                "symbol": [sym for syms, _ in groups.values() for sym in syms],
+                "所属概念": [name for name, (syms, _) in groups.items() for _ in syms],
+            }
+        ),
         config,
         data_dir,
     )
@@ -491,10 +661,10 @@ def test_sort_by_modes_select_different_dimensions(repo):
     非法维度 fail-closed。"""
     base = dict(kind="concept", bucket_minutes=5)
     for mode in ("pct", "score", "rank_change", "momentum", "flow"):
-        result = sector_rotation.build_sector_rotation(repo, auto_rows=1, sort_by=mode, **base)
+        result = sector_rotation.build_sector_rotation(repo, auto_rows=1, sort_by=mode, **base)  # type: ignore[arg-type]
         assert result["series"]["sectors"] == ["B题材"], mode
     with pytest.raises(ValueError):
-        sector_rotation.build_sector_rotation(repo, sort_by="nope", **base)
+        sector_rotation.build_sector_rotation(repo, sort_by="nope", **base)  # type: ignore[arg-type]
 
 
 def test_momentum_mode_splits_strong_and_weak(tmp_path):
@@ -505,14 +675,22 @@ def test_momentum_mode_splits_strong_and_weak(tmp_path):
     # 清空名称过滤 → eligible = [B题材, 融资融券, A题材] 3 > 2 → 对半:
     # 走强第 1 (B题材) + 走弱第 1 (A题材), 动量第 2 的融资融券 (中部) 被跳过
     cleared = sector_rotation.build_sector_rotation(
-        repo, kind="concept", bucket_minutes=5,
-        exclude_sectors=[], sort_by="momentum", auto_rows=2,
+        repo,
+        kind="concept",
+        bucket_minutes=5,
+        exclude_sectors=[],
+        sort_by="momentum",
+        auto_rows=2,
     )
     assert cleared["series"]["sectors"] == ["B题材", "A题材"]
     assert "融资融券" not in cleared["series"]["sectors"]
     # 默认黑名单: eligible = [B题材, A题材] 2 ≤ 2 → 不触发对半, 普通降序
     default = sector_rotation.build_sector_rotation(
-        repo, kind="concept", bucket_minutes=5, sort_by="momentum", auto_rows=2,
+        repo,
+        kind="concept",
+        bucket_minutes=5,
+        sort_by="momentum",
+        auto_rows=2,
     )
     assert default["series"]["sectors"] == ["B题材", "A题材"]
 
@@ -522,20 +700,32 @@ def test_sort_by_flow_respects_exclude_and_member_cap(tmp_path):
     清空名称过滤后入榜第一; 巨盘概念仍被成员数上限挡住; activity 维度不受影响。"""
     repo = _write_activity_data(tmp_path)
     flow = sector_rotation.build_sector_rotation(
-        repo, kind="concept", bucket_minutes=5,
-        flow_field="ext_flow.净流入", sort_by="flow", auto_rows=2,
+        repo,
+        kind="concept",
+        bucket_minutes=5,
+        flow_field="ext_flow.净流入",
+        sort_by="flow",
+        auto_rows=2,
     )
     assert flow["flow_available"] is True
     assert flow["series"]["sectors"] == ["A题材", "B题材"]
 
     cleared = sector_rotation.build_sector_rotation(
-        repo, kind="concept", bucket_minutes=5,
-        flow_field="ext_flow.净流入", sort_by="flow", exclude_sectors=[], auto_rows=2,
+        repo,
+        kind="concept",
+        bucket_minutes=5,
+        flow_field="ext_flow.净流入",
+        sort_by="flow",
+        exclude_sectors=[],
+        auto_rows=2,
     )
     assert cleared["series"]["sectors"] == ["融资融券", "A题材"]
 
     activity = sector_rotation.build_sector_rotation(
-        repo, kind="concept", bucket_minutes=5, auto_rows=2,
+        repo,
+        kind="concept",
+        bucket_minutes=5,
+        auto_rows=2,
     )
     assert activity["series"]["sectors"] == ["A题材", "B题材"]
 
@@ -543,32 +733,48 @@ def test_sort_by_flow_respects_exclude_and_member_cap(tmp_path):
 def test_exclude_cache_isolation_and_auto_rows(tmp_path):
     """缓存键包含排除名单与展示行数: 不同参数互不串数据, 同参数命中缓存。"""
     repo = _write_activity_data(tmp_path)
-    default_first = sector_rotation.build_sector_rotation(repo, kind="concept", bucket_minutes=5, auto_rows=2)
+    default_first = sector_rotation.build_sector_rotation(
+        repo, kind="concept", bucket_minutes=5, auto_rows=2
+    )
     assert default_first["series"]["sectors"] == ["A题材", "B题材"]
 
     replaced = sector_rotation.build_sector_rotation(
-        repo, kind="concept", bucket_minutes=5, exclude_sectors=["A题材"], auto_rows=1,
+        repo,
+        kind="concept",
+        bucket_minutes=5,
+        exclude_sectors=["A题材"],
+        auto_rows=1,
     )
     assert replaced["series"]["sectors"] == ["融资融券"]
 
-    one_row = sector_rotation.build_sector_rotation(repo, kind="concept", bucket_minutes=5, auto_rows=1)
+    one_row = sector_rotation.build_sector_rotation(
+        repo, kind="concept", bucket_minutes=5, auto_rows=1
+    )
     assert one_row["series"]["sectors"] == ["A题材"]
 
     # 回到默认参数: 命中第一次的缓存, 未被后续调用串改
     (repo.store.data_dir / "kline_minute" / f"date={DAY}" / "part.parquet").unlink()
-    default_again = sector_rotation.build_sector_rotation(repo, kind="concept", bucket_minutes=5, auto_rows=2)
+    default_again = sector_rotation.build_sector_rotation(
+        repo, kind="concept", bucket_minutes=5, auto_rows=2
+    )
     assert default_again["series"]["sectors"] == ["A题材", "B题材"]
 
 
 def test_series_matrix_aligns_with_timeline_and_sectors(repo):
-    """热力图矩阵: 行=热度降序板块 (与 sectors 同序同截断), 列=时间桶 (与 timeline
-    同轴), 值=该桶板块涨幅 (列最大值=该桶领涨涨幅), 供前端按分钟轮动展示。"""
+    """热力图矩阵: 行=活跃榜降序板块, 列=时间桶 (与 timeline 同轴), 值=该桶板块涨幅
+    (列最大值=该桶领涨涨幅), 供前端按分钟轮动展示。
+
+    行序跟的是展示口径 (sort_by 维度, 默认活跃度), 与「领涨榜」sectors (score
+    降序) 是两套口径, 两者只在同分时才一致。
+    """
     result = sector_rotation.build_sector_rotation(repo, kind="concept", bucket_minutes=5)
     assert result["status"] == "ok"
     series = result["series"]
     timeline = result["timeline"]
     assert series["buckets"] == [point["time"] for point in timeline]
-    assert series["sectors"] == [item["name"] for item in result["sectors"]]
+    # universe 即活跃度降序的全量板块清单: 展示板块取自同一顺序并按 auto_rows 截断
+    universe_names = [item["name"] for item in result["universe"]]
+    assert series["sectors"] == universe_names[: len(series["sectors"])]
 
     matrix = dict(zip(series["sectors"], series["matrix"], strict=True))
     # 末桶 (10:35): B +6.0% / A +1.5%, 与 sectors.pct_now 同口径
@@ -589,17 +795,21 @@ def test_rank_reference_counts_trading_minutes_across_lunch(tmp_path):
     _reset_caches()
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    morning = [(h, m) for h in (9, 10, 11) for m in range(0, 60, 5) if (9, 35) <= (h, m) <= (11, 30)]
-    stamps = [datetime.fromisoformat(f"{DAY}T{h:02d}:{m:02d}:00") for h, m in [*morning, (13, 5), (13, 10)]]
+    morning = [
+        (h, m) for h in (9, 10, 11) for m in range(0, 60, 5) if (9, 35) <= (h, m) <= (11, 30)
+    ]
+    stamps = [
+        datetime.fromisoformat(f"{DAY}T{h:02d}:{m:02d}:00")
+        for h, m in [*morning, (13, 5), (13, 10)]
+    ]
     rows = []
     for ts in stamps:
         b_ahead = (ts.hour, ts.minute) >= (11, 0)
         for sym in SYMS_A:
-            rows.append({"symbol": sym, "datetime": ts, "close": 101.0 if b_ahead else 102.0})
+            rows.append({"symbol": sym, "datetime": ts, "close": 101.0 if b_ahead else 102.0})  # noqa: PERF401 - PERF401: 循环内含多行处理/异常, 改写推导式损可读性
         for sym in SYMS_B:
-            rows.append({"symbol": sym, "datetime": ts, "close": 103.0 if b_ahead else 100.5})
-    (data_dir / "kline_minute" / f"date={DAY}").mkdir(parents=True)
-    pl.DataFrame(rows).write_parquet(data_dir / "kline_minute" / f"date={DAY}" / "part.parquet")
+            rows.append({"symbol": sym, "datetime": ts, "close": 103.0 if b_ahead else 100.5})  # noqa: PERF401 - PERF401: 循环内含多行处理/异常, 改写推导式损可读性
+    _write_minute_frame(data_dir, pl.DataFrame(rows))
     _write_prev_daily(data_dir)
     _write_concept_ext(data_dir)
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=data_dir))
@@ -619,6 +829,7 @@ def test_rank_reference_counts_trading_minutes_across_lunch(tmp_path):
 
 # ---- GH #473: 单股分钟脏点不得带飞板块曲线 ----
 
+
 def test_dirty_minute_point_does_not_explode_sector_pct(tmp_path):
     """脏 close (某分钟价为前收 19 倍) 被剔除, 板块 pct 保持正常量级。
 
@@ -637,9 +848,8 @@ def test_dirty_minute_point_does_not_explode_sector_pct(tmp_path):
         rows.append({"symbol": "000002.SZ", "datetime": ts, "close": dirty})
     for ts in stamps:
         for sym in SYMS_B:
-            rows.append({"symbol": sym, "datetime": ts, "close": 100.5})
-    (data_dir / "kline_minute" / f"date={DAY}").mkdir(parents=True)
-    pl.DataFrame(rows).write_parquet(data_dir / "kline_minute" / f"date={DAY}" / "part.parquet")
+            rows.append({"symbol": sym, "datetime": ts, "close": 100.5})  # noqa: PERF401 - PERF401: 循环内含多行处理/异常, 改写推导式损可读性
+    _write_minute_frame(data_dir, pl.DataFrame(rows))
     _write_prev_daily(data_dir)
     _write_concept_ext(data_dir)
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=data_dir))
@@ -666,12 +876,11 @@ def test_limit_up_down_minutes_are_kept(tmp_path):
     rows = []
     for ts in stamps:
         rows.append({"symbol": "000001.SZ", "datetime": ts, "close": 110.0})  # +10% 涨停
-        rows.append({"symbol": "000002.SZ", "datetime": ts, "close": 80.0})   # -20% 跌停
+        rows.append({"symbol": "000002.SZ", "datetime": ts, "close": 80.0})  # -20% 跌停
     for ts in stamps:
         for sym in SYMS_B:
-            rows.append({"symbol": sym, "datetime": ts, "close": 100.5})
-    (data_dir / "kline_minute" / f"date={DAY}").mkdir(parents=True)
-    pl.DataFrame(rows).write_parquet(data_dir / "kline_minute" / f"date={DAY}" / "part.parquet")
+            rows.append({"symbol": sym, "datetime": ts, "close": 100.5})  # noqa: PERF401 - PERF401: 循环内含多行处理/异常, 改写推导式损可读性
+    _write_minute_frame(data_dir, pl.DataFrame(rows))
     _write_prev_daily(data_dir)
     _write_concept_ext(data_dir)
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=data_dir))
@@ -696,12 +905,11 @@ def test_physical_boundary_value_kept(tmp_path):
     rows = []
     for ts in stamps:
         rows.append({"symbol": "000001.SZ", "datetime": ts, "close": 130.0})  # +30%
-        rows.append({"symbol": "000002.SZ", "datetime": ts, "close": 70.0})   # -30%
+        rows.append({"symbol": "000002.SZ", "datetime": ts, "close": 70.0})  # -30%
     for ts in stamps:
         for sym in SYMS_B:
-            rows.append({"symbol": sym, "datetime": ts, "close": 100.5})
-    (data_dir / "kline_minute" / f"date={DAY}").mkdir(parents=True)
-    pl.DataFrame(rows).write_parquet(data_dir / "kline_minute" / f"date={DAY}" / "part.parquet")
+            rows.append({"symbol": sym, "datetime": ts, "close": 100.5})  # noqa: PERF401 - PERF401: 循环内含多行处理/异常, 改写推导式损可读性
+    _write_minute_frame(data_dir, pl.DataFrame(rows))
     _write_prev_daily(data_dir)
     _write_concept_ext(data_dir)
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=data_dir))

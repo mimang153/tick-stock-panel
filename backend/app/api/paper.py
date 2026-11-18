@@ -5,6 +5,7 @@
 路由挂载在 app/main.py; 域模块自带进程内写锁, API 层不再加第二把锁
 (镜像 lots API 的跨请求互斥语义, 但锁下沉到域)。
 """
+
 from __future__ import annotations
 
 import logging
@@ -14,6 +15,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from app.parquet import scan_parquet_compat
+from app.polars_guard import guarded_collect
 from app.strategy import paper
 
 logger = logging.getLogger(__name__)
@@ -44,25 +47,25 @@ class AccountModel(BaseModel):
 
 class OrderModel(BaseModel):
     symbol: str
-    side: str                       # buy / sell
+    side: str  # buy / sell
     qty: int | None = None
     amount: float | None = None
-    order_type: str = "market"      # market / next_open / close
+    order_type: str = "market"  # market / next_open / close
     ref_price: float | None = None  # amount 模式折算 & 买入资金预检
 
 
 class SettingsModel(BaseModel):
     queue_limit_orders: bool | None = None
-    commission_pct: float | None = None   # 佣金率 (0.00025 = 万2.5)
-    stamp_tax_pct: float | None = None    # 印花税 (0.001 = 千1, 仅卖出)
-    slippage_bps: float | None = None     # 滑点 (5 = 5bps)
+    commission_pct: float | None = None  # 佣金率 (0.00025 = 万2.5)
+    stamp_tax_pct: float | None = None  # 印花税 (0.001 = 千1, 仅卖出)
+    slippage_bps: float | None = None  # 滑点 (5 = 5bps)
 
 
 def _resolve_asset_type(request: Request, symbol: str) -> str:
     repo = getattr(request.app.state, "repo", None)
     try:
         return repo.resolve_asset_type(symbol) if repo is not None else "stock"
-    except Exception:
+    except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logging.getLogger(__name__).warning(
             "resolve_asset_type failed for %s, falling back to stock", symbol, exc_info=True
         )
@@ -70,20 +73,36 @@ def _resolve_asset_type(request: Request, symbol: str) -> str:
 
 
 def _last_close(data_dir: Path, symbol: str, asset_type: str) -> float | None:
-    """最近收盘价 (amount 折算参考价)。读最新分区日 raw close。"""
+    """最近收盘价 (amount 折算参考价)。读最新交易日 raw close。
+
+    CK 为唯一读源（顺带消除原"全分区扫描"）；存储未初始化时回退本地分区。
+    """
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is not None:
+        table = "kline_etf_daily" if asset_type == "etf" else "kline_daily"
+        try:
+            df = runtime.store.read_daily(table, symbols=[symbol], columns=["date", "close"])
+        except Exception:  # noqa: BLE001 - 参考价读取失败按缺价处理
+            return None
+        if df.is_empty() or df["close"][-1] is None:
+            return None
+        return float(df["close"][-1])
     base = paper._daily_path(data_dir, asset_type)
     if not base.exists():
         return None
     try:
         import polars as pl
+
         df = (
-            pl.scan_parquet((base / "**" / "*.parquet").as_posix())
+            scan_parquet_compat((base / "**" / "*.parquet").as_posix())
             .filter(pl.col("symbol") == symbol)
             .sort("date")
             .select(pl.col("close").last())
-            .collect()
+            .pipe(guarded_collect, priority="interactive")
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         return None
     if df.is_empty() or df["close"][0] is None:
         return None
@@ -121,7 +140,9 @@ def create_account(request: Request, body: AccountModel):
 
 
 @router.delete("/account")
-def delete_account(request: Request, force: bool = False, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
+def delete_account(
+    request: Request, force: bool = False, account: str = Query(paper.DEFAULT_ACCOUNT_ID)
+):
     """删除账户及其全部数据 (不可恢复)。仍有持仓或待成交订单时须 force=true。"""
     result, err = paper.delete_account(_data_dir(request), _acc(request, account), force=force)
     if err:
@@ -153,18 +174,23 @@ def overview(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
         try:
             enriched, enriched_date = qs.get_enriched_today()
             from app.market_time import cn_today
+
             if not enriched.is_empty() and enriched_date == cn_today() and ov.get("holdings"):
-                snapshot = dict(zip(enriched["symbol"].to_list(), enriched["raw_close"].to_list(), strict=False))
+                snapshot = dict(
+                    zip(enriched["symbol"].to_list(), enriched["raw_close"].to_list(), strict=False)
+                )
                 live = paper.overview(data_dir, snapshot, account_id=acc_id)
                 live["fees"] = ov["fees"]
                 return live
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.warning("paper overview 实时估算失败, 降级日线口径: %s", e)
     return ov
 
 
 @router.post("/orders")
-def create_order(request: Request, body: OrderModel, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
+def create_order(
+    request: Request, body: OrderModel, account: str = Query(paper.DEFAULT_ACCOUNT_ID)
+):
     data_dir = _data_dir(request)
     acc_id = _acc(request, account)
     asset_type = _resolve_asset_type(request, body.symbol)
@@ -172,10 +198,15 @@ def create_order(request: Request, body: OrderModel, account: str = Query(paper.
     if ref_price is None:
         ref_price = _last_close(data_dir, body.symbol, asset_type)
     order, err = paper.create_order(
-        data_dir, body.symbol, body.side,
+        data_dir,
+        body.symbol,
+        body.side,
         account_id=acc_id,
-        qty=body.qty, amount=body.amount,
-        order_type=body.order_type, asset_type=asset_type, ref_price=ref_price,
+        qty=body.qty,
+        amount=body.amount,
+        order_type=body.order_type,
+        asset_type=asset_type,
+        ref_price=ref_price,
     )
     if err:
         raise HTTPException(status_code=400, detail=err)
@@ -183,7 +214,9 @@ def create_order(request: Request, body: OrderModel, account: str = Query(paper.
 
 
 @router.get("/orders")
-def list_orders(request: Request, status: str | None = None, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
+def list_orders(
+    request: Request, status: str | None = None, account: str = Query(paper.DEFAULT_ACCOUNT_ID)
+):
     orders = paper.load_orders(_data_dir(request), _acc(request, account))
     if status:
         orders = [o for o in orders if o["status"] == status]
@@ -229,6 +262,91 @@ def list_rounds(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_ID)
     return {"rounds": paper.round_trips(_data_dir(request), _acc(request, account))}
 
 
+def _compare_live_snapshot(request: Request) -> dict[str, float] | None:
+    """取当日 enriched 快照的 raw_close 映射；不可用时降级定版口径。"""
+    qs = getattr(request.app.state, "quote_service", None)
+    if qs is None:
+        return None
+    try:
+        enriched, enriched_date = qs.get_enriched_today()
+        from app.market_time import cn_today
+
+        if not enriched.is_empty() and enriched_date == cn_today():
+            return dict(
+                zip(enriched["symbol"].to_list(), enriched["raw_close"].to_list(), strict=False)
+            )
+    except Exception as e:  # noqa: BLE001 — 快照来源不定 (行情服务/数据缺失), 软失败降级定版口径
+        logger.warning("paper compare 实时快照不可用, 用定版口径: %s", e)
+    return None
+
+
+def _compare_account_row(
+    data_dir, acc_id: str, live_snapshot: dict[str, float] | None
+) -> dict | None:
+    """构造单账户对比行；空壳账户返回 None。"""
+    from app.strategy import paper_auto
+
+    acc = paper.get_account(data_dir, acc_id)
+    if acc is None:
+        return None
+    ov = paper.overview(data_dir, account_id=acc_id)
+    if not ov.get("initialized"):
+        return None
+    st = paper.stats(data_dir, acc_id)
+    initial = float(acc.get("initial_cash") or 0)
+    nav_rows = paper.load_nav(data_dir, acc_id)
+    day_change_pct = None
+    if len(nav_rows) >= 2 and float(nav_rows[-2]["nav"] or 0) > 0:
+        day_change_pct = round(
+            (float(nav_rows[-1]["nav"]) / float(nav_rows[-2]["nav"]) - 1) * 100, 2
+        )
+    rules = paper_auto.load_auto_rules(data_dir, acc_id)
+    live_total = live_pnl_pct = None
+    if live_snapshot is not None and acc.get("status") == "active":
+        live_ov = paper.overview(data_dir, live_snapshot, account_id=acc_id)
+        if live_ov.get("initialized"):
+            live_total = live_ov.get("total")
+            if initial > 0:
+                live_pnl_pct = round((live_ov.get("total_pnl") or 0) / initial * 100, 2)
+    return {
+        "live_total": live_total,
+        "live_pnl_pct": live_pnl_pct,
+        "estimating": live_total is not None,
+        "account": acc_id,
+        "name": acc.get("name") or acc_id,
+        "status": acc.get("status"),
+        "initial_cash": initial,
+        "fees": {k: acc.get(k) for k in ("commission_pct", "stamp_tax_pct", "slippage_bps")},
+        "total": ov.get("total"),
+        "cash": ov.get("cash"),
+        "market_value": ov.get("market_value"),
+        "total_pnl": ov.get("total_pnl"),
+        "pnl_pct": round((ov.get("total_pnl") or 0) / initial * 100, 2) if initial > 0 else None,
+        "rounds": st.get("rounds"),
+        "win_rate": st.get("win_rate"),
+        "profit_loss_ratio": st.get("profit_loss_ratio"),
+        "avg_holding_days": st.get("avg_holding_days"),
+        "realized_pnl": st.get("realized_pnl"),
+        "max_drawdown": st.get("max_drawdown"),
+        "nav": [{"date": n["date"], "nav": n["nav"]} for n in nav_rows],
+        "holdings_count": len(ov.get("holdings") or []),
+        "created_at": acc.get("created_at"),
+        "last_nav_date": nav_rows[-1]["date"] if nav_rows else None,
+        "day_change_pct": day_change_pct,
+        "auto_rules": [
+            {
+                "name": r.get("name"),
+                "match_kind": r.get("match_kind"),
+                "match_id": r.get("match_id"),
+                "side": r.get("side"),
+                "enabled": bool(r.get("enabled")),
+            }
+            for r in rules
+        ],
+        "auto_enabled": sum(1 for r in rules if r.get("enabled")),
+    }
+
+
 @router.get("/compare")
 def compare_accounts(request: Request):
     """横向对比全部账户: 概览 + 回合统计 + 定版净值 (供对比表与净值叠加图)。
@@ -237,86 +355,13 @@ def compare_accounts(request: Request):
     对比增量字段 (holdings_count/created_at/last_nav_date/day_change_pct/auto_rules)
     为加法扩展, 旧前端忽略不影响。
     """
-    from app.strategy import paper_auto
-
     data_dir = _data_dir(request)
-
-    # 盘中实时估算: 当日 enriched 快照就绪时取一次 raw_close 映射, 之后每账户
-    # 纯内存 overview (与 /overview 实时口径一致); 失败降级定版口径
-    live_snapshot: dict[str, float] | None = None
-    qs = getattr(request.app.state, "quote_service", None)
-    if qs is not None:
-        try:
-            enriched, enriched_date = qs.get_enriched_today()
-            from app.market_time import cn_today
-            if not enriched.is_empty() and enriched_date == cn_today():
-                live_snapshot = dict(
-                    zip(enriched["symbol"].to_list(), enriched["raw_close"].to_list(), strict=False)
-                )
-        except Exception as e:  # noqa: BLE001 — 快照来源不定 (行情服务/数据缺失), 软失败降级定版口径
-            logger.warning("paper compare 实时快照不可用, 用定版口径: %s", e)
-
+    live_snapshot = _compare_live_snapshot(request)
     rows = []
     for acc_id in paper.list_account_ids(data_dir):
-        acc = paper.get_account(data_dir, acc_id)
-        if acc is None:
-            continue
-        ov = paper.overview(data_dir, account_id=acc_id)
-        if not ov.get("initialized"):
-            continue  # 空壳目录 (懒创建) 不进对比
-        st = paper.stats(data_dir, acc_id)
-        initial = float(acc.get("initial_cash") or 0)
-        nav_rows = paper.load_nav(data_dir, acc_id)
-        day_change_pct = None
-        if len(nav_rows) >= 2 and float(nav_rows[-2]["nav"] or 0) > 0:
-            day_change_pct = round((float(nav_rows[-1]["nav"]) / float(nav_rows[-2]["nav"]) - 1) * 100, 2)
-        rules = paper_auto.load_auto_rules(data_dir, acc_id)
-        # 盘中估算字段 (加法扩展): live_* 为快照价口径, 旧前端忽略不影响
-        live_total = live_pnl_pct = None
-        if live_snapshot is not None and acc.get("status") == "active":
-            live_ov = paper.overview(data_dir, live_snapshot, account_id=acc_id)
-            if live_ov.get("initialized"):
-                live_total = live_ov.get("total")
-                if initial > 0:
-                    live_pnl_pct = round((live_ov.get("total_pnl") or 0) / initial * 100, 2)
-        rows.append({
-            "live_total": live_total,
-            "live_pnl_pct": live_pnl_pct,
-            "estimating": live_total is not None,
-            "account": acc_id,
-            "name": acc.get("name") or acc_id,
-            "status": acc.get("status"),
-            "initial_cash": initial,
-            "fees": {k: acc.get(k) for k in ("commission_pct", "stamp_tax_pct", "slippage_bps")},
-            "total": ov.get("total"),
-            "cash": ov.get("cash"),
-            "market_value": ov.get("market_value"),
-            "total_pnl": ov.get("total_pnl"),
-            "pnl_pct": round((ov.get("total_pnl") or 0) / initial * 100, 2) if initial > 0 else None,
-            "rounds": st.get("rounds"),
-            "win_rate": st.get("win_rate"),
-            "profit_loss_ratio": st.get("profit_loss_ratio"),
-            "avg_holding_days": st.get("avg_holding_days"),
-            "realized_pnl": st.get("realized_pnl"),
-            "max_drawdown": st.get("max_drawdown"),
-            "nav": [{"date": n["date"], "nav": n["nav"]} for n in nav_rows],
-            # 对比展示用增量字段
-            "holdings_count": len(ov.get("holdings") or []),
-            "created_at": acc.get("created_at"),
-            "last_nav_date": nav_rows[-1]["date"] if nav_rows else None,
-            "day_change_pct": day_change_pct,
-            "auto_rules": [
-                {
-                    "name": r.get("name"),
-                    "match_kind": r.get("match_kind"),
-                    "match_id": r.get("match_id"),
-                    "side": r.get("side"),
-                    "enabled": bool(r.get("enabled")),
-                }
-                for r in rules
-            ],
-            "auto_enabled": sum(1 for r in rules if r.get("enabled")),
-        })
+        row = _compare_account_row(data_dir, acc_id, live_snapshot)
+        if row is not None:
+            rows.append(row)
     return {"accounts": rows}
 
 
@@ -341,7 +386,9 @@ def freeze(request: Request, frozen: bool = True, account: str = Query(paper.DEF
 
 
 @router.post("/settings")
-def update_settings(request: Request, body: SettingsModel, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
+def update_settings(
+    request: Request, body: SettingsModel, account: str = Query(paper.DEFAULT_ACCOUNT_ID)
+):
     """更新账户设置 (涨跌停排队等开关)。"""
     try:
         acc = paper.update_settings(_data_dir(request), _acc(request, account), **body.model_dump())
@@ -353,28 +400,34 @@ def update_settings(request: Request, body: SettingsModel, account: str = Query(
 # ===== 自动跟单规则 (V2) =====
 class AutoRuleModel(BaseModel):
     name: str
-    match_kind: str                 # strategy / rule
+    match_kind: str  # strategy / rule
     match_id: str
     side: str = "buy"
-    size_mode: str = "fixed_amount" # fixed_amount / pct_equity
+    size_mode: str = "fixed_amount"  # fixed_amount / pct_equity
     size_value: float
     order_type: str = "next_open"
     cooldown_days: int = 5
-    max_positions: int = 0             # 最大同时持仓标的数, 0 不限 (对齐回测口径)
+    max_positions: int = 0  # 最大同时持仓标的数, 0 不限 (对齐回测口径)
     enabled: bool = True
 
 
 @router.get("/auto_rules")
 def list_auto_rules(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
     from app.strategy import paper_auto
+
     return {"rules": paper_auto.load_auto_rules(_data_dir(request), _acc(request, account))}
 
 
 @router.post("/auto_rules")
-def create_auto_rule(request: Request, body: AutoRuleModel, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
+def create_auto_rule(
+    request: Request, body: AutoRuleModel, account: str = Query(paper.DEFAULT_ACCOUNT_ID)
+):
     from app.strategy import paper_auto, paper_watch
+
     try:
-        rule = paper_auto.create_auto_rule(_data_dir(request), body.model_dump(), _acc(request, account))
+        rule = paper_auto.create_auto_rule(
+            _data_dir(request), body.model_dump(), _acc(request, account)
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     paper_watch.sync_from_state(request.app.state, _data_dir(request))  # 绑定即评估
@@ -382,8 +435,11 @@ def create_auto_rule(request: Request, body: AutoRuleModel, account: str = Query
 
 
 @router.post("/auto_rules/{rule_id}/enabled")
-def set_auto_rule_enabled(request: Request, rule_id: str, enabled: bool, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
+def set_auto_rule_enabled(
+    request: Request, rule_id: str, enabled: bool, account: str = Query(paper.DEFAULT_ACCOUNT_ID)
+):
     from app.strategy import paper_auto, paper_watch
+
     rule = paper_auto.set_enabled(_data_dir(request), rule_id, enabled, _acc(request, account))
     if rule is None:
         raise HTTPException(status_code=404, detail=f"规则不存在: {rule_id}")
@@ -392,8 +448,11 @@ def set_auto_rule_enabled(request: Request, rule_id: str, enabled: bool, account
 
 
 @router.delete("/auto_rules/{rule_id}")
-def delete_auto_rule(request: Request, rule_id: str, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
+def delete_auto_rule(
+    request: Request, rule_id: str, account: str = Query(paper.DEFAULT_ACCOUNT_ID)
+):
     from app.strategy import paper_auto, paper_watch
+
     if not paper_auto.delete_auto_rule(_data_dir(request), rule_id, _acc(request, account)):
         raise HTTPException(status_code=404, detail=f"规则不存在: {rule_id}")
     paper_watch.sync_from_state(request.app.state, _data_dir(request))
@@ -402,21 +461,21 @@ def delete_auto_rule(request: Request, rule_id: str, account: str = Query(paper.
 
 # ===== 对比批量创建 (V3): 同规格多账户并行对比的构造入口 =====
 class ArenaSourceModel(BaseModel):
-    name: str | None = None              # 账户名 (缺省用 match_id)
-    match_kind: str                      # strategy / rule (与 auto_rules 同口径)
+    name: str | None = None  # 账户名 (缺省用 match_id)
+    match_kind: str  # strategy / rule (与 auto_rules 同口径)
     match_id: str
     side: str = "buy"
-    size_mode: str = "pct_equity"        # 对比默认按权益百分比, 不同本金也可公平比
+    size_mode: str = "pct_equity"  # 对比默认按权益百分比, 不同本金也可公平比
     size_value: float = 10.0
     order_type: str = "next_open"
     cooldown_days: int = 5
-    max_positions: int = 0             # 最大同时持仓标的数, 0 不限 (对齐回测口径)
+    max_positions: int = 0  # 最大同时持仓标的数, 0 不限 (对齐回测口径)
 
 
 class ArenaBatchModel(BaseModel):
     initial_cash: float
     sources: list[ArenaSourceModel]
-    name_prefix: str = ""                # 账户名前缀 (如 "第一期-", 可空)
+    name_prefix: str = ""  # 账户名前缀 (如 "第一期-", 可空)
     commission_pct: float = paper.DEFAULT_COMMISSION_PCT
     stamp_tax_pct: float = paper.DEFAULT_STAMP_TAX_PCT
     slippage_bps: float = paper.DEFAULT_SLIPPAGE_BPS
@@ -464,7 +523,8 @@ def arena_batch_create(request: Request, body: ArenaBatchModel):
         for rule, acc_name in prepared:
             account_id = f"arena_{uuid.uuid4().hex[:10]}"
             paper.create_account(
-                data_dir, body.initial_cash,
+                data_dir,
+                body.initial_cash,
                 account_id=paper.validate_account_id(account_id),
                 name=acc_name,
                 commission_pct=body.commission_pct,

@@ -11,12 +11,29 @@ import pytest
 
 from app.backtest import worker as worker_module
 from app.backtest.mining import benchmark_candidate
-from app.backtest.optimizer import OptimizeConfig
 from app.backtest.strategy import StrategyBacktestConfig
 from app.backtest.walkforward import WalkForwardConfig
 from app.backtest.worker import BacktestWorkerError, make_worker_task, run_worker_task
 from app.enriched_generation import bump_enriched_generation, get_enriched_generation
 from app.services.mining_jobs import MiningRunStore
+
+_CK = {"store": None}
+
+
+@pytest.fixture(autouse=True)
+def _ck(ck_runtime):
+    """engine 侧 get_instruments_asset 走 CK instruments。"""
+    _CK["store"] = ck_runtime
+    yield
+    _CK["store"] = None
+
+
+def _write_instruments(data_dir, df: pl.DataFrame) -> None:
+    out = data_dir / "instruments"
+    out.mkdir(parents=True, exist_ok=True)
+    df.write_parquet(out / "part.parquet")
+    if _CK["store"] is not None:
+        _CK["store"].write_instruments("stock", df)
 
 
 def _write_worker_strategy(data_dir) -> None:
@@ -67,34 +84,39 @@ def _write_market_data(data_dir, start: date, days: int = 3) -> None:
     for offset in range(days):
         close = 10.0 + offset
         current = start + timedelta(days=offset)
-        rows.append({
-            "symbol": "600000.SH",
-            "date": current,
-            "open": close,
-            "high": close,
-            "low": close,
-            "close": close,
-            "volume": 1000.0,
-            "amount": close * 100000.0,
-            "raw_close": close,
-            "raw_high": close,
-            "raw_low": close,
-            "turnover_rate": 1.0,
-            "consecutive_limit_ups": 0,
-            "consecutive_limit_downs": 0,
-        })
+        rows.append(
+            {
+                "symbol": "600000.SH",
+                "date": current,
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "volume": 1000.0,
+                "amount": close * 100000.0,
+                "raw_close": close,
+                "raw_high": close,
+                "raw_low": close,
+                "turnover_rate": 1.0,
+                "consecutive_limit_ups": 0,
+                "consecutive_limit_downs": 0,
+            }
+        )
         partition = data_dir / "kline_daily_enriched" / f"date={current.isoformat()}"
         partition.mkdir(parents=True)
         pl.DataFrame([rows[-1]]).write_parquet(partition / "part.parquet")
 
-    instruments_dir = data_dir / "instruments"
-    instruments_dir.mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": ["600000.SH"],
-        "name": ["浦发银行"],
-        "total_shares": [1_000_000_000.0],
-        "float_shares": [1_000_000_000.0],
-    }).write_parquet(instruments_dir / "part.parquet")
+    _write_instruments(
+        data_dir,
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"],
+                "name": ["浦发银行"],
+                "total_shares": [1_000_000_000.0],
+                "float_shares": [1_000_000_000.0],
+            }
+        ),
+    )
 
 
 def _write_mining_market_data(
@@ -111,34 +133,42 @@ def _write_mining_market_data(
         rows = []
         for asset_id, symbol in enumerate(symbols):
             close = 10.0 + asset_id + offset * (0.01 + asset_id * 0.002)
-            rows.append({
-                "symbol": symbol,
-                "date": current,
-                "open": close,
-                "high": close * 1.01,
-                "low": close * 0.99,
-                "close": close,
-                "volume": (1000.0 + asset_id * 100.0) * liquidity_scale,
-                "amount": close * (100000.0 + asset_id * 1000.0) * liquidity_scale,
-                "raw_close": close,
-                "raw_high": close * 1.01,
-                "raw_low": close * 0.99,
-                "turnover_rate": 1.0 + asset_id * 0.5 + offset * 0.001,
-                "consecutive_limit_ups": 0,
-                "consecutive_limit_downs": 0,
-            })
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "date": current,
+                    "open": close,
+                    "high": close * 1.01,
+                    "low": close * 0.99,
+                    "close": close,
+                    "volume": (1000.0 + asset_id * 100.0) * liquidity_scale,
+                    "amount": close * (100000.0 + asset_id * 1000.0) * liquidity_scale,
+                    "raw_close": close,
+                    "raw_high": close * 1.01,
+                    "raw_low": close * 0.99,
+                    "turnover_rate": 1.0 + asset_id * 0.5 + offset * 0.001,
+                    "consecutive_limit_ups": 0,
+                    "consecutive_limit_downs": 0,
+                }
+            )
         partition = data_dir / "kline_daily_enriched" / f"date={current.isoformat()}"
-        partition.mkdir(parents=True)
-        pl.DataFrame(rows).write_parquet(partition / "part.parquet")
+        partition.mkdir(parents=True, exist_ok=True)
+        df = pl.DataFrame(rows)
+        df.write_parquet(partition / "part.parquet")
+        if _CK["store"] is not None:
+            _CK["store"].write_daily("kline_daily_enriched", df)
 
-    instruments_dir = data_dir / "instruments"
-    instruments_dir.mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": symbols,
-        "name": [f"测试{asset}" for asset in range(assets)],
-        "total_shares": [1_000_000_000.0] * assets,
-        "float_shares": [1_000_000_000.0] * assets,
-    }).write_parquet(instruments_dir / "part.parquet")
+    _write_instruments(
+        data_dir,
+        pl.DataFrame(
+            {
+                "symbol": symbols,
+                "name": [f"测试{asset}" for asset in range(assets)],
+                "total_shares": [1_000_000_000.0] * assets,
+                "float_shares": [1_000_000_000.0] * assets,
+            }
+        ),
+    )
 
 
 def test_spawn_worker_returns_compact_result_and_memory_metrics(tmp_path):
@@ -262,6 +292,33 @@ def test_spawn_mining_writes_four_artifacts_and_returns_compact_summary(tmp_path
             assert "n_dates" in frame.columns
             assert frame.filter(pl.col("regime_state") == "overall")["n_dates"].min() > 0
 
+
+def _create_custom_mining_manifest(data_dir, start, snapshot):
+    store = MiningRunStore(data_dir)
+    manifest = store.create(
+        {
+            "factor_names": ["uf_a_worker"],
+            "strategy_ids": [],
+            "symbols": None,
+            "asset_type": "stock",
+            "start": (start + timedelta(days=220)).isoformat(),
+            "end": (start + timedelta(days=438)).isoformat(),
+            "budget_profile": "exploratory",
+            "forward_horizon": 1,
+            "commission_pct": 0.0,
+            "stamp_tax_pct": 0.0,
+            "slippage_bps": 0.0,
+            "max_combination_factors": 1,
+            "beam_width": 2,
+            "max_finalists": 2,
+            "require_regime": False,
+        },
+        {"generation": get_enriched_generation(data_dir, "stock"), "factors": snapshot},
+        run_id="custom_mining",
+    )
+    return store, manifest
+
+
 def test_spawn_custom_factor_mining_and_promote_candidate(tmp_path):
     from app.backtest.candidates import CandidateStore
     from app.factors.registry import isolated_registry
@@ -274,27 +331,41 @@ def test_spawn_custom_factor_mining_and_promote_candidate(tmp_path):
     data_dir = tmp_path / "data"
     _write_mining_market_data(data_dir, start, days=439, liquidity_scale=100.0)
     # 父定义排在子定义前, worker 必须从磁盘按依赖加载。
-    save_one(data_dir, {"id": "uf_a_worker", "kind": "custom", "label": "嵌套因子",
-                        "formula": "uf_z_history + ma20_bias"})
-    save_one(data_dir, {"id": "uf_z_history", "kind": "custom", "label": "长窗口",
-                        "formula": "ts_mean(turnover_rate, 200)"})
+    save_one(
+        data_dir,
+        {
+            "id": "uf_a_worker",
+            "kind": "custom",
+            "label": "嵌套因子",
+            "formula": "uf_z_history + ma20_bias",
+        },
+    )
+    save_one(
+        data_dir,
+        {
+            "id": "uf_z_history",
+            "kind": "custom",
+            "label": "长窗口",
+            "formula": "ts_mean(turnover_rate, 200)",
+        },
+    )
     with isolated_registry():
         load_into_registry(data_dir)
         snapshot = mining_factor_snapshot(["uf_a_worker"])
-    store = MiningRunStore(data_dir)
-    manifest = store.create({
-        "factor_names": ["uf_a_worker"], "strategy_ids": [], "symbols": None,
-        "asset_type": "stock", "start": (start + timedelta(days=220)).isoformat(),
-        "end": (start + timedelta(days=438)).isoformat(), "budget_profile": "exploratory",
-        "forward_horizon": 1, "commission_pct": 0.0, "stamp_tax_pct": 0.0,
-        "slippage_bps": 0.0, "max_combination_factors": 1, "beam_width": 2,
-        "max_finalists": 2, "require_regime": False,
-    }, {"generation": get_enriched_generation(data_dir, "stock"), "factors": snapshot}, run_id="custom_mining")
+    store, manifest = _create_custom_mining_manifest(data_dir, start, snapshot)
     store.transition_status(manifest["run_id"], "running")
-    result = run_worker_task(make_worker_task("mining", data_dir, {
-        "run_id": manifest["run_id"], "request": manifest["request"],
-        "data_fingerprint": manifest["data_fingerprint"], "source": "manual",
-    }))
+    result = run_worker_task(
+        make_worker_task(
+            "mining",
+            data_dir,
+            {
+                "run_id": manifest["run_id"],
+                "request": manifest["request"],
+                "data_fingerprint": manifest["data_fingerprint"],
+                "source": "manual",
+            },
+        )
+    )
     assert result["status"] in {"succeeded", "succeeded_with_budget_exhausted"}
     assert result["worker"]["worker_exitcode"] == 0
     assert result["selected_factor_count"] == 1
@@ -305,8 +376,13 @@ def test_spawn_custom_factor_mining_and_promote_candidate(tmp_path):
     candidates = pl.read_parquet(store.artifact_path(manifest["run_id"], "candidates"))
     with isolated_registry():
         assert set(load_into_registry(data_dir)) == {"uf_a_worker", "uf_z_history"}
-        service = MiningCandidateService(data_dir, store, CandidateStore(data_dir),
-            StrategyEngine(strategy_dirs=[]), strategy_cache_invalidator=lambda _root: None)
+        service = MiningCandidateService(
+            data_dir,
+            store,
+            CandidateStore(data_dir),
+            StrategyEngine(strategy_dirs=[]),
+            strategy_cache_invalidator=lambda _root: None,
+        )
         candidate = service.promote(manifest["run_id"], candidates["signature"][0])
         assert candidate["config"]["factor_names"] == ["uf_a_worker"]
         assert candidate["status"] == "pending"
@@ -318,6 +394,7 @@ def test_spawn_mining_benchmarks_strategy_on_every_outer_fold(tmp_path):
     _write_mining_market_data(data_dir, start)
     # 策略是用户数据: worker 只加载 data 目录下的策略, 把夹具拷进临时 custom 目录
     import shutil
+
     fixtures = Path(__file__).resolve().parents[1] / "fixtures" / "strategies"
     custom = data_dir / "strategies" / "custom"
     custom.mkdir(parents=True, exist_ok=True)
@@ -366,8 +443,7 @@ def test_spawn_mining_benchmarks_strategy_on_every_outer_fold(tmp_path):
     assert outer_folds >= 1
     assert benchmark_rows.height == outer_folds
     selected_rows = folds.filter(
-        (pl.col("evaluation_kind") == "selected")
-        & (pl.col("regime_state") == "overall")
+        (pl.col("evaluation_kind") == "selected") & (pl.col("regime_state") == "overall")
     )
     assert selected_rows.height == outer_folds
     candidates = pl.read_parquet(store.artifact_path("spawn_mining_benchmark", "candidates"))
@@ -627,18 +703,14 @@ def _patch_generation_drift(monkeypatch, data_dir, *, always: bool) -> dict:
         if expected is not None and (always or state["drifts"] == 0):
             state["drifts"] += 1
             bump_enriched_generation(data_dir, asset_type)
-            raise EnrichedGenerationUnavailableError(
-                "simulated concurrent publication"
-            )
+            raise EnrichedGenerationUnavailableError("simulated concurrent publication")
         return original(engine_self, asset_type, expected)
 
     monkeypatch.setattr(BacktestEngine, "assert_data_generation", drift)
     return state
 
 
-def test_mining_rereads_snapshot_when_generation_commits_mid_read(
-    monkeypatch, tmp_path
-):
+def test_mining_rereads_snapshot_when_generation_commits_mid_read(monkeypatch, tmp_path):
     start = date(2023, 1, 2)
     data_dir = tmp_path / "data"
     _write_mining_market_data(data_dir, start)
@@ -660,14 +732,10 @@ def test_mining_rereads_snapshot_when_generation_commits_mid_read(
 
     assert result["status"] in {"succeeded", "succeeded_with_budget_exhausted"}
     assert state["drifts"] == 1
-    assert any(
-        event.get("label") == "数据已更新, 重新读取快照" for event in events
-    )
+    assert any(event.get("label") == "数据已更新, 重新读取快照" for event in events)
 
 
-def test_mining_fails_with_guidance_when_generation_keeps_drifting(
-    monkeypatch, tmp_path
-):
+def test_mining_fails_with_guidance_when_generation_keeps_drifting(monkeypatch, tmp_path):
     start = date(2023, 1, 2)
     data_dir = tmp_path / "data"
     _write_mining_market_data(data_dir, start)

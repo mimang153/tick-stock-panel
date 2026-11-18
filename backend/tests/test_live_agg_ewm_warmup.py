@@ -6,6 +6,7 @@ _build_live_agg 的 ema5~ema60、macd_dea、kdj、atr 状态取自历史缓存 (
 盘中 macd_dif (EMA12 - EMA26) 与同一 live_agg 里的 macd_dea 状态口径不一致,
 rsi_14/rsi_24 与盘后 (或盘中重启后) 数值不同, 金叉/死叉判断跟着漂移。
 """
+
 from __future__ import annotations
 
 import math
@@ -36,25 +37,51 @@ def _bars() -> pl.DataFrame:
             trend = (0.03 if n == 0 else -0.02) * min(i, 120)
             close = round(10.0 + n * 5 + trend + 0.5 * math.sin(i * 0.45 + n), 2)
             rows.append((symbol, day, close, close + 0.1, close - 0.1, close))
-    return pl.DataFrame(
-        rows,
-        schema=["symbol", "date", "open", "high", "low", "close"],
-        orient="row",
-    ).with_columns(
-        pl.lit(1000.0).alias("volume"),
-        (pl.col("close") * 1000.0).alias("amount"),
-        pl.col("close").alias("raw_close"),
-        pl.col("high").alias("raw_high"),
-        pl.col("low").alias("raw_low"),
-    ).sort(["symbol", "date"])
+    return (
+        pl.DataFrame(
+            rows,
+            schema=["symbol", "date", "open", "high", "low", "close"],
+            orient="row",
+        )
+        .with_columns(
+            pl.lit(1000.0).alias("volume"),
+            (pl.col("close") * 1000.0).alias("amount"),
+            pl.col("close").alias("raw_close"),
+            pl.col("high").alias("raw_high"),
+            pl.col("low").alias("raw_low"),
+        )
+        .sort(["symbol", "date"])
+    )
 
 
 @pytest.mark.parametrize("column", COLUMNS)
-def test_intraday_macd_rsi_warmup_matches_full(tmp_path, column):
+def test_intraday_macd_rsi_warmup_matches_full(tmp_path, column, ck_runtime):
     bars = _bars()
     history = bars.filter(pl.col("date") < TODAY)
     history_indicators = compute_indicators(history)
     latest = history["date"].max()
+
+    # _build_live_agg 的降级读源已切 CK enriched; 写入存储列 (compute_indicators 会重算指标)
+    read_cols = [
+        c
+        for c in [
+            "symbol",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "raw_close",
+            "raw_high",
+            "raw_low",
+            "consecutive_limit_ups",
+            "consecutive_limit_downs",
+        ]
+        if c in history.columns
+    ]
+    ck_runtime.write_daily("kline_daily_enriched", history.select(read_cols))
 
     repo = KlineRepository(DataStore(tmp_path))
     repo._enriched_history_cache = history_indicators
@@ -69,4 +96,6 @@ def test_intraday_macd_rsi_warmup_matches_full(tmp_path, column):
     full = compute_indicators(bars).filter(pl.col("date") == TODAY).sort("symbol")
 
     assert incremental["symbol"].to_list() == full["symbol"].to_list()
-    assert incremental[column].to_list() == pytest.approx(full[column].to_list(), rel=1e-9, abs=1e-12)
+    assert incremental[column].to_list() == pytest.approx(
+        full[column].to_list(), rel=1e-9, abs=1e-12
+    )

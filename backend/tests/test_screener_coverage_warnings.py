@@ -6,11 +6,14 @@
   响应附带 warnings 字段;
 - 盘后管道在 enriched 覆盖过薄时打 WARN (warn_if_enriched_too_thin)。
 """
+
 from __future__ import annotations
 
 import logging
 from datetime import date
 from types import SimpleNamespace
+
+import polars as pl
 
 from app.api import screener as screener_api
 from app.jobs import daily_pipeline
@@ -21,21 +24,42 @@ from app.services.screener import (
 )
 
 
-def _make_partitions(root, dirname: str, dates: list[str]) -> None:
+def _make_partitions(root, dirname: str, dates: list[str], ck=None) -> None:
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    ck = ck or (runtime.store if runtime is not None else None)
     for ds in dates:
         (root / dirname / f"date={ds}").mkdir(parents=True, exist_ok=True)
+        # enriched_history_days 走 CK list_daily_dates，造数同步写 CK enriched 表
+        if ck is not None:
+            ck.write_daily(
+                dirname,
+                pl.DataFrame(
+                    {
+                        "symbol": ["000001.SZ"],
+                        "date": [date.fromisoformat(ds)],
+                        "open": [1.0],
+                        "high": [1.0],
+                        "low": [1.0],
+                        "close": [1.0],
+                        "volume": [1.0],
+                        "amount": [1.0],
+                    }
+                ),
+            )
 
 
-def test_enriched_history_days_counts_and_filters_as_of(tmp_path):
-    _make_partitions(tmp_path, "kline_daily_enriched",
-                     ["2026-09-01", "2026-09-02", "2026-09-03"])
+def test_enriched_history_days_counts_and_filters_as_of(tmp_path, ck_runtime):
+    _make_partitions(tmp_path, "kline_daily_enriched", ["2026-09-01", "2026-09-02", "2026-09-03"])
 
     assert enriched_history_days(tmp_path) == 3
     assert enriched_history_days(tmp_path, as_of=date(2026, 9, 2)) == 2
-    assert enriched_history_days(tmp_path / "nonexistent") == 0
+    # data_dir 参数已忽略（计数走 CK）；"无数据返回 0"改为查未造数的 etf 资产
+    assert enriched_history_days(tmp_path, asset_type="etf") == 0
 
 
-def test_enriched_history_days_routes_etf_directory(tmp_path):
+def test_enriched_history_days_routes_etf_directory(tmp_path, ck_runtime):
     _make_partitions(tmp_path, "kline_etf_enriched", ["2026-09-01"])
 
     assert enriched_history_days(tmp_path, asset_type="etf") == 1
@@ -43,10 +67,10 @@ def test_enriched_history_days_routes_etf_directory(tmp_path):
 
 
 def _svc(tmp_path) -> ScreenerService:
-    return ScreenerService(SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)))
+    return ScreenerService(SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)))  # type: ignore[arg-type]
 
 
-def test_coverage_warnings_fire_on_thin_history(tmp_path):
+def test_coverage_warnings_fire_on_thin_history(tmp_path, ck_runtime):
     _make_partitions(tmp_path, "kline_daily_enriched", ["2026-09-01"])
 
     warnings = _svc(tmp_path).coverage_warnings(date(2026, 9, 1))
@@ -55,10 +79,11 @@ def test_coverage_warnings_fire_on_thin_history(tmp_path):
     assert "1 个交易日" in warnings[0]
 
 
-def test_coverage_warnings_respect_strategy_required_bars(tmp_path):
+def test_coverage_warnings_respect_strategy_required_bars(tmp_path, ck_runtime):
     # 36 天: 通用窗口 (30) 足够, 策略精确需求 60 天不够
     _make_partitions(
-        tmp_path, "kline_daily_enriched",
+        tmp_path,
+        "kline_daily_enriched",
         [f"2026-{m:02d}-{d:02d}" for m in range(1, 10) for d in (1, 15)]
         + [f"2026-10-{d:02d}" for d in range(1, 19)],
     )
@@ -71,7 +96,8 @@ def test_coverage_warnings_respect_strategy_required_bars(tmp_path):
 def test_coverage_warnings_silent_when_sufficient(tmp_path):
     # 18 天 (1~9 月每月两日) + 12 天 (10 月) = 30, 恰好达标
     _make_partitions(
-        tmp_path, "kline_daily_enriched",
+        tmp_path,
+        "kline_daily_enriched",
         [f"2026-{m:02d}-{d:02d}" for m in range(1, 10) for d in (1, 15)]
         + [f"2026-10-{d:02d}" for d in range(1, 13)],
     )
@@ -108,16 +134,21 @@ class _MinimalEngine:
     def run(self, strategy_id, context, **kwargs):
         self.run_called = True
         from app.services.screener import ScreenerResult
+
         return ScreenerResult(as_of=context.as_of, strategy=strategy_id)
 
 
 def test_run_preset_response_carries_warnings(monkeypatch, tmp_path):
     svc = _CoverageSvc(["数据不足提示"])
     engine = _MinimalEngine()
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
-        strategy_engine=engine,
-    )))
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
+                strategy_engine=engine,
+            )
+        )
+    )
     monkeypatch.setattr(screener_api, "ScreenerService", lambda *a, **k: svc)
     monkeypatch.setattr(screener_api, "_load_ext_value_maps", lambda *a, **k: {})
     monkeypatch.setattr(screener_api, "_update_cache_strategy", lambda *a, **k: None)
@@ -125,7 +156,7 @@ def test_run_preset_response_carries_warnings(monkeypatch, tmp_path):
 
     resp = screener_api.run_preset(
         screener_api.PresetRequest(strategy_id="s1", as_of=date(2026, 9, 10)),
-        request,
+        request,  # type: ignore[arg-type]
     )
 
     assert engine.run_called
@@ -135,10 +166,14 @@ def test_run_preset_response_carries_warnings(monkeypatch, tmp_path):
 def test_run_preset_no_warnings_key_when_sufficient(monkeypatch, tmp_path):
     svc = _CoverageSvc([])
     engine = _MinimalEngine()
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
-        strategy_engine=engine,
-    )))
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
+                strategy_engine=engine,
+            )
+        )
+    )
     monkeypatch.setattr(screener_api, "ScreenerService", lambda *a, **k: svc)
     monkeypatch.setattr(screener_api, "_load_ext_value_maps", lambda *a, **k: {})
     monkeypatch.setattr(screener_api, "_update_cache_strategy", lambda *a, **k: None)
@@ -146,13 +181,13 @@ def test_run_preset_no_warnings_key_when_sufficient(monkeypatch, tmp_path):
 
     resp = screener_api.run_preset(
         screener_api.PresetRequest(strategy_id="s1", as_of=date(2026, 9, 10)),
-        request,
+        request,  # type: ignore[arg-type]
     )
 
     assert "warnings" not in resp
 
 
-def test_pipeline_warns_when_enriched_too_thin(tmp_path, caplog):
+def test_pipeline_warns_when_enriched_too_thin(tmp_path, caplog, ck_runtime):
     caplog.set_level(logging.WARNING, logger="app.jobs.daily_pipeline")
     _make_partitions(tmp_path, "kline_daily_enriched", ["2026-09-01", "2026-09-02"])
 
@@ -162,10 +197,11 @@ def test_pipeline_warns_when_enriched_too_thin(tmp_path, caplog):
     assert any("指标暖机不足" in r.message for r in caplog.records)
 
 
-def test_pipeline_silent_when_coverage_sufficient(tmp_path, caplog):
+def test_pipeline_silent_when_coverage_sufficient(tmp_path, caplog, ck_runtime):
     caplog.set_level(logging.WARNING, logger="app.jobs.daily_pipeline")
     _make_partitions(
-        tmp_path, "kline_daily_enriched",
+        tmp_path,
+        "kline_daily_enriched",
         [f"2026-{m:02d}-15" for m in range(1, 10)] + [f"2026-10-{d:02d}" for d in range(1, 25)],
     )
 
@@ -184,15 +220,20 @@ def test_update_cache_strategy_keeps_warnings(tmp_path):
     from app.services import strategy_cache
 
     strategy_cache.write_cache(
-        tmp_path, "2026-09-10",
+        tmp_path,
+        "2026-09-10",
         {"other": {"total": 1, "as_of": "2026-09-10", "rows": []}},
     )
 
     screener_api._update_cache_strategy(
-        tmp_path, "2026-09-10", "s1",
+        tmp_path,
+        "2026-09-10",
+        "s1",
         {"total": 0, "as_of": "2026-09-10", "rows": [], "warnings": ["数据不足"]},
     )
 
     cached = strategy_cache.read_cache(tmp_path)
+    assert cached is not None
     assert cached["results"]["s1"]["warnings"] == ["数据不足"]
+    assert cached is not None
     assert cached["results"]["other"]["total"] == 1  # 同日其余策略不受影响

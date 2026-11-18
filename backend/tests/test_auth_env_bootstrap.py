@@ -40,7 +40,10 @@ def test_bootstrap_recovers_compose_interpolated_password_from_raw_env(
         f"AUTH_PASSWORD={password}\nDATA_DIR={tmp_path}\n",
         encoding="utf-8",
     )
-    configured = Settings(_env_file=env_path)
+    configured = Settings(_env_file=env_path)  # type: ignore[call-arg]
+    # 环境变量优先级高于 env 文件: 部署环境里的 DATA_DIR 会盖掉 .env 里的值,
+    # 显式指向 tmp_path, 避免读到真实部署的 auth.json
+    configured.data_dir = tmp_path
     configured.auth_password = "pw-secret"  # 模拟 Compose 将未定义的 ${special} 插值为空串
     monkeypatch.setattr(app_config, "settings", configured)
 

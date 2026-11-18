@@ -124,7 +124,7 @@ def test_long_window_loads_actual_trading_history_before_formal_start(tmp_path, 
         (partition / "part.parquet").touch()
     _register("uf_long", "ts_mean(close, 200)")
     _register("uf_nested", "uf_long * 2")
-    service = FactorBacktestService(_Engine(raw, tmp_path))
+    service = FactorBacktestService(_Engine(raw, tmp_path))  # type: ignore[arg-type]
     config = FactorBatchConfig(
         factor_names=["uf_nested"],
         symbols=None,
@@ -146,14 +146,14 @@ def test_long_window_loads_actual_trading_history_before_formal_start(tmp_path, 
     expected = expected.filter(pl.col("date").is_between(config.start, config.end))["expected"]
     assert actual["uf_nested"].is_not_null().all()
     assert np.allclose(actual["uf_nested"].to_numpy(), expected.to_numpy(), rtol=1e-6)
-    assert service.engine.calls[0]["start"] <= dates[40]
+    assert service.engine.calls[0]["start"] <= dates[40]  # type: ignore[attr-defined]
 
 
 def test_compact_panel_keeps_full_cross_section_for_custom_rank(monkeypatch):
     _register("uf_rank", "rank(turnover_rate)")
     raw = _panel(3)
     dates = sorted(raw["date"].unique())
-    service = FactorBacktestService(_Engine(raw))
+    service = FactorBacktestService(_Engine(raw))  # type: ignore[arg-type]
     config = FactorBatchConfig(
         factor_names=["uf_rank"], symbols=None, start=dates[0], end=dates[-1]
     )
@@ -206,7 +206,9 @@ def test_nested_dependency_plan_tracks_child_formula_edits():
 
 @pytest.mark.parametrize("compact", [False, True])
 @pytest.mark.parametrize("available", [False, True])
-def test_custom_financial_dependency_keeps_announcement_gate(tmp_path, compact, available):
+def test_custom_financial_dependency_keeps_announcement_gate(
+    tmp_path, ck_runtime, compact, available
+):
     from app.backtest.fundamentals import FUNDAMENTAL_FACTORS
 
     raw = _panel(5)
@@ -214,15 +216,21 @@ def test_custom_financial_dependency_keeps_announcement_gate(tmp_path, compact, 
     if available:
         root = tmp_path / "financials" / "metrics"
         root.mkdir(parents=True)
-        pl.DataFrame(
+        frame = pl.DataFrame(
             {
                 "symbol": ["A", "B", "C"],
                 "announce_date": [str(dates[0])] * 3,
                 **{item["column"]: [2.0] * 3 for item in FUNDAMENTAL_FACTORS.values()},
             }
-        ).write_parquet(root / "part.parquet")
+        )
+        frame.write_parquet(root / "part.parquet")
+        # CK 为唯一读源: 财务指标同步入库 (period_end 是 CK 主键分量)
+        ck_runtime.write_financials(
+            "financials_metrics",
+            frame.with_columns(pl.lit(dates[0]).alias("period_end")),
+        )
     _register("uf_fin", "1 / pb_latest")
-    service = FactorBacktestService(_Engine(raw, tmp_path))
+    service = FactorBacktestService(_Engine(raw, tmp_path))  # type: ignore[arg-type]
     config = FactorBatchConfig(factor_names=["uf_fin"], symbols=None, start=dates[0], end=dates[-1])
     if compact:
         result = _load_compact_factor_panel(
@@ -242,7 +250,7 @@ def test_custom_limit_up_dependency_loads_persisted_state():
     raw = _panel(30)
     dates = sorted(raw["date"].unique())
     _register("uf_limit", "limit_up_count_20d * 2")
-    service = FactorBacktestService(_Engine(raw))
+    service = FactorBacktestService(_Engine(raw))  # type: ignore[arg-type]
     config = FactorBatchConfig(
         factor_names=["uf_limit"], symbols=None, start=dates[20], end=dates[-1]
     )
@@ -308,7 +316,7 @@ def test_nested_inline_windows_match_full_history_from_first_formal_day(tmp_path
         part.mkdir(parents=True)
         (part / "part.parquet").touch()
     _register("uf_nested", "ts_mean(ts_mean(close, 200) + 1, 80)")
-    service = FactorBacktestService(_Engine(raw, tmp_path))
+    service = FactorBacktestService(_Engine(raw, tmp_path))  # type: ignore[arg-type]
     config = FactorBatchConfig(
         factor_names=["uf_nested"], symbols=None, start=dates[320], end=dates[-1]
     )
@@ -324,7 +332,7 @@ def test_nested_inline_windows_match_full_history_from_first_formal_day(tmp_path
     expected = expected.filter(pl.col("date") >= config.start).sort(["date", "symbol"])
     assert np.allclose(result["uf_nested"].to_numpy(), expected["expected"].to_numpy())
     strategy = SimpleNamespace(matrix_strategy=FactorRankResearchMatrixStrategy({"uf_nested": 1}))
-    assert StrategyEngine._matrix_history_bars(strategy, {}) >= 279
+    assert StrategyEngine._matrix_history_bars(strategy, {}) >= 279  # type: ignore[arg-type]
 
 
 def test_shared_composite_member_is_valid():
@@ -376,17 +384,19 @@ def test_dangling_child_is_rejected_by_mining_and_backtest_entry_points(tmp_path
     _register("uf_parent", "uf_child * 2")
     unregister_factor("uf_child")
     with pytest.raises(ValueError, match="uf_child"):
-        MiningStartRequest(factor_names=["uf_parent"])
+        MiningStartRequest(factor_names=["uf_parent"])  # type: ignore[call-arg]
     with pytest.raises(ValueError, match="uf_child"):
         _decode_runtime_request(
-            {"run_id": "run", "request": {"factor_names": ["uf_parent"]}}, tmp_path, None
+            {"run_id": "run", "request": {"factor_names": ["uf_parent"]}},
+            tmp_path,
+            None,  # type: ignore[arg-type]
         )
     for handler, request in [
-        (factor_run, FactorBacktestRequest(factor_name="uf_parent")),
-        (factor_batch, FactorBatchRequest(factor_names=["uf_parent"])),
+        (factor_run, FactorBacktestRequest(factor_name="uf_parent")),  # type: ignore[call-arg]
+        (factor_batch, FactorBatchRequest(factor_names=["uf_parent"])),  # type: ignore[call-arg]
     ]:
         with pytest.raises(HTTPException) as exc:
-            handler(request, None)
+            handler(request, None)  # type: ignore[operator]
         assert exc.value.status_code == 400 and "uf_child" in exc.value.detail
 
 
@@ -407,5 +417,8 @@ def test_queued_mining_rejects_edited_child_before_loading_market_data(tmp_path,
     }
     with pytest.raises(ValueError, match="uf_child"):
         mining_runtime.run_mining_runtime(
-            payload, data_dir=tmp_path, service=None, strategy_engine=None
+            payload,
+            data_dir=tmp_path,
+            service=None,  # type: ignore[arg-type]
+            strategy_engine=None,  # type: ignore[arg-type]
         )

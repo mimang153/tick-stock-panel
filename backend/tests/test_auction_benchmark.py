@@ -17,6 +17,15 @@ import pytest
 from app.plugins.fuyao.client import FuyaoError
 from app.services import auction_benchmark as ab
 
+_CK = {"store": None}
+
+
+@pytest.fixture(autouse=True)
+def _ck(ck_runtime):
+    _CK["store"] = ck_runtime
+    yield
+    _CK["store"] = None
+
 
 def _write_kline(data_dir: Path, day: str, rows: list[tuple[str, float, float]]) -> None:
     part = data_dir / "kline_daily" / f"date={day}"
@@ -24,20 +33,30 @@ def _write_kline(data_dir: Path, day: str, rows: list[tuple[str, float, float]])
     df = pl.DataFrame(
         {
             "symbol": [r[0] for r in rows],
+            "date": [__import__("datetime").date.fromisoformat(day)] * len(rows),
             "open": [r[1] for r in rows],
             "close": [r[2] for r in rows],
         }
     )
     df.write_parquet(part / "part-0.parquet")
+    if _CK["store"] is not None:
+        # auction_benchmark 从 CK kline_daily 读
+        _CK["store"].write_daily("kline_daily", df)
 
 
 @pytest.fixture()
 def data_dir(tmp_path: Path) -> Path:
     for d in ("2026-08-26", "2026-08-27", "2026-08-28"):
         (tmp_path / "kline_daily" / f"date={d}").mkdir(parents=True, exist_ok=True)
-    _write_kline(tmp_path, "2026-08-26", [("600519.SH", 1690.0, 1700.0), ("000858.SZ", 130.0, 131.0)])
-    _write_kline(tmp_path, "2026-08-27", [("600519.SH", 1717.0, 1734.0), ("000858.SZ", 132.0, 130.0)])
-    _write_kline(tmp_path, "2026-08-28", [("600519.SH", 1734.0, 1768.68), ("000858.SZ", 129.0, 133.0)])
+    _write_kline(
+        tmp_path, "2026-08-26", [("600519.SH", 1690.0, 1700.0), ("000858.SZ", 130.0, 131.0)]
+    )
+    _write_kline(
+        tmp_path, "2026-08-27", [("600519.SH", 1717.0, 1734.0), ("000858.SZ", 132.0, 130.0)]
+    )
+    _write_kline(
+        tmp_path, "2026-08-28", [("600519.SH", 1734.0, 1768.68), ("000858.SZ", 129.0, 133.0)]
+    )
     return tmp_path
 
 
@@ -56,10 +75,20 @@ class _FakeProvider:
             "date": date_iso or "2026-08-28",
             "date_ms": 0,
             "item": [
-                {"thscode": "600519.SH", "ticker": "600519", "name": "贵州茅台",
-                 "auction_pct": 1.0, "tags": ["白酒", "超级品牌"]},
-                {"thscode": "000858.SZ", "ticker": "000858", "name": "五粮液",
-                 "auction_pct": -2.5, "tags": ["白酒"]},
+                {
+                    "thscode": "600519.SH",
+                    "ticker": "600519",
+                    "name": "贵州茅台",
+                    "auction_pct": 1.0,
+                    "tags": ["白酒", "超级品牌"],
+                },
+                {
+                    "thscode": "000858.SZ",
+                    "ticker": "000858",
+                    "name": "五粮液",
+                    "auction_pct": -2.5,
+                    "tags": ["白酒"],
+                },
             ],
         }
 
@@ -71,12 +100,14 @@ def _use_provider(monkeypatch, provider) -> _FakeProvider:
 
 # ---- 交易日解析 ----
 
+
 def test_resolve_rolls_back_non_trading_day(data_dir):
     assert ab.resolve_trade_date(data_dir, date(2026, 8, 30)) == date(2026, 8, 28)
     assert ab.resolve_trade_date(data_dir, date(2026, 8, 27)) == date(2026, 8, 27)
 
 
 # ---- 状态与缓存 ----
+
 
 def test_source_unavailable_without_fuyao(data_dir, monkeypatch):
     monkeypatch.setattr(ab, "_provider", lambda: None)
@@ -108,13 +139,15 @@ def test_explicit_history_date_uses_cache(data_dir, monkeypatch):
 
 
 def test_failure_falls_back_to_prev(data_dir, monkeypatch):
-    provider = _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28"}))
+    _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28"}))
     out = ab.get_auction_benchmark(data_dir, date(2026, 8, 28))
     assert out["state"] == "fallback_prev"
     assert out["trade_date"] == "2026-08-27"
     assert out["requested_date"] == "2026-08-28"
     # 回退日缓存以 ok 落盘 (不污染直查)
-    cached = json.loads((data_dir / "auction_benchmark" / "date=2026-08-27.json").read_text(encoding="utf-8"))
+    cached = json.loads(
+        (data_dir / "auction_benchmark" / "date=2026-08-27.json").read_text(encoding="utf-8")
+    )
     assert cached["state"] == "ok"
 
 
@@ -136,6 +169,7 @@ def test_corrupt_cache_refetches(data_dir, monkeypatch):
 
 
 # ---- 收益 enrich ----
+
 
 def test_enrich_math_with_local_kline(data_dir, monkeypatch):
     # 显式查 08-27: prev=08-26, next=08-28
@@ -164,6 +198,7 @@ def test_enrich_missing_kline_gives_none(data_dir, monkeypatch):
 
 
 # ---- AI 复盘摘要 ----
+
 
 def test_build_recap_context_contains_summary(data_dir, monkeypatch):
     _use_provider(monkeypatch, _FakeProvider())

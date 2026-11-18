@@ -46,18 +46,43 @@ class _FakeProvider:
             "count": 2,
             "stock_count": 2,
             "stock_items": [
-                {"thscode": "600519.SH", "ticker": "600519", "name": "贵州茅台",
-                 "change": 0.05, "net_value": 1.5e8, "net_rate": 0.01,
-                 "buy_value": 2e8, "sell_value": 0.5e8, "hot_rank": 3, "range_days": 1,
-                 "org_net_value": 0.8e8},
-                {"thscode": "000858.SZ", "ticker": "000858", "name": "五粮液",
-                 "change": -0.03, "net_value": -0.6e8, "net_rate": -0.004,
-                 "buy_value": 0.4e8, "sell_value": 1e8, "range_days": 3},
+                {
+                    "thscode": "600519.SH",
+                    "ticker": "600519",
+                    "name": "贵州茅台",
+                    "change": 0.05,
+                    "net_value": 1.5e8,
+                    "net_rate": 0.01,
+                    "buy_value": 2e8,
+                    "sell_value": 0.5e8,
+                    "hot_rank": 3,
+                    "range_days": 1,
+                    "org_net_value": 0.8e8,
+                },
+                {
+                    "thscode": "000858.SZ",
+                    "ticker": "000858",
+                    "name": "五粮液",
+                    "change": -0.03,
+                    "net_value": -0.6e8,
+                    "net_rate": -0.004,
+                    "buy_value": 0.4e8,
+                    "sell_value": 1e8,
+                    "range_days": 3,
+                },
             ],
             "hot_money_items": [
-                {"name": "宁波桑田路", "buying": 1.9e8,
-                 "rows": [{"thscode": "600519.SH", "name": "贵州茅台",
-                           "hot_money_item_net_value": 1.2e8}]},
+                {
+                    "name": "宁波桑田路",
+                    "buying": 1.9e8,
+                    "rows": [
+                        {
+                            "thscode": "600519.SH",
+                            "name": "贵州茅台",
+                            "hot_money_item_net_value": 1.2e8,
+                        }
+                    ],
+                },
             ],
         }
 
@@ -68,6 +93,7 @@ def _use_provider(monkeypatch, provider) -> _FakeProvider:
 
 
 # ---- 交易日解析 ----
+
 
 def test_resolve_rolls_back_non_trading_day(data_dir):
     # 周日 08-30 → 最近分区 08-28
@@ -82,6 +108,7 @@ def test_resolve_older_than_all_partitions_returns_target(data_dir):
 
 
 # ---- 状态与缓存 ----
+
 
 def test_source_unavailable_without_fuyao(data_dir, monkeypatch):
     monkeypatch.setattr(dt, "_provider", lambda: None)
@@ -115,18 +142,20 @@ def test_explicit_history_date_uses_cache(data_dir, monkeypatch):
 
 def test_unpublished_today_falls_back_to_prev(data_dir, monkeypatch):
     # 08-28 拉取失败 (未发布/未就绪) → 回退 08-27, state=fallback_prev
-    provider = _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28"}))
+    _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28"}))
     out = dt.get_dragon_tiger(data_dir, date(2026, 8, 28))
     assert out["state"] == "fallback_prev"
     assert out["trade_date"] == "2026-08-27"
     assert out["requested_date"] == "2026-08-28"
     # 回退日缓存以 ok 状态落盘 (不污染直查)
-    cached = json.loads((data_dir / "dragon_tiger" / "date=2026-08-27.json").read_text(encoding="utf-8"))
+    cached = json.loads(
+        (data_dir / "dragon_tiger" / "date=2026-08-27.json").read_text(encoding="utf-8")
+    )
     assert cached["state"] == "ok"
 
 
 def test_total_failure_returns_no_data(data_dir, monkeypatch):
-    provider = _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28", "2026-08-27"}))
+    _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28", "2026-08-27"}))
     out = dt.get_dragon_tiger(data_dir, date(2026, 8, 28))
     assert out["state"] == "no_data"
     assert "2026-08-28" in out.get("message", "")
@@ -144,6 +173,7 @@ def test_corrupt_cache_refetches(data_dir, monkeypatch):
 
 # ---- AI 复盘摘要 ----
 
+
 def test_build_recap_context_contains_summary(data_dir, monkeypatch):
     _use_provider(monkeypatch, _FakeProvider())
     ctx = dt.build_recap_context(data_dir)
@@ -159,14 +189,15 @@ def test_build_recap_context_empty_without_source(data_dir, monkeypatch):
 
 # ---- thscode 归一化 (2026-10-29 用户反馈: 退市整理期股/B股 thscode=null 进前端) ----
 
+
 def test_derive_thscode_market_suffix():
     assert dt.derive_thscode("002731") == "002731.SZ"
     assert dt.derive_thscode("300750") == "300750.SZ"
     assert dt.derive_thscode("600519") == "600519.SH"
     assert dt.derive_thscode("688111") == "688111.SH"
     assert dt.derive_thscode("830799") == "830799.BJ"
-    assert dt.derive_thscode("900920") == "900920.SH"   # 沪B
-    assert dt.derive_thscode("200468") == "200468.SZ"   # 深B
+    assert dt.derive_thscode("900920") == "900920.SH"  # 沪B
+    assert dt.derive_thscode("200468") == "200468.SZ"  # 深B
     assert dt.derive_thscode("600519.SH") == "600519.SH"  # 已带后缀原样返回
     assert dt.derive_thscode(None) is None
     assert dt.derive_thscode("ABCDEF") is None
@@ -185,11 +216,13 @@ def test_normalize_stock_items_fills_null_thscode_from_ticker():
 
 
 def test_normalize_stock_items_drops_unidentifiable():
-    out = dt.normalize_stock_items([
-        {"thscode": None, "ticker": None, "name": "无代码"},
-        {"thscode": "  ", "ticker": "nope", "name": "坏ticker"},
-        "junk",
-    ])
+    out = dt.normalize_stock_items(
+        [
+            {"thscode": None, "ticker": None, "name": "无代码"},
+            {"thscode": "  ", "ticker": "nope", "name": "坏ticker"},
+            "junk",
+        ]
+    )
     assert out == []
 
 
@@ -199,8 +232,13 @@ def test_boards_of_normalizes_nested_seat_rows():
             return {
                 "trade_date": date,
                 "stock_items": [{"thscode": None, "ticker": "900920", "name": "动力B股"}],
-                "hot_money_items": [{"name": "T王", "buying": 1.0,
-                                     "rows": [{"thscode": None, "ticker": "002731", "name": "萃华退"}]}],
+                "hot_money_items": [
+                    {
+                        "name": "T王",
+                        "buying": 1.0,
+                        "rows": [{"thscode": None, "ticker": "002731", "name": "萃华退"}],
+                    }
+                ],
             }
 
     got = dt._boards_of(_NullProvider(), "all", "2026-10-29")
@@ -211,19 +249,30 @@ def test_boards_of_normalizes_nested_seat_rows():
 def test_load_cache_normalizes_legacy_null_thscode(tmp_path):
     """旧版本写入的历史缓存含 null thscode → 读回即归一, 不把脏数据透给前端。"""
     path = tmp_path / "date=2026-10-29.json"
-    path.write_text(json.dumps({
-        "state": "ok",
-        "trade_date": "2026-10-29",
-        "all": {"stock_items": [{"thscode": None, "ticker": "002731", "name": "萃华退"}]},
-        "org": {"stock_items": [{"thscode": "600519.SH"}]},
-        "hot_money": {"hot_money_items": [
-            {"name": "T王", "rows": [{"thscode": None, "ticker": "200468"}]},
-        ]},
-    }, ensure_ascii=False), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            {
+                "state": "ok",
+                "trade_date": "2026-10-29",
+                "all": {"stock_items": [{"thscode": None, "ticker": "002731", "name": "萃华退"}]},
+                "org": {"stock_items": [{"thscode": "600519.SH"}]},
+                "hot_money": {
+                    "hot_money_items": [
+                        {"name": "T王", "rows": [{"thscode": None, "ticker": "200468"}]},
+                    ]
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
 
     payload = dt._load_cache(path)
+    assert payload is not None
     assert payload["all"]["stock_items"][0]["thscode"] == "002731.SZ"
+    assert payload is not None
     assert payload["org"]["stock_items"][0]["thscode"] == "600519.SH"
+    assert payload is not None
     assert payload["hot_money"]["hot_money_items"][0]["rows"][0]["thscode"] == "200468.SZ"
 
 
@@ -234,8 +283,9 @@ def test_get_dragon_tiger_normalizes_provider_null_thscode(data_dir, monkeypatch
                 "trade_date": "2026-08-28",
                 "count": 1,
                 "stock_count": 1,
-                "stock_items": [{"thscode": None, "ticker": "002731", "name": "萃华退",
-                                 "net_value": -525558.3}],
+                "stock_items": [
+                    {"thscode": None, "ticker": "002731", "name": "萃华退", "net_value": -525558.3}
+                ],
                 "hot_money_items": [],
             }
 

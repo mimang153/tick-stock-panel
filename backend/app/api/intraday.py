@@ -7,6 +7,7 @@ SSE 推送四种事件 (使用标准 SSE event 字段):
   - strategy_alert: 策略监控/告警触发，前端弹通知
   - depth_updated: 五档盘口修正完成，前端刷新连板梯队/看板封单数据
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -59,43 +60,35 @@ def _get_quote_service(request: Request):
     return getattr(request.app.state, "quote_service", None)
 
 
-def _fallback_index_quotes_from_daily(request: Request, symbols: list[str] | None = None) -> list[dict]:
-    """实时指数缓存为空时，从本地指数日 K 取最近收盘价作为兜底。"""
-    repo = getattr(request.app.state, "repo", None)
-    if not repo:
-        return []
-
-    params: list[str] = []
-    symbol_filter = ""
-    if symbols:
-        placeholders = ", ".join("?" for _ in symbols)
-        symbol_filter = f"WHERE symbol IN ({placeholders})"
-        params.extend(symbols)
-
+def _fallback_index_quotes_from_daily(
+    request: Request, symbols: list[str] | None = None
+) -> list[dict]:
+    """实时指数缓存为空时，从 CK 指数日 K 取最近收盘价作为兜底。"""
     try:
-        rows = repo.execute_all(
-            f"""
-            WITH ranked AS (
-                SELECT symbol, date, close,
-                       row_number() OVER (PARTITION BY symbol ORDER BY date DESC) AS rn
-                FROM kline_index_daily
-                {symbol_filter}
-            ), latest AS (
-                SELECT symbol,
-                       max(CASE WHEN rn = 1 THEN date END) AS date,
-                       max(CASE WHEN rn = 1 THEN close END) AS last_price,
-                       max(CASE WHEN rn = 2 THEN close END) AS prev_close
-                FROM ranked
-                WHERE rn <= 2
-                GROUP BY symbol
-            )
-            SELECT latest.symbol, latest.date, latest.last_price, latest.prev_close
-            FROM latest
-            ORDER BY latest.symbol
-            """,
-            params,
+        from app.storage.runtime import get_storage
+
+        runtime = get_storage()
+        if runtime is None:
+            return []
+        df = runtime.store.read_daily(
+            "kline_index_daily",
+            symbols=symbols,
+            columns=["symbol", "date", "close"],
         )
-    except Exception:  # noqa: BLE001
+        if df.is_empty():
+            return []
+        # 每个 symbol 取最近两日 (指数数据量小，Python 侧聚合即可)
+        rows = []
+        for (symbol,), group in df.sort(["symbol", "date"], descending=[False, True]).group_by(
+            "symbol", maintain_order=True
+        ):
+            group = group.sort("date", descending=True)
+            dates = group["date"].to_list()
+            closes = group["close"].to_list()
+            last_price = closes[0] if closes else None
+            prev_close = closes[1] if len(closes) > 1 else None
+            rows.append((symbol, dates[0] if dates else None, last_price, prev_close))
+    except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         return []
 
     out: list[dict] = []
@@ -105,17 +98,19 @@ def _fallback_index_quotes_from_daily(request: Request, symbols: list[str] | Non
         if last_price is not None and prev_close not in (None, 0):
             change_amount = float(last_price) - float(prev_close)
             change_pct = change_amount / float(prev_close) * 100
-        out.append({
-            "symbol": symbol,
-            "name": None,
-            "date": str(dt) if dt else None,
-            "last_price": float(last_price) if last_price is not None else None,
-            "close": float(last_price) if last_price is not None else None,
-            "prev_close": float(prev_close) if prev_close is not None else None,
-            "change_amount": change_amount,
-            "change_pct": change_pct,
-            "source": "index_daily",
-        })
+        out.append(
+            {
+                "symbol": symbol,
+                "name": None,
+                "date": str(dt) if dt else None,
+                "last_price": float(last_price) if last_price is not None else None,
+                "close": float(last_price) if last_price is not None else None,
+                "prev_close": float(prev_close) if prev_close is not None else None,
+                "change_amount": change_amount,
+                "change_pct": change_pct,
+                "source": "index_daily",
+            }
+        )
     return out
 
 
@@ -125,8 +120,15 @@ def status(request: Request):
     qs = _get_quote_service(request)
     if qs:
         return qs.status()
-    return {"enabled": False, "running": False, "symbol_count": 0, "index_symbol_count": 0,
-            "quote_age_ms": None, "is_trading_hours": False, "last_fetch_ms": None}
+    return {
+        "enabled": False,
+        "running": False,
+        "symbol_count": 0,
+        "index_symbol_count": 0,
+        "quote_age_ms": None,
+        "is_trading_hours": False,
+        "last_fetch_ms": None,
+    }
 
 
 @router.get("/indices")
@@ -148,6 +150,99 @@ def index_quotes(
     return {"rows": rows, "count": len(rows), "source": "realtime"}
 
 
+def _sse_alert_events(alerts: list) -> list[dict]:
+    """告警分片推送, 避免单条 SSE 过大。"""
+    return [
+        {
+            "event": "strategy_alert",
+            "data": json.dumps(
+                {"ts": int(time.time() * 1000), "alerts": alerts[i : i + 20]},
+                ensure_ascii=False,
+            ),
+        }
+        for i in range(0, len(alerts), 20)
+    ]
+
+
+def _sse_quote_events(qs, data: dict) -> list[dict]:
+    """行情/策略/五档等状态通知, 顺序沿用原 SSE 推送顺序。"""
+    events: list[dict] = []
+    if data["quote_updated"]:
+        events.append(
+            {
+                "event": "quotes_updated",
+                "data": json.dumps(
+                    {
+                        "ts": int(time.time() * 1000),
+                        "symbol_count": qs._symbol_count,
+                        "revision": qs.stream_versions()["quote"],
+                    }
+                ),
+            }
+        )
+    if "daily_integrity_updated" in data:
+        events.append(
+            {
+                "event": "daily_integrity_updated",
+                "data": json.dumps({"data_changed": data["daily_integrity_updated"]}),
+            }
+        )
+    if data.get("data_updated"):
+        events.append(
+            {
+                "event": "data_updated",
+                "data": json.dumps({"versions": qs.data_versions()}),
+            }
+        )
+    if data["strategy_results_updated"]:
+        events.append(
+            {
+                "event": "strategy_results_updated",
+                "data": json.dumps(
+                    {
+                        "ts": int(time.time() * 1000),
+                        "revision": qs.stream_versions()["strategy"],
+                    }
+                ),
+            }
+        )
+    if data["depth_updated"]:
+        events.append(
+            {
+                "event": "depth_updated",
+                "data": json.dumps({"ts": int(time.time() * 1000)}),
+            }
+        )
+    return events
+
+
+async def _quote_event_generator(qs):
+    """单连接事件循环: 订阅、等待、按固定顺序转发事件。"""
+    if qs is None:
+        # 无行情服务: 保持连接 (EventSourceResponse 自带 ping), 不推事件
+        while True:
+            await asyncio.sleep(30)
+
+    sub = qs.subscribe()
+    try:
+        while True:
+            # 等待任一通道有新信号 (5s 超时保持循环, 便于断线时尽快退出)
+            await sub.wait_async(5.0)
+            data = sub.pop()
+
+            for event in _sse_alert_events(data["alerts"]):
+                yield event
+
+            # 复盘进度事件已是 recap_market_stream 产出的 JSON 字符串, 逐条转发
+            for evt_json in data["reviews"]:
+                yield {"event": "review_progress", "data": evt_json}
+
+            for event in _sse_quote_events(qs, data):
+                yield event
+    finally:
+        qs.unsubscribe(sub)
+
+
 @router.get("/stream")
 async def quote_stream(request: Request):
     """SSE 端点: 行情更新 + 告警推送 + 五档修正 + 复盘进度。
@@ -159,81 +254,8 @@ async def quote_stream(request: Request):
 
     每个连接注册一个独立订阅者 (QuoteSubscriber: 独立事件 + 独立队列),
     事件由 QuoteService 广播 — 多客户端 (多标签页/设备) 各自收到全量事件。
-    此前四通道共用服务级 Event + pop 取走语义, 告警只会被先醒的连接消费。
     """
-    qs = _get_quote_service(request)
-
-    async def event_generator():
-        if qs is None:
-            # 无行情服务: 保持连接 (EventSourceResponse 自带 ping), 不推事件
-            while True:
-                await asyncio.sleep(30)
-
-        sub = qs.subscribe()
-        try:
-            while True:
-                # 等待任一通道有新信号 (5s 超时保持循环, 便于断线时尽快退出)
-                await sub.wait_async(5.0)
-                data = sub.pop()
-
-                # 告警 (分片推送, 避免单条 SSE 过大)
-                alerts = data["alerts"]
-                for chunk_start in range(0, len(alerts), 20):
-                    chunk = alerts[chunk_start:chunk_start + 20]
-                    yield {
-                        "event": "strategy_alert",
-                        "data": json.dumps({
-                            "ts": int(time.time() * 1000),
-                            "alerts": chunk,
-                        }, ensure_ascii=False),
-                    }
-
-                # 复盘进度 (定时复盘流式生成时) — 前端 reviewStore 直接消费
-                # 事件已是 recap_market_stream 产出的 JSON 字符串, 逐条转发
-                for evt_json in data["reviews"]:
-                    yield {
-                        "event": "review_progress",
-                        "data": evt_json,
-                    }
-
-                # 行情更新
-                if data["quote_updated"]:
-                    yield {
-                        "event": "quotes_updated",
-                        "data": json.dumps({
-                            "ts": int(time.time() * 1000),
-                            "symbol_count": qs._symbol_count,
-                            "revision": qs.stream_versions()["quote"],
-                        }),
-                    }
-
-                # 策略监控完成后, 结果已写入内存缓存; 独立通知只刷新策略个股列表。
-                if "daily_integrity_updated" in data:
-                    yield {
-                        "event": "daily_integrity_updated",
-                        "data": json.dumps({"data_changed": data["daily_integrity_updated"]}),
-                    }
-                if data.get("data_updated"):
-                    yield {"event": "data_updated", "data": json.dumps({"versions": qs.data_versions()})}
-                if data["strategy_results_updated"]:
-                    yield {
-                        "event": "strategy_results_updated",
-                        "data": json.dumps({"ts": int(time.time() * 1000),
-                                            "revision": qs.stream_versions()["strategy"]}),
-                    }
-
-                # 五档修正完成 — 前端刷新连板梯队封单数据
-                if data["depth_updated"]:
-                    yield {
-                        "event": "depth_updated",
-                        "data": json.dumps({
-                            "ts": int(time.time() * 1000),
-                        }),
-                    }
-        finally:
-            qs.unsubscribe(sub)
-
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(_quote_event_generator(_get_quote_service(request)))
 
 
 @router.get("/data-versions")

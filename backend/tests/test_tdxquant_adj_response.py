@@ -3,6 +3,7 @@
 The SDK turns both a valid empty result and a server error into empty pandas
 frames. Exercise the actual SDK boundary, then provider math and persistence.
 """
+
 from __future__ import annotations
 
 import json
@@ -18,8 +19,7 @@ from app.services import kline_sync
 
 sdk = pytest.importorskip("tdxaidata.tdxaidata")
 
-EVENT = {"ErrorId": 0, "Date": ["20240619"], "Type": ["1"],
-         "Value": [["2", "5", "1", "2"]]}
+EVENT = {"ErrorId": 0, "Date": ["20240619"], "Type": ["1"], "Value": [["2", "5", "1", "2"]]}
 AUTH_ERROR = {"ErrorId": -1, "Error": "TokenKey Insufficient Or Key Error TDX-test-secret"}
 
 
@@ -37,12 +37,18 @@ def make_client(monkeypatch):
             value = responses.pop(0) if len(responses) > 1 else responses[0]
             return json.dumps(value)
 
-        closes = close_response if close_response is not None else {
-            "ErrorId": 0, "Date": ["20240618", "20240619"], "Close": ["10", "8.35"],
-        }
+        closes = (
+            close_response
+            if close_response is not None
+            else {
+                "ErrorId": 0,
+                "Date": ["20240618", "20240619"],
+                "Close": ["10", "8.35"],
+            }
+        )
         native = SimpleNamespace(get_cw_data=events, get_his_dats=lambda *a: json.dumps(closes))
 
-        class ReplaySDK(sdk.tqs):
+        class ReplaySDK(sdk.tqs):  # type: ignore[name-defined]
             @classmethod
             def _tdx(cls):
                 return native
@@ -68,7 +74,9 @@ def test_event_values_and_dates_match_sdk_dataframe(make_client):
     assert calls[-1] == ("600000.SH", "2024-01-01 00:00:00", "2024-12-31 00:00:00")
 
 
-@pytest.mark.parametrize("payload", [{"ErrorId": 0}, {"ErrorId": 0, "Date": [], "Type": [], "Value": []}])
+@pytest.mark.parametrize(
+    "payload", [{"ErrorId": 0}, {"ErrorId": 0, "Date": [], "Type": [], "Value": []}]
+)
 def test_valid_empty_sdk_frame_means_no_events(make_client, payload):
     client, _ = make_client([payload])
     assert client._tqs.get_divid_factors("000002.SZ").empty
@@ -90,12 +98,18 @@ def test_transient_server_error_retries_and_recovers(make_client):
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize("payload", [None, [], {"unexpected": 1},
-    {"Date": ["20240619"], "Type": ["1"], "Value": []},
-    {"Date": ["20240619"], "Type": ["1"], "Value": [["invalid", 0, 0, 0]]},
-    {"Date": ["20240619"], "Type": ["1"], "Value": [["NaN", 0, 0, 0]]},
-    {"Date": ["20240619"], "Type": ["1"], "Value": [["Infinity", 0, 0, 0]]},
-])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        [],
+        {"unexpected": 1},
+        {"Date": ["20240619"], "Type": ["1"], "Value": []},
+        {"Date": ["20240619"], "Type": ["1"], "Value": [["invalid", 0, 0, 0]]},
+        {"Date": ["20240619"], "Type": ["1"], "Value": [["NaN", 0, 0, 0]]},
+        {"Date": ["20240619"], "Type": ["1"], "Value": [["Infinity", 0, 0, 0]]},
+    ],
+)
 def test_malformed_response_remains_a_failure(make_client, payload):
     client, _ = make_client([payload])
     with pytest.raises(tc.TdxQuantError):
@@ -126,13 +140,18 @@ def route_to(client, monkeypatch):
     return provider
 
 
-def test_events_flow_to_parquet_with_existing_per_share_formula(make_client, monkeypatch, tmp_path):
+def test_events_flow_to_parquet_with_existing_per_share_formula(
+    make_client, monkeypatch, tmp_path, ck_runtime
+):
     client, _ = make_client([EVENT])
     route_to(client, monkeypatch)
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     added, affected = kline_sync.sync_adj_factor(
-        ["600000.SH"], repo, SimpleNamespace(has=lambda _: False),
-        start_time=datetime(2024, 1, 1), end_time=datetime(2024, 12, 31),
+        ["600000.SH"],
+        repo,  # type: ignore[arg-type]
+        SimpleNamespace(has=lambda _: False),  # type: ignore[arg-type]
+        start_time=datetime(2024, 1, 1),
+        end_time=datetime(2024, 12, 31),
     )
     assert added == 1 and affected == ["600000.SH"]
     row = pl.read_parquet(tmp_path / "adj_factor/all.parquet").row(0, named=True)
@@ -145,17 +164,25 @@ def test_events_flow_to_parquet_with_existing_per_share_formula(make_client, mon
     assert row["ex_factor"] == pytest.approx(10.0 / 8.31)
 
 
-def test_partial_failure_keeps_existing_factors_and_stops_remaining_symbols(make_client, monkeypatch, tmp_path):
+def test_partial_failure_keeps_existing_factors_and_stops_remaining_symbols(
+    make_client, monkeypatch, tmp_path, ck_runtime
+):
     client, calls = make_client([EVENT, AUTH_ERROR])
     route_to(client, monkeypatch)
     path = tmp_path / "adj_factor/all.parquet"
     path.parent.mkdir()
-    pl.DataFrame({"symbol": ["600000.SH"], "trade_date": [date(2023, 1, 1)], "ex_factor": [1.02]}).write_parquet(path)
+    pl.DataFrame(
+        {"symbol": ["600000.SH"], "trade_date": [date(2023, 1, 1)], "ex_factor": [1.02]}
+    ).write_parquet(path)
     before = path.read_bytes()
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     with pytest.raises(tc.TdxQuantAuthError):
-        kline_sync.sync_adj_factor(["600000.SH", "000002.SZ", "600519.SH"], repo, None,
-                                   end_time=datetime(2024, 12, 31))
+        kline_sync.sync_adj_factor(
+            ["600000.SH", "000002.SZ", "600519.SH"],
+            repo,  # type: ignore[arg-type]
+            None,  # type: ignore[arg-type]
+            end_time=datetime(2024, 12, 31),  # type: ignore[arg-type]
+        )
     assert len(calls) == 2
     assert path.read_bytes() == before
 

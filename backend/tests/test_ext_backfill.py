@@ -4,6 +4,7 @@
 按本地交易日逐日回补。金融契约重点: 接口忽略日期参数返回当日数据时
 必须拒写历史分区 (实测确有此类接口), 否则整个时序口径错乱。
 """
+
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
@@ -26,10 +27,14 @@ from app.services.ext_pull import (
 
 def _cfg(mode: str = "timeseries", date_param: str | None = "date") -> ExtConfig:
     return ExtConfig(
-        id="hot", label="人气", mode=mode,
+        id="hot",
+        label="人气",
+        mode=mode,  # type: ignore[arg-type]
         fields=[
-            ExtField("symbol", "string"), ExtField("rank", "int"),
-            ExtField("date", "string"), ExtField("heat", "float"),
+            ExtField("symbol", "string"),
+            ExtField("rank", "int"),
+            ExtField("date", "string"),
+            ExtField("heat", "float"),
         ],
         pull=PullConfig(url="https://example.test/rank", date_param=date_param),
     )
@@ -100,6 +105,7 @@ def fake_http(monkeypatch):
 
 # ── 纯函数 ────────────────────────────────────────────────
 
+
 def test_outbound_headers_default_and_override():
     """出站标识头: 默认带 tsp UA + X-TSP-Client; 用户同名头优先 (大小写不敏感)。"""
     from app.services.ext_pull import outbound_headers
@@ -109,8 +115,8 @@ def test_outbound_headers_default_and_override():
     assert h["X-TSP-Client"] == "tick-stock-panel"
 
     h2 = outbound_headers({"user-agent": "my-ua", "X-Custom": "1"})
-    assert h2["user-agent"] == "my-ua"          # 小写同名覆盖默认 UA
-    assert "User-Agent" not in h2                # 不重复发送
+    assert h2["user-agent"] == "my-ua"  # 小写同名覆盖默认 UA
+    assert "User-Agent" not in h2  # 不重复发送
     assert h2["X-TSP-Client"] == "tick-stock-panel"  # 未覆盖的标识头保留
     assert h2["X-Custom"] == "1"
 
@@ -125,7 +131,9 @@ async def test_fetch_rows_carries_tsp_identity(fake_http):
 
 async def test_fetch_rows_user_headers_take_precedence(fake_http):
     cfg = ExtConfig(
-        id="hot", label="人气", mode="timeseries",
+        id="hot",
+        label="人气",
+        mode="timeseries",
         fields=_cfg().fields,
         pull=PullConfig(
             url="https://example.test/rank",
@@ -170,11 +178,11 @@ def test_pull_config_date_format_roundtrip_and_normalize():
 
 def test_assert_rows_date_contract():
     d = date(2026, 1, 5)
-    _assert_rows_date([_row("A", "2026-01-05")], d)                     # 一致
-    _assert_rows_date([_row("A", "2026-01-05 00:00:00")], d)            # 带时间前缀
-    _assert_rows_date([{"symbol": "A"}], d)                             # 无 date 字段: 不校验
+    _assert_rows_date([_row("A", "2026-01-05")], d)  # 一致
+    _assert_rows_date([_row("A", "2026-01-05 00:00:00")], d)  # 带时间前缀
+    _assert_rows_date([{"symbol": "A"}], d)  # 无 date 字段: 不校验
     with pytest.raises(ValueError, match="不一致"):
-        _assert_rows_date([_row("A", "2026-09-06")], d)                 # 接口忽略参数返回当日
+        _assert_rows_date([_row("A", "2026-09-06")], d)  # 接口忽略参数返回当日
 
 
 async def test_snapshot_api_without_date_param_accepts_previous_trading_day(fake_http):
@@ -185,10 +193,11 @@ async def test_snapshot_api_without_date_param_accepts_previous_trading_day(fake
     全部拒掉 (报「接口可能不支持日期参数」)。
     """
     cfg = ExtConfig(
-        id="flow", label="资金流", mode="timeseries",
-        fields=[ExtField("symbol", "string"), ExtField("date", "string"),
-                ExtField("net", "float")],
-        pull=PullConfig(url="https://example.test/flow"),   # date_param 未配置
+        id="flow",
+        label="资金流",
+        mode="timeseries",
+        fields=[ExtField("symbol", "string"), ExtField("date", "string"), ExtField("net", "float")],
+        pull=PullConfig(url="https://example.test/flow"),  # date_param 未配置
     )
     # 请求 2026-10-24 (周六), 接口返回 2026-10-23 (周五) 的快照
     fake_http.responses["https://example.test/flow"] = [
@@ -208,7 +217,9 @@ async def test_dated_api_still_rejects_mismatched_date(fake_http):
 async def test_market_level_snapshot_without_date_param_accepts_stale_date(fake_http):
     """市场级表同样按 date_param 判定, 不因 market_level 分支绕开修复。"""
     cfg = ExtConfig(
-        id="regime", label="情绪", mode="timeseries",
+        id="regime",
+        label="情绪",
+        mode="timeseries",
         fields=[ExtField("date", "string"), ExtField("score", "float")],
         pull=PullConfig(url="https://example.test/regime"),
         market_level=True,
@@ -228,6 +239,7 @@ def test_pull_config_date_param_roundtrip():
 
 
 # ── fetch_rows_for_date ───────────────────────────────────
+
 
 async def test_fetch_rows_builds_dated_url(fake_http):
     fake_http.responses["https://example.test/rank?date=2026-01-05"] = [_row("A", "2026-01-05")]
@@ -254,6 +266,7 @@ async def test_fetch_rows_requires_symbol_or_code(fake_http):
 
 
 # ── backfill_history ──────────────────────────────────────
+
 
 def _seed_trading_days(data_dir: Path, *days: str) -> None:
     root = data_dir / "kline_daily"
@@ -284,7 +297,8 @@ async def test_backfill_writes_partitions_and_is_idempotent(tmp_path, fake_http)
     part_102.parent.mkdir(parents=True)
     part_102.write_bytes(b"x")
     fake_http.responses["https://example.test/rank?date=2026-01-05"] = [
-        _row("600000.SH", "2026-01-05"), _row("000001.SZ", "2026-01-05"),
+        _row("600000.SH", "2026-01-05"),
+        _row("000001.SZ", "2026-01-05"),
     ]
 
     result = await backfill_history(_cfg(), tmp_path, date(2026, 1, 1), date(2026, 1, 9))
@@ -317,7 +331,8 @@ async def test_backfill_collects_failures_without_abort(tmp_path, fake_http):
 
 # ── 与扩展消费链路的衔接 ─────────────────────────────────
 
-async def test_backfilled_partition_feeds_signal_frame(tmp_path, fake_http):
+
+async def test_backfilled_partition_feeds_signal_frame(tmp_path, fake_http, ck_runtime):
     """回补落盘的历史分区, ext_factors 按日对齐立即可用 (PIT)。"""
     from app.factors import ext_factors
 
@@ -336,8 +351,8 @@ async def test_backfilled_partition_feeds_signal_frame(tmp_path, fake_http):
         schema={"symbol": pl.Utf8, "date": pl.Utf8},
     )
     out = ext_factors.attach_ext_columns(frame, include_snapshot=False, data_dir=tmp_path)
-    assert out["ext_hot_rank"].to_list() == [3.0, 1.0]      # rank int → Float64
-    assert out["ext_hot_heat"].to_list() == [88.0, 99.0]    # 每日各自的值, 无串日
+    assert out["ext_hot_rank"].to_list() == [3.0, 1.0]  # rank int → Float64
+    assert out["ext_hot_heat"].to_list() == [88.0, 99.0]  # 每日各自的值, 无串日
 
 
 # ── 429 限流退避与中止 ─────────────────────
@@ -392,7 +407,9 @@ async def test_backfill_404_counts_as_empty_not_failed(tmp_path, fake_http, monk
     """hub /exports、/fuyao-rank 契约: 该日无快照返回 404 → empty 跳过, 不进失败清单。"""
     monkeypatch.setattr(ext_pull, "_BACKFILL_DAY_INTERVAL_S", 0)
     _seed_trading_days(tmp_path, "2026-01-05", "2026-01-06", "2026-01-07")
-    u5, u6, u7 = (f"https://example.test/rank?date={d}" for d in ("2026-01-05", "2026-01-06", "2026-01-07"))
+    u5, u6, u7 = (
+        f"https://example.test/rank?date={d}" for d in ("2026-01-05", "2026-01-06", "2026-01-07")
+    )
     fake_http.errors[u5] = _err_404(u5)
     fake_http.responses[u6] = [_row("600000.SH", "2026-01-06")]
     fake_http.errors[u7] = _err_404(u7)

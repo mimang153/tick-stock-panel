@@ -5,6 +5,7 @@ To compare revisions, run this same file with PYTHONPATH pointing at each backen
 The 250 ms parser delay is deliberately synthetic: it measures event-loop
 responsiveness, not CSV parser throughput. All data is generated in a tempdir.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -30,12 +31,20 @@ def cache_benchmark(root: Path) -> dict:
     days = [date(2026, 1, 1) + timedelta(days=i) for i in range(168)]
     days = [d for d in days if d.weekday() < 5]
     symbols = [f"{600000 + i}.SH" for i in range(1000)]
-    frames = [pl.DataFrame({
-        "symbol": symbols, "date": [day] * len(symbols),
-        "open": [10.0] * len(symbols), "high": [11.0] * len(symbols),
-        "low": [9.0] * len(symbols), "close": [10.0 + i / 100] * len(symbols),
-        "volume": [1000.0] * len(symbols),
-    }) for i, day in enumerate(days)]
+    frames = [
+        pl.DataFrame(
+            {
+                "symbol": symbols,
+                "date": [day] * len(symbols),
+                "open": [10.0] * len(symbols),
+                "high": [11.0] * len(symbols),
+                "low": [9.0] * len(symbols),
+                "close": [10.0 + i / 100] * len(symbols),
+                "volume": [1000.0] * len(symbols),
+            }
+        )
+        for i, day in enumerate(days)
+    ]
     history = pl.concat(frames)
     repo = KlineRepository(DataStore(root))
     try:
@@ -48,7 +57,9 @@ def cache_benchmark(root: Path) -> dict:
         engine = BacktestEngine(repo)
         columns = ["symbol", "date", "close"]
         args = (None, days[0], days[-2], columns)
-        expected = history.filter(pl.col("date") <= days[-2]).select(columns).sort(["symbol", "date"])
+        expected = (
+            history.filter(pl.col("date") <= days[-2]).select(columns).sort(["symbol", "date"])
+        )
         assert engine.load_panel(*args).equals(expected)
         reads, writes, hits = [], [], 0
         for i in range(30):
@@ -65,15 +76,18 @@ def cache_benchmark(root: Path) -> dict:
                 assert cached.equals(expected)
                 hits += 1
         return {
-            "symbols": len(symbols), "partitions": len(days), "rows": history.height,
-            "ticks": 30, "historical_cache_hits": hits,
+            "symbols": len(symbols),
+            "partitions": len(days),
+            "rows": history.height,
+            "ticks": 30,
+            "historical_cache_hits": hits,
             "panel_computations": engine._cache.stats()["compute_count"],
             "panel_read_median_ms": round(statistics.median(reads), 3),
             "tick_write_median_ms": round(statistics.median(writes), 3),
             "outputs_equal": True,
         }
     finally:
-        repo.db.close()
+        pass  # DuckDB 已移除 (B5.1)
 
 
 async def async_benchmark(root: Path) -> dict:
@@ -83,12 +97,22 @@ async def async_benchmark(root: Path) -> dict:
     from app.api import ext_data
     from app.services.ext_data import ExtConfig, ExtField
 
-    config = ExtConfig(id="bench", label="bench", mode="snapshot", fields=[
-        ExtField("symbol"), ExtField("value", dtype="float"),
-    ])
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        repo=SimpleNamespace(store=SimpleNamespace(data_dir=root)),
-    )))
+    config = ExtConfig(
+        id="bench",
+        label="bench",
+        mode="snapshot",
+        fields=[
+            ExtField("symbol"),
+            ExtField("value", dtype="float"),
+        ],
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                repo=SimpleNamespace(store=SimpleNamespace(data_dir=root)),
+            )
+        )
+    )
 
     def parse(*args, **kwargs):
         time.sleep(0.25)
@@ -96,7 +120,7 @@ async def async_benchmark(root: Path) -> dict:
 
     maxima = []
     for _ in range(5):
-        intervals = []
+        intervals = []  # type: ignore[var-annotated]
         stop = asyncio.Event()
 
         async def heartbeat(stop=stop, intervals=intervals):
@@ -113,8 +137,10 @@ async def async_benchmark(root: Path) -> dict:
                 patch.object(ext_data.pl, "read_csv", parse),
                 patch.object(ext_data, "_refresh_views", lambda _: None),
             ):
-                file = UploadFile(io.BytesIO(b"symbol,value\n600000.SH,1.5\n"), filename="bench.csv")
-                result = await ext_data.upload_data(request, "bench", file, "2026-10-29")
+                file = UploadFile(
+                    io.BytesIO(b"symbol,value\n600000.SH,1.5\n"), filename="bench.csv"
+                )
+                result = await ext_data.upload_data(request, "bench", file, "2026-10-29")  # type: ignore[arg-type]
                 assert result == {"status": "ok", "rows": 1, "date": "2026-10-29"}
                 await file.close()
             await asyncio.sleep(0.03)
@@ -123,7 +149,9 @@ async def async_benchmark(root: Path) -> dict:
             await task
         maxima.append(max(intervals))
     return {
-        "synthetic_parser_ms": 250, "heartbeat_period_ms": 10, "runs": 5,
+        "synthetic_parser_ms": 250,
+        "heartbeat_period_ms": 10,
+        "runs": 5,
         "median_max_heartbeat_ms": round(statistics.median(maxima), 3),
         "max_heartbeat_runs_ms": [round(value, 3) for value in maxima],
     }
@@ -135,10 +163,15 @@ def main():
         root = Path(temporary)
         os.environ["DATA_DIR"] = str(root / "settings")
         os.environ["TICKFLOW_ENV_FILE"] = str(root / "absent.env")
-        print(json.dumps({
-            "cache": cache_benchmark(root / "cache"),
-            "async": asyncio.run(async_benchmark(root / "upload")),
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "cache": cache_benchmark(root / "cache"),
+                    "async": asyncio.run(async_benchmark(root / "upload")),
+                },
+                indent=2,
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 """市场总览聚合 API。"""
+
 from __future__ import annotations
 
 import math
@@ -9,12 +10,11 @@ from concurrent.futures import Future
 from datetime import date
 from typing import Any
 
-import polars as pl
 from fastapi import APIRouter, Request
 
 from app.services.ext_data import ExtConfig, ExtConfigStore
 from app.services.index_const import CORE_INDEX_NAMES, CORE_INDEX_SYMBOLS
-from app.services.screener import ScreenerService
+from app.services.market_overview_builder import _read_ext_rows
 
 router = APIRouter(prefix="/api/overview", tags=["overview"])
 
@@ -46,7 +46,9 @@ _DIMENSION_SEP = re.compile(r"[、,，;；|/\s]+")
 
 
 def _dimension_field(config: ExtConfig, kind: str) -> str | None:
-    candidates = ["概念", "concept", "theme"] if kind == "concept" else ["行业", "industry", "sector"]
+    candidates = (
+        ["概念", "concept", "theme"] if kind == "concept" else ["行业", "industry", "sector"]
+    )
     for candidate in candidates:
         needle = candidate.lower()
         for field in config.fields:
@@ -54,46 +56,6 @@ def _dimension_field(config: ExtConfig, kind: str) -> str | None:
             if needle in haystack:
                 return field.name
     return None
-
-
-def _ext_files(data_dir, config: ExtConfig) -> list[str]:
-    base = data_dir / "ext_data" / config.id
-    if config.mode == "timeseries":
-        root = base / "timeseries"
-        return [str(p) for p in sorted(root.rglob("*.parquet")) if p.is_file()]
-    return [str(p) for p in sorted(base.glob("*.parquet")) if p.is_file()]
-
-
-def _read_ext_rows(data_dir, config: ExtConfig, dimension_field: str) -> list[dict]:
-    files = _ext_files(data_dir, config)
-    if not files:
-        return []
-    try:
-        df = pl.read_parquet(files, hive_partitioning=True)
-    except TypeError:
-        try:
-            df = pl.read_parquet(files)
-        except Exception:  # noqa: BLE001
-            return []
-    except Exception:  # noqa: BLE001
-        return []
-    if df.is_empty() or dimension_field not in df.columns:
-        return []
-
-    if config.mode == "timeseries" and "date" in df.columns:
-        latest = df.get_column("date").max()
-        if latest is not None:
-            df = df.filter(pl.col("date") == latest)
-
-    symbol_cols = ["symbol", "code", "股票代码", "代码"]
-    for mapping in (config.symbol_map, config.code_map):
-        if isinstance(mapping, dict) and mapping.get("type") == "mapped" and mapping.get("col"):
-            symbol_cols.append(str(mapping["col"]))
-    cols = []
-    for col in [dimension_field, *symbol_cols]:
-        if col in df.columns and col not in cols:
-            cols.append(col)
-    return df.select(cols).to_dicts()
 
 
 def _dimension_values(raw: Any) -> list[str]:
@@ -107,7 +69,7 @@ def _symbol_keys(row: dict, config: ExtConfig) -> list[str]:
     fields = ["symbol", "code", "股票代码", "代码"]
     for mapping in (config.symbol_map, config.code_map):
         if isinstance(mapping, dict) and mapping.get("type") == "mapped" and mapping.get("col"):
-            fields.append(str(mapping["col"]))
+            fields.append(str(mapping["col"]))  # noqa: PERF401 - PERF401: 循环内含多行处理/异常, 改写推导式损可读性
 
     keys: list[str] = []
     for field in fields:
@@ -123,7 +85,9 @@ def _symbol_keys(row: dict, config: ExtConfig) -> list[str]:
     return keys
 
 
-def _dimension_rank(rows: list[dict], request: Request, kind: str, limit: int = 5, level: int | None = None) -> dict:
+def _dimension_rank(  # noqa: C901 - C901: 分支为业务多阶段编排, 拆分会割裂上下文; 单测已覆盖
+    rows: list[dict], request: Request, kind: str, limit: int = 5, level: int | None = None
+) -> dict:
     if not rows:
         return {"leading": [], "lagging": []}
 
@@ -165,22 +129,24 @@ def _dimension_rank(rows: list[dict], request: Request, kind: str, limit: int = 
         if not changes:
             continue
         leader = max(stocks, key=lambda s: _finite(s.get("change_pct")) or -999)
-        items.append({
-            "name": name,
-            "count": len(stocks),
-            "avg_pct": sum(changes) / len(changes),
-            "up_count": sum(1 for v in changes if v > 0),
-            "down_count": sum(1 for v in changes if v < 0),
-            "amount": sum(_finite(s.get("amount")) or 0 for s in stocks),
-            "leader": {
-                "symbol": leader.get("symbol"),
-                "name": leader.get("name"),
-                "change_pct": _finite(leader.get("change_pct")),
-            },
-        })
+        items.append(
+            {
+                "name": name,
+                "count": len(stocks),
+                "avg_pct": sum(changes) / len(changes),  # type: ignore[arg-type]
+                "up_count": sum(1 for v in changes if v > 0),  # type: ignore
+                "down_count": sum(1 for v in changes if v < 0),  # type: ignore
+                "amount": sum(_finite(s.get("amount")) or 0 for s in stocks),
+                "leader": {
+                    "symbol": leader.get("symbol"),
+                    "name": leader.get("name"),
+                    "change_pct": _finite(leader.get("change_pct")),
+                },
+            }
+        )
 
-    leading = sorted(items, key=lambda x: x["avg_pct"], reverse=True)[:limit]
-    lagging = sorted(items, key=lambda x: x["avg_pct"])[:limit]
+    leading = sorted(items, key=lambda x: x["avg_pct"], reverse=True)[:limit]  # type: ignore
+    lagging = sorted(items, key=lambda x: x["avg_pct"])[:limit]  # type: ignore
     return {"leading": leading, "lagging": lagging}
 
 
@@ -244,43 +210,43 @@ def _index_quotes(request: Request, as_of: date | None = None) -> list[dict]:
             rows = df.to_dicts()
 
     if not rows:
-        repo = getattr(request.app.state, "repo", None)
-        if repo:
-            placeholders = ", ".join("?" for _ in CORE_INDEX_SYMBOLS)
-            try:
-                db_rows = repo.execute_all(
-                    f"""
-                    WITH ranked AS (
-                        SELECT symbol, date, close,
-                               row_number() OVER (PARTITION BY symbol ORDER BY date DESC) AS rn
-                        FROM kline_index_daily
-                        WHERE symbol IN ({placeholders})
-                          AND (? IS NULL OR date <= ?)
-                    ), latest AS (
-                        SELECT symbol,
-                               max(CASE WHEN rn = 1 THEN date END) AS date,
-                               max(CASE WHEN rn = 1 THEN close END) AS last_price,
-                               max(CASE WHEN rn = 2 THEN close END) AS prev_close
-                        FROM ranked
-                        WHERE rn <= 2
-                        GROUP BY symbol
-                    )
-                    SELECT symbol, date, last_price, prev_close
-                    FROM latest
-                    """,
-                    [*CORE_INDEX_SYMBOLS, as_of, as_of],
+        try:
+            from app.storage.runtime import get_storage
+
+            runtime = get_storage()
+            db_rows = []
+            if runtime is not None:
+                df = runtime.store.read_daily(
+                    "kline_index_daily",
+                    symbols=list(CORE_INDEX_SYMBOLS),
+                    end=as_of,
+                    columns=["symbol", "date", "close"],
                 )
-            except Exception:  # noqa: BLE001
-                db_rows = []
-            for symbol, dt, last_price, prev_close in db_rows:
-                change_amount = None
-                change_pct = None
-                lp = _finite(last_price)
-                pc = _finite(prev_close)
-                if lp is not None and pc not in (None, 0):
-                    change_amount = lp - pc
-                    change_pct = change_amount / pc * 100
-                rows.append({
+                # 每个核心指数取最近两日 (数据量小，Python 侧聚合)
+                for (symbol,), group in df.group_by("symbol", maintain_order=True):
+                    group = group.sort("date", descending=True)
+                    dates = group["date"].to_list()
+                    closes = group["close"].to_list()
+                    db_rows.append(
+                        (
+                            symbol,
+                            dates[0] if dates else None,
+                            closes[0] if closes else None,
+                            closes[1] if len(closes) > 1 else None,
+                        )
+                    )
+        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+            db_rows = []
+        for symbol, dt, last_price, prev_close in db_rows:
+            change_amount = None
+            change_pct = None
+            lp = _finite(last_price)
+            pc = _finite(prev_close)
+            if lp is not None and pc not in (None, 0):
+                change_amount = lp - pc
+                change_pct = change_amount / pc * 100
+            rows.append(
+                {
                     "symbol": symbol,
                     "name": CORE_INDEX_NAMES.get(symbol),
                     "date": str(dt) if dt else None,
@@ -289,19 +255,24 @@ def _index_quotes(request: Request, as_of: date | None = None) -> list[dict]:
                     "prev_close": pc,
                     "change_amount": change_amount,
                     "change_pct": change_pct,
-                })
+                }
+            )
 
     by_symbol = {r.get("symbol"): r for r in rows}
     out = []
     for symbol in CORE_INDEX_SYMBOLS:
         r = by_symbol.get(symbol, {"symbol": symbol})
-        out.append({
-            "symbol": symbol,
-            "name": r.get("name") or CORE_INDEX_NAMES[symbol],
-            "last_price": _finite(r.get("last_price") if r.get("last_price") is not None else r.get("close")),
-            "change_pct": _finite(r.get("change_pct")),
-            "change_amount": _finite(r.get("change_amount")),
-        })
+        out.append(
+            {
+                "symbol": symbol,
+                "name": r.get("name") or CORE_INDEX_NAMES[symbol],
+                "last_price": _finite(
+                    r.get("last_price") if r.get("last_price") is not None else r.get("close")
+                ),
+                "change_pct": _finite(r.get("change_pct")),
+                "change_amount": _finite(r.get("change_amount")),
+            }
+        )
     return out
 
 
@@ -338,11 +309,11 @@ def _pct_band_rows(values: list[float]) -> list[dict]:
     for label, low, high in bands:
         count = 0
         for v in values:
-            if low is None and v < high:
-                count += 1
-            elif high is None and v >= low:
-                count += 1
-            elif low is not None and high is not None and low <= v < high:
+            if (
+                (low is None and v < high)  # type: ignore[operator]
+                or (high is None and v >= low)  # type: ignore[operator]
+                or (low is not None and high is not None and low <= v < high)
+            ):
                 count += 1
         out.append({"label": label, "count": count, "pct": count / total * 100})
     return out
@@ -355,6 +326,7 @@ def _build_overview(request: Request, as_of: date | None = None) -> dict:
     使大盘复盘等无 Request 的调用方可复用同一装配逻辑。
     """
     from app.services.market_overview_builder import build_market_overview
+
     return build_market_overview(
         repo=request.app.state.repo,
         quote_service=getattr(request.app.state, "quote_service", None),
@@ -381,14 +353,14 @@ def market_overview(request: Request, as_of: date | None = None):
             flight = Future()
             _inflight[flight_key] = flight
     if not leader:
-        return flight.result()
+        return flight.result()  # type: ignore[union-attr]
     # Both computation and follower waits stay outside the cache lock.
     try:
         data = _build_overview(request, as_of)
     except BaseException as exc:
         with _cache_lock:
             _inflight.pop(flight_key, None)
-        flight.set_exception(exc)
+        flight.set_exception(exc)  # type: ignore[union-attr]
         raise
     with _cache_lock:
         # A refresh may have invalidated this build while it was running.
@@ -397,5 +369,5 @@ def market_overview(request: Request, as_of: date | None = None):
             _cache_key = cache_key
             _cache_ts = now
         _inflight.pop(flight_key, None)
-    flight.set_result(data)
+    flight.set_result(data)  # type: ignore[union-attr]
     return data

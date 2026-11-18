@@ -13,12 +13,14 @@
 - 整日成交量/额均为零且本地日线没有成交的记录单独计数, 不把停牌残留当作缺口。
   日线缺失、读失败或成交字段未知时保留原判定, 避免掩盖真实缺失。
 """
+
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from datetime import date as _date
 from datetime import datetime
+from datetime import time as _time
 from pathlib import Path
 
 import polars as pl
@@ -66,11 +68,11 @@ def _expected_bars_for(trade_date: _date, today: _date, now_hm: tuple[int, int])
         return FULL_DAY_BARS
     h, m = now_hm
     if h < 9 or (h == 9 and m < 30):
-        return 0      # 尚未开盘: 不参与判定
+        return 0  # 尚未开盘: 不参与判定
     if h < 11 or (h == 11 and m <= 30):
         return (h - 9) * 60 + m - 30
     if h < 13:
-        return 120    # 午休
+        return 120  # 午休
     if h < 15:
         return 120 + (h - 13) * 60 + m
     return FULL_DAY_BARS
@@ -78,36 +80,54 @@ def _expected_bars_for(trade_date: _date, today: _date, now_hm: tuple[int, int])
 
 def _daily_active_symbols(daily_dir: Path, date_str: str) -> set[str] | None:
     """用同日股票日线核对成交; None 表示无法核对, 不能排除零成交分钟记录。"""
-    part = daily_dir / f"date={date_str}" / "part.parquet"
-    if not part.exists():
-        return None
+    from app.storage.runtime import require_storage
+
     try:
-        if not {"symbol", "volume", "amount"}.issubset(pl.read_parquet_schema(part)):
-            return None
-        daily = pl.read_parquet(part, columns=["symbol", "volume", "amount"])
+        day = _date.fromisoformat(date_str)
+        daily = require_storage().store.read_daily(
+            daily_dir.name,
+            start=day,
+            end=day,
+            columns=["symbol", "volume", "amount"],
+        )
         if daily.is_empty():
             return None
-        daily = daily.with_columns(pl.col(c).cast(pl.Float64, strict=False) for c in ("volume", "amount"))
+        daily = daily.with_columns(
+            pl.col(c).cast(pl.Float64, strict=False) for c in ("volume", "amount")
+        )
         # 非零或未知字段都不能作为「无成交」依据。零成交分钟在正常交易日也会出现,
         # 因而只在标的整日零成交、且日线没有相反证据时排除该标的日。
-        return set(daily.filter(
-            (pl.col("volume") != 0).fill_null(True) | (pl.col("amount") != 0).fill_null(True)
-        )["symbol"].to_list())
-    except Exception as e:  # noqa: BLE001
-        logger.warning("分钟体检日线核对失败 %s: %s", part, e)
+        return set(
+            daily.filter(
+                (pl.col("volume") != 0).fill_null(True) | (pl.col("amount") != 0).fill_null(True)
+            )["symbol"].to_list()
+        )
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+        logger.warning("分钟体检日线核对失败 %s %s: %s", daily_dir.name, date_str, e)
         return None
 
 
 def _read_minute_activity(part: Path, symbols: list[str] | None) -> pl.DataFrame:
-    frame = pl.scan_parquet(part, hive_partitioning=False)
-    columns = frame.collect_schema().names()
-    if symbols is not None:
-        frame = frame.filter(pl.col("symbol").is_in(symbols))
-    return frame.select("symbol", "datetime", *[c for c in ("volume", "amount") if c in columns]).collect()
+    """读某日分钟K的成交量列（CK 为唯一读源）。"""
+    from app.storage.runtime import require_storage
+
+    table = part.parent.parent.name
+    day = _date.fromisoformat(part.parent.name.removeprefix("date="))
+    frame = require_storage().store.read_minute(
+        table,
+        symbols=symbols,
+        start=datetime.combine(day, _time.min),
+        end=datetime.combine(day, _time.max),
+    )
+    columns = [c for c in ("symbol", "datetime", "volume", "amount") if c in frame.columns]
+    return frame.select(columns)
 
 
 def incomplete_minute_groups(
-    df: pl.DataFrame, daily_dir: Path, date_str: str, expected: int,
+    df: pl.DataFrame,
+    daily_dir: Path,
+    date_str: str,
+    expected: int,
 ) -> tuple[pl.DataFrame, int]:
     """用同一口径判定体检、定日修补复查与详情页中的残缺交易日。"""
     inactive_count = 0
@@ -121,7 +141,9 @@ def incomplete_minute_groups(
             pl.all_horizontal(
                 (pl.col(c).cast(pl.Float64, strict=False) == 0).fill_null(False)
                 for c in ("volume", "amount")
-            ).all().alias("zero_activity")
+            )
+            .all()
+            .alias("zero_activity")
         )
     agg = df.group_by("symbol").agg(aggregations)
     if "zero_activity" in agg.columns and agg["zero_activity"].any():
@@ -135,15 +157,67 @@ def incomplete_minute_groups(
     return agg.filter(pl.col("n") < expected * COMPLETE_RATIO), inactive_count
 
 
-def count_remaining_gaps(minute_dir: Path, trade_date: _date, symbols: list[str], now: datetime) -> int:
+def count_remaining_gaps(
+    minute_dir: Path, trade_date: _date, symbols: list[str], now: datetime
+) -> int:
     """复查刚补拉的分区。源返回空或分区里缺少指定标的时仍算未补齐。"""
     part = minute_dir / f"date={trade_date}" / "part.parquet"
     if not part.exists():
         return len(symbols)
     df = _read_minute_activity(part, symbols)
     expected = _expected_bars_for(trade_date, now.date(), (now.hour, now.minute))
-    bad, _ = incomplete_minute_groups(df, minute_dir.parent / "kline_daily", trade_date.isoformat(), expected)
+    bad, _ = incomplete_minute_groups(
+        df, minute_dir.parent / "kline_daily", trade_date.isoformat(), expected
+    )
     return len(symbols) - df["symbol"].n_unique() + bad.height
+
+
+def _empty_gap_report() -> dict:
+    return {
+        "status": "ok",
+        "scanned_dates": 0,
+        "scanned_symbols": 0,
+        "complete_dates": [],
+        "gaps": [],
+        "summary_by_date": [],
+        "truncated": False,
+        "inactive_symbol_days": 0,
+    }
+
+
+def _gap_rows(bad, date_str: str, expected: int, limit: int) -> list[MinuteGap]:
+    rows: list[MinuteGap] = []
+    for row in bad.sort("n").iter_rows(named=True):
+        rows.append(
+            MinuteGap(
+                symbol=row["symbol"],
+                trade_date=date_str,
+                actual_bars=int(row["n"]),
+                expected_bars=expected,
+                first_time=row["first"].strftime("%H:%M") if row["first"] else None,
+                last_time=row["last"].strftime("%H:%M") if row["last"] else None,
+            )
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _summarize_gaps_by_date(gaps: list[MinuteGap]) -> list[dict]:
+    by_date: dict[str, dict] = {}
+    for gap in gaps:
+        cell = by_date.setdefault(
+            gap.trade_date,
+            {
+                "date": gap.trade_date,
+                "gap_symbols": 0,
+                "missing_bars": 0,
+                "expected_bars": gap.expected_bars,
+            },
+        )
+        cell["gap_symbols"] += 1
+        cell["missing_bars"] += gap.missing_bars
+    return sorted(by_date.values(), key=lambda c: c["date"])
 
 
 def scan_minute_gaps(
@@ -160,11 +234,7 @@ def scan_minute_gaps(
     symbols / dates 为可选过滤 (前端点某只股票或某一天时收窄); 都不传 = 全量扫描。
     """
     if not minute_dir.exists():
-        return {
-            "status": "ok", "scanned_dates": 0, "scanned_symbols": 0,
-            "complete_dates": [], "gaps": [], "summary_by_date": [], "truncated": False,
-            "inactive_symbol_days": 0,
-        }
+        return _empty_gap_report()
 
     date_set = set(dates) if dates else None
 
@@ -185,10 +255,10 @@ def scan_minute_gaps(
             continue
         expected = _expected_bars_for(trade_date, today, now_hm)
         if expected <= 0:
-            continue   # 未开盘的当日分区不判定
+            continue  # 未开盘的当日分区不判定
         try:
             df = _read_minute_activity(part, symbols or None)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.warning("分钟分区读取失败 %s: %s", part, e)
             continue
         scanned_dates += 1
@@ -198,36 +268,20 @@ def scan_minute_gaps(
             continue
         scanned_symbols.update(df["symbol"].unique().to_list())
 
-        bad, inactive = incomplete_minute_groups(df, minute_dir.parent / "kline_daily", date_str, expected)
+        bad, inactive = incomplete_minute_groups(
+            df, minute_dir.parent / "kline_daily", date_str, expected
+        )
         inactive_symbol_days += inactive
         if inactive == df["symbol"].n_unique():
             continue
         if bad.is_empty():
             complete_dates.append(date_str)
             continue
-        for row in bad.sort("n").iter_rows(named=True):
-            gaps.append(MinuteGap(
-                symbol=row["symbol"],
-                trade_date=date_str,
-                actual_bars=int(row["n"]),
-                expected_bars=expected,
-                first_time=row["first"].strftime("%H:%M") if row["first"] else None,
-                last_time=row["last"].strftime("%H:%M") if row["last"] else None,
-            ))
-            if len(gaps) >= limit:
-                truncated = True
-                break
-        if truncated:
+        new_gaps = _gap_rows(bad, date_str, expected, limit - len(gaps))
+        gaps.extend(new_gaps)
+        if len(gaps) >= limit:
+            truncated = True
             break
-
-    # 按日期汇总: 哪天有几只股票残、合计缺多少根
-    by_date: dict[str, dict] = {}
-    for gap in gaps:
-        cell = by_date.setdefault(gap.trade_date, {
-            "date": gap.trade_date, "gap_symbols": 0, "missing_bars": 0, "expected_bars": gap.expected_bars,
-        })
-        cell["gap_symbols"] += 1
-        cell["missing_bars"] += gap.missing_bars
 
     return {
         "status": "ok",
@@ -236,7 +290,7 @@ def scan_minute_gaps(
         "inactive_symbol_days": inactive_symbol_days,
         "complete_dates": sorted(complete_dates),
         "gaps": [g.to_dict() for g in gaps],
-        "summary_by_date": sorted(by_date.values(), key=lambda c: c["date"]),
+        "summary_by_date": _summarize_gaps_by_date(gaps),
         "truncated": truncated,
         "limit": limit,
     }

@@ -164,21 +164,51 @@ def test_in_process_backtests_share_capacity(capacity, monkeypatch, kind):
     assert limiter.in_use == 0
 
 
-@pytest.mark.parametrize("endpoint,body,module_name,function_name,result", [
-    ("/api/pipeline/run", {}, "app.jobs.daily_pipeline", "run_now", {}),
-    ("/api/pipeline/adj-factor/run", {}, "app.jobs.daily_pipeline", "run_adj_factor_sync", {}),
-    ("/api/kline/extend_history", {"value": 1, "unit": "month"},
-     "app.services.extend_history", "run_extend_history", {}),
-    ("/api/kline/repair_daily", {"start_date": "2026-01-01"},
-     "app.services.repair_daily", "run_repair_daily", {}),
-    ("/api/kline/rebuild_enriched", {}, "app.indicators.pipeline", "run_pipeline", 3),
-    ("/api/kline/sync_minute", {"days": 1},
-     "app.services.kline_sync", "sync_and_persist_minute", 3),
-    ("/api/kline/repair_minute_gaps", {"symbols": ["600000.SH"]},
-     "app.services.kline_sync", "sync_and_persist_minute", 3),
-])
+@pytest.mark.parametrize(
+    "endpoint,body,module_name,function_name,result",
+    [
+        ("/api/pipeline/run", {}, "app.jobs.daily_pipeline", "run_now", {}),
+        ("/api/pipeline/adj-factor/run", {}, "app.jobs.daily_pipeline", "run_adj_factor_sync", {}),
+        (
+            "/api/kline/extend_history",
+            {"value": 1, "unit": "month"},
+            "app.services.extend_history",
+            "run_extend_history",
+            {},
+        ),
+        (
+            "/api/kline/repair_daily",
+            {"start_date": "2026-01-01"},
+            "app.services.repair_daily",
+            "run_repair_daily",
+            {},
+        ),
+        ("/api/kline/rebuild_enriched", {}, "app.indicators.pipeline", "run_pipeline", 3),
+        (
+            "/api/kline/sync_minute",
+            {"days": 1},
+            "app.services.kline_sync",
+            "sync_and_persist_minute",
+            3,
+        ),
+        (
+            "/api/kline/repair_minute_gaps",
+            {"symbols": ["600000.SH"]},
+            "app.services.kline_sync",
+            "sync_and_persist_minute",
+            3,
+        ),
+    ],
+)
 def test_api_jobs_wait_before_computing(
-    capacity, monkeypatch, tmp_path, endpoint, body, module_name, function_name, result,
+    capacity,
+    monkeypatch,
+    tmp_path,
+    endpoint,
+    body,
+    module_name,
+    function_name,
+    result,
 ):
     import importlib
 
@@ -208,8 +238,6 @@ def test_api_jobs_wait_before_computing(
         refresh_cache=lambda: None,
         get_index_symbol_set=lambda: set(),
         resolve_asset_type=lambda _: "stock",
-        # rebuild_enriched 收尾经 repo.refresh_view 重建视图 (不再直连 db.execute)
-        refresh_view=lambda *args, **kwargs: True,
     )
     app.state.capabilities = SimpleNamespace(has=lambda _: True)
     assert limiter.acquire("normal", timeout=0)
@@ -290,14 +318,17 @@ def test_background_pipeline_entries_share_capacity(capacity, monkeypatch, tmp_p
     def check(*args, **kwargs):
         compute(*args, **kwargs)
         return {"repairable_count": 0}
+
     monkeypatch.setattr(integrity_check, "run_check", check)
     assert limiter.acquire("normal", timeout=0)
     with ThreadPoolExecutor(max_workers=1) as pool:
         if entry == "scheduled":
             future = pool.submit(daily_pipeline._run_tracked, compute, "test")
         else:
-            state = SimpleNamespace(repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
-                                    capabilities=SimpleNamespace(has=lambda _: True))
+            state = SimpleNamespace(
+                repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
+                capabilities=SimpleNamespace(has=lambda _: True),
+            )
             data_integrity.launch_integrity_repair(state, date(2026, 1, 1), "test")
             future = None
         try:
@@ -343,7 +374,6 @@ def test_rebuild_enriched_refreshes_repo_memory_cache(capacity, monkeypatch, tmp
         db=SimpleNamespace(execute=lambda *args: None),
         clear_cache=lambda: calls.append("clear"),
         refresh_cache=lambda: calls.append("refresh"),
-        refresh_view=lambda *args, **kwargs: True,
     )
     app.state.capabilities = SimpleNamespace(has=lambda _: True)
     with TestClient(app) as client:

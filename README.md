@@ -116,7 +116,7 @@
 | **📦 页面插件** | 页面打包产物上传即挂载, 免重建宿主, 刷新生效 |
 | **🎛️ 菜单设置** | 显隐/排序 + 内置/自定义/扩展三类管理与架构徽标 |
 
-> 📄 **19 个页面的完整功能细节**见 [docs/features.md](./docs/features.md) 与 [screenshots/](./screenshots/README.md) —— 上表之外, 回测四种研究视图、异动三时间线、页面插件运行时分发等都在其中。
+> 📄 **19 个页面的完整功能细节**见 [docs/base_v1.0/features.md](docs/base_v1.0/features.md) 与 [screenshots/](./screenshots/README.md) —— 上表之外, 回测四种研究视图、异动三时间线、页面插件运行时分发等都在其中。
 
 ---
 
@@ -195,7 +195,7 @@
 | **核心域 · 8**      | 数据底座 / 能力路由 / 订阅锚点(自选) / 策略与回测 / 因子与挖掘 / 环境数据生产 / 监控推送管道 / 扩展数据存储 + 认证配置 | 被多个模块消费其数据与语义,自身不依赖外围 |
 | **扩展域 · 5 通道** | 数据源插件 · 扩展数据表 · 自定义策略/信号 · 页面扩展(单文件源码 + 运行时页面插件) · 后端 custom 模块                       | 只消费核心契约,可整体替换/移除而不伤核心  |
 
-设置 → 菜单设置里每个页面带 `核心 / 扩展` 架构徽标与 `内置 / 自定义 / 扩展` 类型徽标;11 个官方页面(概念/行业/个股/财务分析、监控中心、异动、持仓提醒、模拟盘、信号库、复盘、连板梯队)已全部落地为 `frontend/src/custom/<ns>/extension.tsx` **单文件扩展** —— 删除目录即卸载、复制目录即导入;例如监控中心页面可换,规则引擎与推送管道属核心照常运行。新装默认隐藏这些扩展页面(菜单设置一键开启),老用户升级自动保持原菜单位置与排序。免宿主重建的运行时分发走**页面插件**(设置 → 页面插件,契约见 [docs/page-sdk.md](./docs/page-sdk.md))。详见 [docs/open-platform-plan.md](./docs/open-platform-plan.md)。
+设置 → 菜单设置里每个页面带 `核心 / 扩展` 架构徽标与 `内置 / 自定义 / 扩展` 类型徽标;11 个官方页面(概念/行业/个股/财务分析、监控中心、异动、持仓提醒、模拟盘、信号库、复盘、连板梯队)已全部落地为 `frontend/src/custom/<ns>/extension.tsx` **单文件扩展** —— 删除目录即卸载、复制目录即导入;例如监控中心页面可换,规则引擎与推送管道属核心照常运行。新装默认隐藏这些扩展页面(菜单设置一键开启),老用户升级自动保持原菜单位置与排序。免宿主重建的运行时分发走**页面插件**(设置 → 页面插件,契约见 [docs/base_v1.0/page-sdk.md](docs/base_v1.0/page-sdk.md))。详见 [docs/base_v1.0/open-platform-plan.md](docs/base_v1.0/open-platform-plan.md)。
 
 ### 关键机制
 
@@ -287,9 +287,9 @@
 | **数据写闭环**  | `write:ext` 程序化写入扩展表行数据(与内置数据同台分析),表结构锁死在管理面                                                                                                      |
 | **SSE 事件流**  | 60 秒一次性票据订阅实时告警推送,票据只继承 scope 不放大权限                                                                                                                    |
 | **MCP 服务器**  | 12 个精选工具,按 Token scope 暴露;模拟盘交易刻意不交给 AI                                                                                                                      |
-| **示例与文档**  | [examples/open-api](./examples/open-api/README.md) 四个零依赖可运行示例 · [docs/features.md → 开放接口](./docs/features.md) · [开放平台设计方案](./docs/open-platform-plan.md) |
+| **示例与文档**  | [examples/open-api](./examples/open-api/README.md) 四个零依赖可运行示例 · [docs/base_v1.0/features.md → 开放接口](docs/base_v1.0/features.md) · [开放平台设计方案](docs/base_v1.0/open-platform-plan.md) |
 
-> 开放接口面向**本部署的二次开发与本地工具集成**(自有页面、脚本、机器人、MCP 客户端),不作为数据对外分发通道;公网部署默认仅接受内网 Token 调用,详见 [configuration.md → 开放接口网络门禁](./docs/configuration.md#开放接口网络门禁默认仅本机内网)。
+> 开放接口面向**本部署的二次开发与本地工具集成**(自有页面、脚本、机器人、MCP 客户端),不作为数据对外分发通道;公网部署默认仅接受内网 Token 调用,详见 [configuration.md → 开放接口网络门禁](docs/base_v1.0/configuration.md#开放接口网络门禁默认仅本机内网)。
 
 ```bash
 # 十行内跑通第一个调用
@@ -352,12 +352,24 @@ curl -H "Authorization: Bearer tsp_xxxx" \
 
 <div align="center">
 
-### 已装 Docker?一条命令跑起来 ⬇️
+### 已装 Docker?两条命令跑起来 ⬇️(面板 + ClickHouse 存储层)
 
 ```bash
-docker run -d --name tsp \
+# 1) ClickHouse(数据存 ./ckdata, 库 tsp, 账号 tsp/tsp123456)
+docker network create tsp-net 2>/dev/null || true
+docker run -d --name tsp-clickhouse --network tsp-net \
+  -e CLICKHOUSE_USER=tsp -e CLICKHOUSE_PASSWORD=tsp123456 \
+  -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
+  -e CLICKHOUSE_DB=tsp \
+  -v "${PWD}/ckdata:/var/lib/clickhouse" \
+  clickhouse/clickhouse-server:24.8.8-alpine
+
+# 2) 面板(连不上 CK 会直接启动失败, 这是有意的 fail-closed)
+docker run -d --name tsp --network tsp-net \
   -p 3018:3018 \
   -e DATA_DIR=/app/data \
+  -e CLICKHOUSE_URL=http://tsp-clickhouse:8123 \
+  -e CLICKHOUSE_USER=tsp -e CLICKHOUSE_PASSWORD=tsp123456 \
   -v "${PWD}/data:/app/data" \
   ghcr.io/shy3130/tick-stock-panel:latest
 ```
@@ -372,7 +384,7 @@ docker run -d --name tsp \
 
 | 方式                                  | 适合谁                      | 前置要求                                                                             |
 | :------------------------------------ | :-------------------------- | :----------------------------------------------------------------------------------- |
-| **[A · GHCR 现成镜像](#install-image)**(即上方一条命令) | 多数用户，拿来即用 ⭐ 推荐 | Docker |
+| **[A · GHCR 现成镜像](#install-image)**(即上方两条命令) | 多数用户，拿来即用 ⭐ 推荐 | Docker |
 | **[B · Compose 本地构建](#install-compose)** | 跑自己改过的代码 / 全套挂载 | Docker |
 | **[C · 本机 AI 代部署](#install-ai)** | 完全不想碰命令行 | 任一本机 AI 编程助手 |
 | **[D · Dev 模式](#install-dev)** | 二次开发 | Python ≥ 3.11 · Node ≥ 20 · [uv](https://docs.astral.sh/uv/) · pnpm(`npm i -g pnpm`) |
@@ -384,12 +396,14 @@ docker run -d --name tsp \
 
 本项目每次推送都由 GitHub Actions 自动构建多架构镜像并发布到 GHCR,拿来即用:
 
-- 需要配置时:从 [.env.example](./.env.example) 复制出 `.env`,命令里加 `--env-file .env`,保留 `-e DATA_DIR=/app/data` 与数据挂载。自定义目录时,同时修改 `DATA_DIR` 和挂载目标。
-- 升级前若凭据实际保存在容器的 `/data` 而非已挂载目录,请先按[旧容器数据备份说明](./docs/deployment.md#docker-升级前核对数据目录)备份迁出,再重建容器。
-- Linux `docker run` 部署:容器内要通过 `host.docker.internal` 访问宿主机服务(如自定义数据源)时,命令需加 `--add-host=host.docker.internal:host-gateway`;升级重建容器时务必保留 `-v ${PWD}/data:/app/data` 挂载并提前备份 `data/`,否则容器层数据会随旧容器静默丢失(详见 [docs/deployment.md](./docs/deployment.md))。
+- **CK 是必需依赖**:标的/行情/财务都在 ClickHouse,面板启动时连不上会直接失败。CK 容器固定同一网络(`tsp-net`),面板用 `http://tsp-clickhouse:8123` 连接;CK 数据在 `./ckdata/`,重建面板容器不影响。
+- 需要配置时:从 [.env.example](./.env.example) 复制出 `.env`,命令里加 `--env-file .env`,保留 `-e DATA_DIR=/app/data`、`-e CLICKHOUSE_URL=http://tsp-clickhouse:8123` 与数据挂载。自定义目录时,同时修改 `DATA_DIR` 和挂载目标。
+- 需要测试库 `tsp_test`、或改用 compose 编排(预建库+内存上限等)时,用仓库里的 `docker-compose.yml` 或 `deploy/clickhouse/`,详见 [docs/base_v1.0/deployment.md](docs/base_v1.0/deployment.md)。
+- 升级前若凭据实际保存在容器的 `/data` 而非已挂载目录,请先按[旧容器数据备份说明](docs/base_v1.0/deployment.md#docker-升级前核对数据目录)备份迁出,再重建容器。
+- Linux `docker run` 部署:容器内要通过 `host.docker.internal` 访问宿主机服务(如自定义数据源)时,命令需加 `--add-host=host.docker.internal:host-gateway`;升级重建容器时务必保留 `-v ${PWD}/data:/app/data` 挂载并提前备份 `data/`,否则容器层数据会随旧容器静默丢失(详见 [docs/base_v1.0/deployment.md](docs/base_v1.0/deployment.md))。
 - 跑自己改过的代码:fork 后到仓库 **Actions** 页启用 workflow(fork 默认禁用),构建出的 `ghcr.io/<你的用户名>/tick-stock-panel` 用法相同。
 - 想用 compose 编排(挂载 `.env` / `tiers.yaml`):参考 [docker-compose.yml](./docker-compose.yml),把 `build:` 段换成 `image: ghcr.io/shy3130/tick-stock-panel:latest`。
-- 现成镜像默认不含老 CPU 兼容内核(体积考虑),有此需求请用方式 B 自构建,详见 [docs/deployment.md](./docs/deployment.md)。
+- 现成镜像默认不含老 CPU 兼容内核(体积考虑),有此需求请用方式 B 自构建,详见 [docs/base_v1.0/deployment.md](docs/base_v1.0/deployment.md)。
 
 <a id="install-compose"></a>
 
@@ -400,6 +414,8 @@ cp .env.example .env
 docker compose up --build
 # 打开 http://localhost:3018
 ```
+
+Compose 会一并启动 ClickHouse 容器(`clickhouse/clickhouse-server:24.8.8-alpine`,默认 `tsp`/`tsp123456`),面板等它健康后才启动;CK 数据落在 `./ckdata/`。宿主 8123 已被其它 ClickHouse 占用时,在 `.env` 设 `CLICKHOUSE_HTTP_PORT=18123`。
 
 <details>
 <summary><b>🐳 Codex CLI 挂载、版本覆盖与插件开关(点开查看)</b></summary>
@@ -422,7 +438,7 @@ CODEX_CLI_VERSION=0.144.3 docker compose up --build
 
 </details>
 
-> 📖 Docker 进阶、老 CPU 兼容、访问密码设置等见 [docs/deployment.md](./docs/deployment.md)。
+> 📖 Docker 进阶、老 CPU 兼容、访问密码设置等见 [docs/base_v1.0/deployment.md](docs/base_v1.0/deployment.md)。
 
 <a id="install-ai"></a>
 
@@ -557,7 +573,7 @@ AI_API_KEY=                    # 留空 = 关闭 AI;填 Key 启用策略生成�
 PORT=3018                      # 服务端口
 ```
 
-> 📖 完整配置项(数据源档位、AI、服务、密码、老 CPU 兼容)见 [docs/configuration.md](./docs/configuration.md)。
+> 📖 完整配置项(数据源档位、AI、服务、密码、老 CPU 兼容)见 [docs/base_v1.0/configuration.md](docs/base_v1.0/configuration.md)。
 
 ---
 
@@ -592,25 +608,25 @@ PORT=3018                      # 服务端口
 
 | 文档                                                                                               | 内容                                                                 |
 | :--- | :--- |
-| [部署指南](./docs/deployment.md) | 部署方式(Dev / Docker / GH Actions)、老 CPU 兼容、更新代码、访问密码 |
-| [配置说明](./docs/configuration.md) | 所有 `.env` 配置项详解(数据源、AI、服务、密码、数据目录) |
-| [完整功能说明](./docs/features.md) | 各功能模块详细说明(策略/指标/回测/监控/个股分析/数据扩展/开放接口) |
+| [部署指南](docs/base_v1.0/deployment.md) | 部署方式(Dev / Docker / GH Actions)、老 CPU 兼容、更新代码、访问密码 |
+| [配置说明](docs/base_v1.0/configuration.md) | 所有 `.env` 配置项详解(数据源、AI、服务、密码、数据目录) |
+| [完整功能说明](docs/base_v1.0/features.md) | 各功能模块详细说明(策略/指标/回测/监控/个股分析/数据扩展/开放接口) |
 
 ### 策略与研究
 
 | 文档                                                                                               | 内容                                                                 |
 | :--- | :--- |
-| [策略体系](./docs/strategy.md) | 策略体系(全自定义化 + 三种扩展方式 + 文件结构) |
-| [AI 策略迭代](./docs/strategy-iteration.md) | AI 策略迭代协议:台账 / 证据包 / 门槛判定 / 提示词卡片 |
-| [因子与策略挖掘](./docs/mining.md) | 因子与策略挖掘口径、防泄漏、任务隔离和发布边界 |
-| [市场环境](./docs/market-phase.md) | 市场情绪周期 6 阶段与概念/行业主线识别的口径与设计 |
+| [策略体系](docs/base_v1.0/strategy.md) | 策略体系(全自定义化 + 三种扩展方式 + 文件结构) |
+| [AI 策略迭代](docs/base_v1.0/strategy-iteration.md) | AI 策略迭代协议:台账 / 证据包 / 门槛判定 / 提示词卡片 |
+| [因子与策略挖掘](docs/base_v1.0/mining.md) | 因子与策略挖掘口径、防泄漏、任务隔离和发布边界 |
+| [市场环境](docs/base_v1.0/market-phase.md) | 市场情绪周期 6 阶段与概念/行业主线识别的口径与设计 |
 | [策略编写规范](./backend/app/strategy/prompts/strategy-guide.md) | 策略开发完整规范(AI 生成与手写) |
 
 ### 开放接口与 AI 集成
 
 | 文档                                                                                               | 内容                                                                 |
 | :--- | :--- |
-| [开放平台设计](./docs/open-platform-plan.md) | 开放平台设计:核心域/扩展域边界、Token 体系、Tier 契约与分期路线 |
+| [开放平台设计](docs/base_v1.0/open-platform-plan.md) | 开放平台设计:核心域/扩展域边界、Token 体系、Tier 契约与分期路线 |
 | [MCP 服务器](./mcp-server/README.md) | MCP 服务器配置(AI 客户端接入)与工具清单 |
 | [开放接口示例](./examples/open-api/README.md) | 开放接口可运行示例(行情/写入/回测/事件流) |
 
@@ -618,11 +634,11 @@ PORT=3018                      # 服务端口
 
 | 文档                                                                                               | 内容                                                                 |
 | :--- | :--- |
-| [自定义数据源](./docs/custom-data-source.md) | 自定义数据源接入、能力路由契约、YAML 配置与 mock 联调示例 |
-| [数据源插件开发](./docs/plugin-development.md) | 数据源插件开发规范(以 fuyao 为参考实现) |
-| [外部数据源插件安装](./docs/external-data-source-packages.md) | ZIP 安装、Key 配置、版本维护和开发模板 |
-| [二次开发指南](./docs/secondary-development.md) | 代码二次开发、前端插槽、后端策略接口与 AI 开发模板 |
-| [页面 SDK](./docs/page-sdk.md) | 页面插件开发指南:产物契约、能力桥 ctx、打包与上传、安全边界 |
+| [自定义数据源](docs/base_v1.0/custom-data-source.md) | 自定义数据源接入、能力路由契约、YAML 配置与 mock 联调示例 |
+| [数据源插件开发](docs/base_v1.0/plugin-development.md) | 数据源插件开发规范(以 fuyao 为参考实现) |
+| [外部数据源插件安装](docs/base_v1.0/external-data-source-packages.md) | ZIP 安装、Key 配置、版本维护和开发模板 |
+| [二次开发指南](docs/base_v1.0/secondary-development.md) | 代码二次开发、前端插槽、后端策略接口与 AI 开发模板 |
+| [页面 SDK](docs/base_v1.0/page-sdk.md) | 页面插件开发指南:产物契约、能力桥 ctx、打包与上传、安全边界 |
 
 ---
 

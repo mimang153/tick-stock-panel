@@ -1,0 +1,89 @@
+# 开发环境工具链镜像: 只含 Python/Node/pnpm/uv 工具链, 不含任何业务代码。
+# 源码由 docker-compose.dev.yml 挂载进容器, 依赖在容器内安装并缓存到宿主机,
+# 改代码无需重建镜像。与生产 Dockerfile(代码烘焙进镜像)互补, 互不影响。
+#
+# 构建参数(默认全走国内镜像, 海外网络可 USE_CN_MIRROR=0 切回官方源):
+#   docker build -f Dockerfile.dev -t tsp-dev-tools .
+ARG USE_CN_MIRROR=1
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ARG NODE_VERSION=20.18.1
+ARG PYPI_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PYPI_FALLBACK=https://mirrors.aliyun.com/pypi/simple
+
+FROM python:3.11-slim
+
+ARG USE_CN_MIRROR
+ARG NPM_REGISTRY
+ARG NODE_VERSION
+ARG PYPI_INDEX
+ARG PYPI_FALLBACK
+
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo "$TZ" > /etc/timezone
+
+# apt 换阿里云镜像(官方 deb.debian.org 部分国内网络下极慢, 与生产 Dockerfile 同一策略)。
+# ca-certificates: HTTPS 拉取 Node 二进制; xz-utils: 解压 Node 发行包;
+# tesseract-ocr: 自选截图导入依赖(与生产镜像对齐, 始终安装)。
+RUN if [ "$USE_CN_MIRROR" = "1" ]; then \
+        sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null || true; \
+    fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl xz-utils tesseract-ocr tesseract-ocr-eng \
+    && rm -rf /var/lib/apt/lists/* \
+    && tesseract --version
+
+# 安装 uv —— 与生产 Dockerfile 相同的三重兜底: 主源 → 备用源 → 官方源,
+# 避免单一镜像同步延迟/故障导致构建失败。
+RUN if [ "$USE_CN_MIRROR" = "1" ]; then \
+      pip install --no-cache-dir uv -i "$PYPI_INDEX" || \
+      pip install --no-cache-dir uv -i "$PYPI_FALLBACK" || \
+      pip install --no-cache-dir uv; \
+    else \
+      pip install --no-cache-dir uv; \
+    fi
+
+# Node 20 预编译二进制, 不走 nodesource(国内慢): 国内从 npmmirror 的 Node
+# 发行镜像拉取, 海外从 nodejs.org 官方源拉取。amd64/arm64 双架构支持。
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) node_arch=x64 ;; \
+      arm64) node_arch=arm64 ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    if [ "$USE_CN_MIRROR" = "1" ]; then \
+      node_base="https://npmmirror.com/mirrors/node"; \
+    else \
+      node_base="https://nodejs.org/dist"; \
+    fi; \
+    curl -fsSL "$node_base/v$NODE_VERSION/node-v$NODE_VERSION-linux-$node_arch.tar.xz" -o /tmp/node.tar.xz; \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1; \
+    rm -f /tmp/node.tar.xz; \
+    node --version; npm --version
+
+# pnpm 9: 复用生产 Dockerfile 的做法 —— 用 npm 安装 pnpm(npm 会读取 registry
+# 配置), 彻底绕开 corepack 不读镜像源的问题。
+RUN npm config set registry "$NPM_REGISTRY" \
+    && npm install -g pnpm@9 \
+    && pnpm --version
+
+# 缓存目录显式固定, 与 docker-compose.dev.yml 的宿主机缓存挂载一一对应:
+#   npm_config_store_dir → /root/.local/share/pnpm/store  (pnpm 包内容仓库)
+#   npm_config_cache     → /root/.npm                     (npm/pnpm 元数据缓存)
+#   UV_CACHE_DIR         → /root/.cache/uv                (Python 包缓存)
+# npm_config_registry 运行期由 compose 注入, 此处不固定, 便于构建参数与运行期分开调整。
+ENV npm_config_store_dir=/root/.local/share/pnpm/store \
+    npm_config_cache=/root/.npm \
+    UV_CACHE_DIR=/root/.cache/uv \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# 开发容器同时起 uvicorn(3018) + vite; /health 免认证, 用标准库探测避免依赖 curl。
+# 启动宽限 60s 覆盖首次装依赖, 之后每 30s 探一次。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3018/health', timeout=4)" || exit 1
+
+# 容器内直接复用仓库的 ./dev.sh 启动器: 依赖检查/安装、uvicorn --reload、
+# vite HMR、Ctrl-C 联动退出全部由它处理, 不另写入口脚本。
+CMD ["./dev.sh"]

@@ -1,4 +1,5 @@
 """ETF 分钟补齐必须写入 ETF 仓库，并能被列表和详情立即读回。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -21,22 +22,34 @@ STOCK = "600519.SH"
 
 
 def _bars(symbol: str, day: date = DAY) -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": [symbol, symbol],
-        "datetime": [datetime.combine(day, datetime.min.time()).replace(hour=9, minute=minute) for minute in (31, 32)],
-        "open": [0.75, 0.76], "high": [0.76, 0.77], "low": [0.74, 0.75],
-        "close": [0.76, 0.77], "volume": [100.0, 200.0], "amount": [76.0, 154.0],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": [symbol, symbol],
+            "datetime": [
+                datetime.combine(day, datetime.min.time()).replace(hour=9, minute=minute)
+                for minute in (31, 32)
+            ],
+            "open": [0.75, 0.76],
+            "high": [0.76, 0.77],
+            "low": [0.74, 0.75],
+            "close": [0.76, 0.77],
+            "volume": [100.0, 200.0],
+            "amount": [76.0, 154.0],
+        }
+    )
 
 
 @pytest.fixture
-def market(tmp_path, monkeypatch):
-    repo = KlineRepository(DataStore(tmp_path))
+def market(tmp_path, monkeypatch, ck_runtime):
+    # 分钟写入/读取已切 CK：注入 storage 并初始化全局 runtime
+    repo = KlineRepository(DataStore(tmp_path), storage=ck_runtime)
     monkeypatch.setattr(repo, "get_etf_symbol_set", lambda: {ETF})
     monkeypatch.setattr(repo, "get_index_symbol_set", lambda: set())
     capset = CapabilitySet()
     capset.grant(Cap.KLINE_MINUTE_BATCH)
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo, capabilities=capset)), headers={})
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(repo=repo, capabilities=capset)), headers={}
+    )
     monkeypatch.setattr(kline_api, "_minute_allowed", lambda _: True)
     monkeypatch.setattr(kline_api, "cn_today", lambda: DAY)
     monkeypatch.setattr(kline_api, "cn_now", lambda: datetime(2026, 11, 5, 9, 32))
@@ -69,7 +82,9 @@ def test_etf_detail_sync_is_visible_to_detail_and_list(market):
     latest = kline_api.get_minute(request, ETF, trade_date=DAY, live=False)
     assert latest["source"] == "local"
     assert len(latest["rows"]) == 2
-    batch = json.loads(kline_api.get_minute_batch(request, {"symbols": [ETF], "date": str(DAY)}).body)
+    batch = json.loads(
+        kline_api.get_minute_batch(request, {"symbols": [ETF], "date": str(DAY)}).body
+    )
     assert len(batch["data"][ETF]) == 2
     assert repo.latest_minute_date(ETF, asset_type="etf") == DAY
     assert calls == [([ETF], "etf")]
@@ -77,7 +92,9 @@ def test_etf_detail_sync_is_visible_to_detail_and_list(market):
 
 def test_mixed_minute_sync_keeps_asset_stores_separate(market):
     repo, request, calls = market
-    written = kline_sync.sync_and_persist_minute([STOCK, ETF], repo, request.app.state.capabilities, force_full_days=True)
+    written = kline_sync.sync_and_persist_minute(
+        [STOCK, ETF], repo, request.app.state.capabilities, force_full_days=True
+    )
 
     assert written == 4
     assert calls == [([STOCK], "stock"), ([ETF], "etf")]
@@ -119,7 +136,8 @@ def test_etf_sync_uses_its_own_minute_window(market, monkeypatch, extend_backwar
     for asset, symbol, day in (("stock", STOCK, DAY), ("etf", ETF, previous)):
         table = "kline_etf_minute" if asset == "etf" else "kline_minute"
         kline_sync._write_minute_partition(_bars(symbol, day), repo.store.data_dir / table)
-        repo.refresh_view(table, f"{repo.store.data_dir}/{table}/**/*.parquet")
+        # minute_bounds 读 CK，本地分区造数需同步 CK，否则回退真实时钟
+        repo.storage.write_minute(table, _bars(symbol, day))
     windows = []
 
     def capture(symbols, **kwargs):
@@ -128,7 +146,11 @@ def test_etf_sync_uses_its_own_minute_window(market, monkeypatch, extend_backwar
 
     monkeypatch.setattr(kline_sync, "sync_minute_batch", capture)
     kline_sync.sync_and_persist_minute(
-        [ETF], repo, request.app.state.capabilities, asset_type="etf", extend_backward=extend_backward,
+        [ETF],
+        repo,
+        request.app.state.capabilities,
+        asset_type="etf",
+        extend_backward=extend_backward,
     )
     boundary = windows[0]["end_time" if extend_backward else "start_time"]
     assert boundary.date() == previous

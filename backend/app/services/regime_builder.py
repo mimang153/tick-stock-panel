@@ -11,6 +11,7 @@
 - overview 面向单日详情(实时总览), 重算指标。
 - regime 面向多日聚合统计(时序分析), 只聚合不重算。
 """
+
 from __future__ import annotations
 
 import logging
@@ -32,17 +33,17 @@ logger = logging.getLogger(__name__)
 # 全量回填补算会爆内存; 这两维对历史择时影响小, 且用户可在看板单独查看。
 
 WEIGHTS = {
-    "profit": 0.35,        # 赚钱(涨家数/均涨幅/中位涨幅/强弱差) — 最反映赚钱难度
-    "speculation": 0.25,   # 投机(涨停数/封板率/连板高度)
-    "resilience": 0.20,    # 抗跌(跌家数/大跌股占比) — 识别弱势的关键, 原模型缺失
-    "trend": 0.20,         # 趋势(指数涨幅/MA20上方占比)
+    "profit": 0.35,  # 赚钱(涨家数/均涨幅/中位涨幅/强弱差) — 最反映赚钱难度
+    "speculation": 0.25,  # 投机(涨停数/封板率/连板高度)
+    "resilience": 0.20,  # 抗跌(跌家数/大跌股占比) — 识别弱势的关键, 原模型缺失
+    "trend": 0.20,  # 趋势(指数涨幅/MA20上方占比)
 }
 
 # 离散状态阈值(与看板情绪分统一)
-STATE_STRONG = 70       # >= 强势
+STATE_STRONG = 70  # >= 强势
 STATE_LEAN_STRONG = 55  # 55-70 偏强
-STATE_RANGE = 45        # 45-55 震荡
-STATE_LEAN_WEAK = 30    # 30-45 偏弱
+STATE_RANGE = 45  # 45-55 震荡
+STATE_LEAN_WEAK = 30  # 30-45 偏弱
 # < 30 弱势
 
 STATE_LABELS = {
@@ -85,7 +86,7 @@ def _compute_subscores(metrics: dict) -> dict:
     # _score 的 low/high 用 A 股 2022-2026 真实 p15/p85 分位数校准,
     # 使各子分 ~70% 数据落在 15-85 分, 综合分呈健康钟形(避免两极化/挤压震荡)。
     profit = (
-        _score(metrics.get("up_pct", 50), 21, 75) * 0.45      # 涨家数占比 p15/p85
+        _score(metrics.get("up_pct", 50), 21, 75) * 0.45  # 涨家数占比 p15/p85
         + _score(metrics.get("avg_pct", 0) * 100, -1.2, 1.3) * 0.25  # 均涨幅
         + _score(metrics.get("median_pct", 0) * 100, -1.2, 1.3) * 0.20  # 中位涨幅(同均涨幅分位)
         + _score(metrics.get("strong_diff_pct", 0), -13, 14) * 0.10  # 强弱差 p15/p85
@@ -93,7 +94,7 @@ def _compute_subscores(metrics: dict) -> dict:
 
     # 投机维度
     speculation = (
-        _score(metrics.get("limit_up", 0), 35, 97) * 0.30     # 涨停数 p15/p85
+        _score(metrics.get("limit_up", 0), 35, 97) * 0.30  # 涨停数 p15/p85
         + _score((metrics.get("seal_rate", 0.5) or 0.5) * 100, 57, 75) * 0.40  # 封板率 p15/p85
         + _score(metrics.get("max_consecutive", 0), 4, 9) * 0.30  # 连板高度 p15/p85
     )
@@ -107,7 +108,8 @@ def _compute_subscores(metrics: dict) -> dict:
     # 趋势维度
     trend = (
         _score(metrics.get("index_pct", 0) * 100, -2.5, 2.5) * 0.50  # 指数涨幅(对称)
-        + _score((metrics.get("above_ma20_pct", 0.5) or 0.5) * 100, 22, 76) * 0.50  # MA20上方 p15/p85
+        + _score((metrics.get("above_ma20_pct", 0.5) or 0.5) * 100, 22, 76)
+        * 0.50  # MA20上方 p15/p85
     )
 
     score = (
@@ -117,8 +119,10 @@ def _compute_subscores(metrics: dict) -> dict:
         + trend * WEIGHTS["trend"]
     )
     return {
-        "profit": profit, "speculation": speculation,
-        "resilience": resilience, "trend": trend,
+        "profit": profit,
+        "speculation": speculation,
+        "resilience": resilience,
+        "trend": trend,
         "score": max(0, min(100, score)),
     }
 
@@ -155,6 +159,165 @@ def classify_state(metrics: dict) -> tuple[str, int]:
 
 # ───────────────────────── 批量聚合 ─────────────────────────
 
+
+def _regime_base_agg_exprs(avail):
+    return [
+        pl.col("change_pct").gt(0).sum().alias("up_count")
+        if "change_pct" in avail
+        else pl.lit(0).alias("up_count"),
+        pl.col("change_pct").lt(0).sum().alias("down_count")
+        if "change_pct" in avail
+        else pl.lit(0).alias("down_count"),
+        pl.len().alias("total_count"),
+        # 涨跌幅分布(赚钱/抗跌维度所需) — 全部向量化, 一次算出
+        *(
+            [
+                pl.col("change_pct").mean().alias("avg_pct"),
+                pl.col("change_pct").median().alias("median_pct"),
+                pl.col("change_pct").ge(0.03).sum().alias("strong_up_count"),
+                pl.col("change_pct").le(-0.03).sum().alias("strong_down_count"),
+            ]
+            if "change_pct" in avail
+            else [
+                pl.lit(0).alias("avg_pct"),
+                pl.lit(0).alias("median_pct"),
+                pl.lit(0).alias("strong_up_count"),
+                pl.lit(0).alias("strong_down_count"),
+            ]
+        ),
+        *(
+            [pl.col("signal_limit_up").cast(pl.Boolean).sum().alias("limit_up")]
+            if "signal_limit_up" in avail
+            else [pl.lit(0).alias("limit_up")]
+        ),
+        *(
+            [pl.col("signal_limit_down").cast(pl.Boolean).sum().alias("limit_down")]
+            if "signal_limit_down" in avail
+            else [pl.lit(0).alias("limit_down")]
+        ),
+        *(
+            [pl.col("signal_broken_limit_up").cast(pl.Boolean).sum().alias("broken_limit")]
+            if "signal_broken_limit_up" in avail
+            else [pl.lit(0).alias("broken_limit")]
+        ),
+        *(
+            [pl.col("consecutive_limit_ups").max().alias("max_consecutive")]
+            if "consecutive_limit_ups" in avail
+            else [pl.lit(0).alias("max_consecutive")]
+        ),
+        *(
+            [pl.col("amount").sum().alias("total_amount")]
+            if "amount" in avail
+            else [pl.lit(0).alias("total_amount")]
+        ),
+        *(
+            [pl.col("amount").mean().alias("avg_amount")]
+            if "amount" in avail
+            else [pl.lit(0).alias("avg_amount")]
+        ),
+    ]
+
+
+def _regime_ma20_agg_exprs(has_ma20):
+    # MA20 上方占比: 向量化一次算出 (避免逐日 filter 扫全表)。
+    # 仅统计 ma20 有效(非空且>0)的行中, close>ma20 的占比。
+    return (
+        [
+            pl.when(
+                pl.col("ma20").is_not_null()
+                & (pl.col("ma20") > 0)
+                & (pl.col("close") > pl.col("ma20"))
+            )
+            .then(1)
+            .otherwise(None)
+            .sum()
+            .alias("_above_cnt"),
+            pl.when(pl.col("ma20").is_not_null() & (pl.col("ma20") > 0))
+            .then(1)
+            .otherwise(None)
+            .sum()
+            .alias("_valid_cnt"),
+        ]
+        if has_ma20
+        else []
+    )
+
+
+def _regime_row_output(r, index_pct_map) -> dict:
+    from app.services.market_phase import finalize_ladder_row
+
+    up = r.get("up_count", 0) or 0
+    down = r.get("down_count", 0) or 0
+    total = r.get("total_count", 0) or 0
+    limit_up = r.get("limit_up", 0) or 0
+    broken = r.get("broken_limit", 0) or 0
+    # MA20 上方占比: 来自向量化聚合 (None→0)
+    valid_cnt = r.get("_valid_cnt") or 0
+    above_cnt = r.get("_above_cnt") or 0
+    ma20_above = (above_cnt / valid_cnt) if valid_cnt > 0 else 0.0
+    # 涨跌幅分布(占比, 0-100)
+    up_pct = (up / total * 100) if total > 0 else 0.0
+    down_pct = (down / total * 100) if total > 0 else 0.0
+    strong_up_pct = ((r.get("strong_up_count", 0) or 0) / total * 100) if total > 0 else 0.0
+    strong_down_pct = ((r.get("strong_down_count", 0) or 0) / total * 100) if total > 0 else 0.0
+    avg_pct = r.get("avg_pct", 0.0) or 0.0
+    median_pct = r.get("median_pct", 0.0) or 0.0
+    metrics = {
+        "limit_up": limit_up,
+        "limit_down": r.get("limit_down", 0) or 0,
+        "broken_limit": broken,
+        "max_consecutive": r.get("max_consecutive", 0) or 0,
+        "seal_rate": (limit_up / (limit_up + broken)) if (limit_up + broken) > 0 else 0.5,
+        "up_count": up,
+        "down_count": down,
+        "up_ratio": (up / down) if down > 0 else (float(up) if up > 0 else 1.0),
+        "index_pct": index_pct_map.get(r["date"], 0.0),
+        "above_ma20_pct": ma20_above,
+        "total_amount": r.get("total_amount", 0) or 0,
+        "avg_turnover": r.get("avg_amount", 0) or 0,
+        # 新模型所需(对齐看板)
+        "up_pct": up_pct,
+        "down_pct": down_pct,
+        "avg_pct": avg_pct,
+        "median_pct": median_pct,
+        "strong_up_pct": strong_up_pct,
+        "strong_down_pct": strong_down_pct,
+        "strong_diff_pct": strong_up_pct - strong_down_pct,
+    }
+    state, score = classify_state(metrics)
+    # 4 个子维度分(供趋势图展示"综合分由什么驱动" + 未来策略按子维度过滤)
+    sub = _compute_subscores(metrics)
+    return {
+        "date": r["date"],
+        "state": state,
+        "score": score,
+        "limit_up": limit_up,
+        "limit_down": metrics["limit_down"],
+        "broken_limit": broken,
+        "max_consecutive": metrics["max_consecutive"],
+        "seal_rate": round(metrics["seal_rate"], 4),
+        "up_count": up,
+        "down_count": down,
+        "up_ratio": round(metrics["up_ratio"], 4),
+        "index_pct": round(metrics["index_pct"], 4),
+        "above_ma20_pct": round(ma20_above, 4),
+        "total_amount": metrics["total_amount"],
+        "avg_turnover": metrics["avg_turnover"],
+        # 新增列(供未来策略按强势股占比等过滤)
+        "avg_pct": round(avg_pct, 4),
+        "median_pct": round(median_pct, 4),
+        "strong_up_pct": round(strong_up_pct, 4),
+        "strong_down_pct": round(strong_down_pct, 4),
+        # 4 个子维度分(0-100, 综合分加权来源): 赚钱/投机/抗跌/趋势
+        "profit_score": round(sub["profit"]),
+        "speculation_score": round(sub["speculation"]),
+        "resilience_score": round(sub["resilience"]),
+        "trend_score": round(sub["trend"]),
+        # 梯队指标(阶段判定所需); phase 由 refresh_phase_labels 统一重标
+        **finalize_ladder_row(r),
+    }
+
+
 def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.DataFrame:
     """对多日多 symbol 的 enriched DataFrame 按 date 聚合环境指标。
 
@@ -164,15 +327,22 @@ def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.
     (需要完整日序做平滑), 由 refresh_phase_labels 在 upsert 后统一重标。
     """
     from app.services.market_phase import (
-        finalize_ladder_row,
         ladder_daily_aggs,
         ladder_promo_aggs,
         with_prev_consecutive,
     )
 
-    needed = ["date", "change_pct", "amount", "signal_limit_up",
-              "signal_limit_down", "signal_broken_limit_up",
-              "consecutive_limit_ups", "close", "ma20"]
+    needed = [
+        "date",
+        "change_pct",
+        "amount",
+        "signal_limit_up",
+        "signal_limit_down",
+        "signal_broken_limit_up",
+        "consecutive_limit_ups",
+        "close",
+        "ma20",
+    ]
     avail = [c for c in needed if c in df.columns]
     if "date" not in avail or "change_pct" not in avail:
         return pl.DataFrame()
@@ -182,147 +352,25 @@ def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.
 
     # 基础聚合 — 全部用 group_by 一次性向量化算出, 避免逐日 filter 扫全表(OOM/超时元凶)。
     has_ma20 = "close" in avail and "ma20" in avail
-    grouped = df.group_by("date").agg(
-        *[
-            pl.col("change_pct").gt(0).sum().alias("up_count")
-            if "change_pct" in avail else pl.lit(0).alias("up_count"),
-            pl.col("change_pct").lt(0).sum().alias("down_count")
-            if "change_pct" in avail else pl.lit(0).alias("down_count"),
-            pl.len().alias("total_count"),
-        ],
-        # 新增: 涨跌幅分布(赚钱/抗跌维度所需) — 全部向量化, 一次算出
-        *(
-            [
-                pl.col("change_pct").mean().alias("avg_pct"),
-                pl.col("change_pct").median().alias("median_pct"),
-                pl.col("change_pct").ge(0.03).sum().alias("strong_up_count"),
-                pl.col("change_pct").le(-0.03).sum().alias("strong_down_count"),
-            ]
-            if "change_pct" in avail else [
-                pl.lit(0).alias("avg_pct"), pl.lit(0).alias("median_pct"),
-                pl.lit(0).alias("strong_up_count"), pl.lit(0).alias("strong_down_count"),
-            ]
-        ),
-        *(
-            [pl.col("signal_limit_up").cast(pl.Boolean).sum().alias("limit_up")]
-            if "signal_limit_up" in avail else [pl.lit(0).alias("limit_up")]
-        ),
-        *(
-            [pl.col("signal_limit_down").cast(pl.Boolean).sum().alias("limit_down")]
-            if "signal_limit_down" in avail else [pl.lit(0).alias("limit_down")]
-        ),
-        *(
-            [pl.col("signal_broken_limit_up").cast(pl.Boolean).sum().alias("broken_limit")]
-            if "signal_broken_limit_up" in avail else [pl.lit(0).alias("broken_limit")]
-        ),
-        *(
-            [pl.col("consecutive_limit_ups").max().alias("max_consecutive")]
-            if "consecutive_limit_ups" in avail else [pl.lit(0).alias("max_consecutive")]
-        ),
-        *(
-            [pl.col("amount").sum().alias("total_amount")]
-            if "amount" in avail else [pl.lit(0).alias("total_amount")]
-        ),
-        *(
-            [pl.col("amount").mean().alias("avg_amount")]
-            if "amount" in avail else [pl.lit(0).alias("avg_amount")]
-        ),
-        # MA20 上方占比: 向量化一次算出 (避免逐日 filter 扫全表)。
-        # 仅统计 ma20 有效(非空且>0)的行中, close>ma20 的占比。
-        *(
-            [
-                pl.when(pl.col("ma20").is_not_null() & (pl.col("ma20") > 0) & (pl.col("close") > pl.col("ma20")))
-                  .then(1).otherwise(None).sum().alias("_above_cnt"),
-                pl.when(pl.col("ma20").is_not_null() & (pl.col("ma20") > 0))
-                  .then(1).otherwise(None).sum().alias("_valid_cnt"),
-            ]
-            if has_ma20 else []
-        ),
-        # 梯队指标(阶段判定所需): 首板/N板宽度/非空档位数; 晋级率需 _prev_consec
-        *(
-            ladder_daily_aggs()
-            if "consecutive_limit_ups" in avail else []
-        ),
-        *(
-            ladder_promo_aggs()
-            if "consecutive_limit_ups" in avail and "_prev_consec" in df.columns else []
-        ),
-    ).sort("date")
+    grouped = (
+        df.group_by("date")
+        .agg(
+            *_regime_base_agg_exprs(avail),
+            *_regime_ma20_agg_exprs(has_ma20),
+            # 梯队指标(阶段判定所需): 首板/N板宽度/非空档位数; 晋级率需 _prev_consec
+            *(ladder_daily_aggs() if "consecutive_limit_ups" in avail else []),
+            *(
+                ladder_promo_aggs()
+                if "consecutive_limit_ups" in avail and "_prev_consec" in df.columns
+                else []
+            ),
+        )
+        .sort("date")
+    )
 
     # 转成 dict 列表做分类(规则引擎需逐日算, 但只扫 grouped 行数=天数, 不再回扫全表)
     index_pct_map = index_pct_map or {}
-    rows = []
-    for r in grouped.iter_rows(named=True):
-        up = r.get("up_count", 0) or 0
-        down = r.get("down_count", 0) or 0
-        total = r.get("total_count", 0) or 0
-        limit_up = r.get("limit_up", 0) or 0
-        broken = r.get("broken_limit", 0) or 0
-        # MA20 上方占比: 来自向量化聚合 (None→0)
-        valid_cnt = r.get("_valid_cnt") or 0
-        above_cnt = r.get("_above_cnt") or 0
-        ma20_above = (above_cnt / valid_cnt) if valid_cnt > 0 else 0.0
-        # 涨跌幅分布(占比, 0-100)
-        up_pct = (up / total * 100) if total > 0 else 0.0
-        down_pct = (down / total * 100) if total > 0 else 0.0
-        strong_up_pct = ((r.get("strong_up_count", 0) or 0) / total * 100) if total > 0 else 0.0
-        strong_down_pct = ((r.get("strong_down_count", 0) or 0) / total * 100) if total > 0 else 0.0
-        avg_pct = r.get("avg_pct", 0.0) or 0.0
-        median_pct = r.get("median_pct", 0.0) or 0.0
-        metrics = {
-            "limit_up": limit_up,
-            "limit_down": r.get("limit_down", 0) or 0,
-            "broken_limit": broken,
-            "max_consecutive": r.get("max_consecutive", 0) or 0,
-            "seal_rate": (limit_up / (limit_up + broken)) if (limit_up + broken) > 0 else 0.5,
-            "up_count": up,
-            "down_count": down,
-            "up_ratio": (up / down) if down > 0 else (float(up) if up > 0 else 1.0),
-            "index_pct": index_pct_map.get(r["date"], 0.0),
-            "above_ma20_pct": ma20_above,
-            "total_amount": r.get("total_amount", 0) or 0,
-            "avg_turnover": r.get("avg_amount", 0) or 0,
-            # 新模型所需(对齐看板)
-            "up_pct": up_pct,
-            "down_pct": down_pct,
-            "avg_pct": avg_pct,
-            "median_pct": median_pct,
-            "strong_up_pct": strong_up_pct,
-            "strong_down_pct": strong_down_pct,
-            "strong_diff_pct": strong_up_pct - strong_down_pct,
-        }
-        state, score = classify_state(metrics)
-        # 4 个子维度分(供趋势图展示"综合分由什么驱动" + 未来策略按子维度过滤)
-        sub = _compute_subscores(metrics)
-        rows.append({
-            "date": r["date"],
-            "state": state,
-            "score": score,
-            "limit_up": limit_up,
-            "limit_down": metrics["limit_down"],
-            "broken_limit": broken,
-            "max_consecutive": metrics["max_consecutive"],
-            "seal_rate": round(metrics["seal_rate"], 4),
-            "up_count": up,
-            "down_count": down,
-            "up_ratio": round(metrics["up_ratio"], 4),
-            "index_pct": round(metrics["index_pct"], 4),
-            "above_ma20_pct": round(ma20_above, 4),
-            "total_amount": metrics["total_amount"],
-            "avg_turnover": metrics["avg_turnover"],
-            # 新增列(供未来策略按强势股占比等过滤)
-            "avg_pct": round(avg_pct, 4),
-            "median_pct": round(median_pct, 4),
-            "strong_up_pct": round(strong_up_pct, 4),
-            "strong_down_pct": round(strong_down_pct, 4),
-            # 4 个子维度分(0-100, 综合分加权来源): 赚钱/投机/抗跌/趋势
-            "profit_score": round(sub["profit"]),
-            "speculation_score": round(sub["speculation"]),
-            "resilience_score": round(sub["resilience"]),
-            "trend_score": round(sub["trend"]),
-            # 梯队指标(阶段判定所需); phase 由 refresh_phase_labels 统一重标
-            **finalize_ladder_row(r),
-        })
+    rows = [_regime_row_output(r, index_pct_map) for r in grouped.iter_rows(named=True)]
     return pl.DataFrame(rows) if rows else pl.DataFrame()
 
 
@@ -334,19 +382,32 @@ _REGIME_BATCH_DAYS_DEFAULT = 60
 _REGIME_WARMUP_DAYS_DEFAULT = 40
 
 
-def _compute_batch(repo, enriched_dir, instruments, historical_shares,
-                   batch_start: date, batch_end: date, warmup_days: int) -> pl.DataFrame:
+def _compute_batch(
+    repo,
+    enriched_dir,
+    instruments,
+    historical_shares,
+    batch_start: date,
+    batch_end: date,
+    warmup_days: int,
+) -> pl.DataFrame:
     """单批: 读 [batch_start-warmup, batch_end] → 算指标 → 截断回 [batch_start, batch_end]。
 
     warmup 前缀保证每批边界的滚动窗口指标(ma20)正确, 不依赖相邻批次。
     返回目标区间(不含 warmup)的含指标列 DataFrame。
     """
     from datetime import timedelta
+
     from app.indicators.pipeline import compute_indicators, compute_limit_signals
+
     warmup_start = batch_start - timedelta(days=warmup_days)
-    df = pl.scan_parquet(enriched_dir / "**" / "*.parquet").filter(
-        (pl.col("date") >= warmup_start) & (pl.col("date") <= batch_end)
-    ).collect()
+    from app.storage.runtime import require_storage
+
+    df = require_storage().store.read_daily(
+        "kline_daily_enriched",
+        start=warmup_start,
+        end=batch_end,
+    )
     if df.is_empty():
         return pl.DataFrame()
     # 新评分模型只需 change_pct(赚钱/抗跌维) + ma20(趋势维); 不再需要 vol_ratio_5d
@@ -354,13 +415,15 @@ def _compute_batch(repo, enriched_dir, instruments, historical_shares,
     df = compute_indicators(df, needed={"change_pct", "ma20"})
     if instruments is not None and not instruments.is_empty():
         df = compute_limit_signals(
-            df, instruments,
+            df,
+            instruments,
             needed={"signal_limit_up", "signal_limit_down", "signal_broken_limit_up"},
             historical_shares=historical_shares,
         )
     # 晋级率需要昨日连板数: 在裁掉 warmup 之前先按 symbol 平移,
     # 保证每批首日的 _prev_consec 来自 warmup 的最后一个交易日而非 null。
     from app.services.market_phase import with_prev_consecutive
+
     df = with_prev_consecutive(df)
     # 丢弃 warmup 行, 只留目标区间
     return df.filter((pl.col("date") >= batch_start) & (pl.col("date") <= batch_end))
@@ -370,6 +433,68 @@ def _filter_excluded_symbols(df: pl.DataFrame, excluded_symbols: list[str]) -> p
     if excluded_symbols and "symbol" in df.columns:
         return df.filter(~pl.col("symbol").str.to_uppercase().is_in(excluded_symbols))
     return df
+
+
+def _scan_small_range(
+    repo,
+    enriched_dir,
+    instruments,
+    historical_shares,
+    target_dates,
+    warmup_days,
+    excluded_symbols,
+    index_pct_map,
+):
+    """小范围单次计算并聚合，避免分批开销。"""
+    df = _compute_batch(
+        repo,
+        enriched_dir,
+        instruments,
+        historical_shares,
+        target_dates[0],
+        target_dates[-1],
+        warmup_days,
+    )
+    if df.is_empty():
+        return None
+    df = _filter_excluded_symbols(df, excluded_symbols)
+    result = _aggregate_daily(df, index_pct_map)
+    return result if not result.is_empty() else None
+
+
+def _scan_batches(
+    repo,
+    enriched_dir,
+    instruments,
+    historical_shares,
+    target_dates,
+    batch_days,
+    warmup_days,
+    excluded_symbols,
+    index_pct_map,
+):
+    """大范围分批扫描并逐批压缩为日级聚合。"""
+    batches = [
+        (target_dates[i], target_dates[min(i + batch_days - 1, len(target_dates) - 1)])
+        for i in range(0, len(target_dates), batch_days)
+    ]
+    logger.info(
+        "regime fallback: %d 天分 %d 批逐批聚合 (每批≤%d天 + %d天warmup)",
+        len(target_dates),
+        len(batches),
+        batch_days,
+        warmup_days,
+    )
+    daily_parts: list[pl.DataFrame] = []
+    for bs, be in batches:
+        df = _compute_batch(repo, enriched_dir, instruments, historical_shares, bs, be, warmup_days)
+        if df.is_empty():
+            continue
+        df = _filter_excluded_symbols(df, excluded_symbols)
+        daily = _aggregate_daily(df, index_pct_map)
+        if not daily.is_empty():
+            daily_parts.append(daily)
+    return pl.concat(daily_parts, how="vertical_relaxed") if daily_parts else None
 
 
 def _scan_enriched_fallback(
@@ -394,9 +519,10 @@ def _scan_enriched_fallback(
     """
     try:
         from app.services import preferences
+
         batch_days = preferences.get_regime_batch_days()
         warmup_days = preferences.get_regime_warmup_days()
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         batch_days = _REGIME_BATCH_DAYS_DEFAULT
         warmup_days = _REGIME_WARMUP_DAYS_DEFAULT
 
@@ -409,41 +535,36 @@ def _scan_enriched_fallback(
         historical_shares = repo.get_historical_shares()
 
         # 收集目标区间内所有交易日, 决定是否分批
-        target_dates = sorted(d for d in enriched_date_set(repo)
-                              if start <= d <= end)
+        target_dates = sorted(d for d in enriched_date_set(repo) if start <= d <= end)
         if not target_dates:
             return None
 
         # 小范围: 单次算(无分批开销)
         if len(target_dates) <= batch_days:
-            df = _compute_batch(repo, enriched_dir, instruments, historical_shares,
-                                target_dates[0], target_dates[-1], warmup_days)
-            if df.is_empty():
-                return None
-            df = _filter_excluded_symbols(df, excluded_symbols)
-            result = _aggregate_daily(df, index_pct_map)
-            return result if not result.is_empty() else None
+            return _scan_small_range(
+                repo,
+                enriched_dir,
+                instruments,
+                historical_shares,
+                target_dates,
+                warmup_days,
+                excluded_symbols,
+                index_pct_map,
+            )
 
         # 大范围: 每批个股明细立即压缩为日级行, 只保留小型聚合结果。
-        batches = [
-            (target_dates[i], target_dates[min(i + batch_days - 1, len(target_dates) - 1)])
-            for i in range(0, len(target_dates), batch_days)
-        ]
-        logger.info("regime fallback: %d 天分 %d 批逐批聚合 (每批≤%d天 + %d天warmup)",
-                    len(target_dates), len(batches), batch_days, warmup_days)
-        daily_parts: list[pl.DataFrame] = []
-        for bs, be in batches:
-            df = _compute_batch(repo, enriched_dir, instruments, historical_shares, bs, be, warmup_days)
-            if df.is_empty():
-                continue
-            df = _filter_excluded_symbols(df, excluded_symbols)
-            daily = _aggregate_daily(df, index_pct_map)
-            if not daily.is_empty():
-                daily_parts.append(daily)
-        if not daily_parts:
-            return None
-        return pl.concat(daily_parts, how="vertical_relaxed")
-    except Exception as e:  # noqa: BLE001
+        return _scan_batches(
+            repo,
+            enriched_dir,
+            instruments,
+            historical_shares,
+            target_dates,
+            batch_days,
+            warmup_days,
+            excluded_symbols,
+            index_pct_map,
+        )
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("regime scan_enriched_fallback failed: %s", e)
         return None
 
@@ -455,7 +576,7 @@ def _load_index_pct(repo, start: date, end: date, symbol: str = "000001.SH") -> 
         if df.is_empty() or "change_pct" not in df.columns:
             return {}
         return {r["date"]: float(r["change_pct"] or 0) for r in df.iter_rows(named=True)}
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("regime load_index_pct failed: %s", e)
         return {}
 
@@ -477,8 +598,9 @@ def run_regime_batch(repo, start: date, end: date) -> pl.DataFrame:
     # 涨跌家数/MA20 占比等宽度指标几乎不受影响。切换口径需全量重算 regime。
     try:
         from app.services import preferences as _prefs_st
+
         exclude_st = _prefs_st.get_sentiment_exclude_st()
-    except Exception:
+    except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         exclude_st = True
     excluded_symbols: list[str] = []
     if exclude_st:
@@ -541,7 +663,7 @@ def load_regime_history(data_dir: Path) -> pl.DataFrame:
         _REGIME_HISTORY_CACHE = df
         _REGIME_HISTORY_SIG = sig
         return df
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("load_regime_history failed: %s", e)
         return pl.DataFrame()
 
@@ -561,11 +683,14 @@ def refresh_phase_labels(data_dir: Path, *, start: date | None = None) -> int:
         return 0
     try:
         labeled = classify_phase_series(df)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("refresh_phase_labels failed: %s", e)
         return 0
     if start is not None:
-        labeled = pl.concat([df.filter(pl.col("date") < start), labeled.filter(pl.col("date") >= start)], how="diagonal_relaxed").sort("date")
+        labeled = pl.concat(
+            [df.filter(pl.col("date") < start), labeled.filter(pl.col("date") >= start)],
+            how="diagonal_relaxed",
+        ).sort("date")
     atomic_write_parquet(labeled, regime_path(data_dir))
     return labeled.height
 
@@ -698,8 +823,12 @@ def compute_regime_incremental(repo, data_dir: Path, *, today: date | None = Non
         logger.debug("regime incremental: nothing to compute")
         return pl.DataFrame()
 
-    logger.info("regime incremental: compute %d days (missing=%d, stale=%d)",
-                len(to_compute), len(missing), len(stale))
+    logger.info(
+        "regime incremental: compute %d days (missing=%d, stale=%d)",
+        len(to_compute),
+        len(missing),
+        len(stale),
+    )
     new_rows = run_regime_batch(repo, start=to_compute[0], end=to_compute[-1])
     if not new_rows.is_empty():
         upsert_regime_history(data_dir, new_rows)

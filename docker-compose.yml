@@ -1,5 +1,5 @@
-# Phase 0 单 service:FastAPI 启动后既跑 API 又托管前端 dist。
-# 见 ADR-17 / §8.1。
+# Phase 0:FastAPI 启动后既跑 API 又托管前端 dist。见 ADR-17 / §8.1。
+# ClickHouse 作为独立容器一起编排(存储层必需依赖, 后端启动时 fail-closed 连接)。
 services:
   app:
     build:
@@ -21,8 +21,17 @@ services:
       # 导致每次 up --build 重建容器都丢数据。environment 优先级高于 env_file,
       # 无论 .env 怎么写这里都以容器路径为准。
       - DATA_DIR=/app/data
+      # 同理: .env 里的 CLICKHOUSE_URL 是源码直跑用的 localhost 地址,
+      # 容器间必须走 compose 服务名, 否则连不上 CK 且启动直接失败。
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-tsp}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-tsp}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-tsp123456}
       # 将主机 Codex Desktop 的 loopback local-access 端点映射到 Docker host gateway。
       - CODEX_DOCKER_HOST=host.docker.internal
+    depends_on:
+      clickhouse:
+        condition: service_healthy
     volumes:
       - ./data:/app/data
       - ./tiers.yaml:/app/tiers.yaml:ro
@@ -32,3 +41,47 @@ services:
       # Windows PowerShell/CMD 下 HOME 常未设置, 可通过 .env 里 CODEX_HOME_HOST 覆盖。
       - ${CODEX_HOME_HOST:-${HOME}/.codex}:/root/.codex:ro
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4g
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8.8-alpine
+    container_name: tsp-clickhouse
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+      # 默认账号 tsp / tsp123456(可用 .env 的 CLICKHOUSE_USER/PASSWORD 覆盖, 需与应用一致)
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-tsp}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-tsp123456}
+      # 允许该用户执行 SQL 级用户/权限管理(初始化脚本要建库并授权)
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      # 仅供客户端选默认库(CK 自身不读这个变量)
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-tsp}
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    # 与 config.d 里的 max_server_memory_usage(3.5 GB) 配套; 内存小的机器按 deploy 文档下调
+    mem_limit: 4g
+    volumes:
+      # CK 自身数据: 落宿主机 ckdata, 重建容器不丢; 备份/迁移只拷这个目录
+      - ./ckdata:/var/lib/clickhouse
+      # 预建 tsp / tsp_test 库(仅在数据目录为空时执行一次)
+      - ./deploy/clickhouse/init:/docker-entrypoint-initdb.d:ro
+      # 只挂单个 drop-in: 整个 config.d 目录挂载会覆盖镜像自带的
+      # docker_related_config.xml(其中含 listen_host), 导致 CK 只监听 127.0.0.1
+      - ./deploy/clickhouse/config.d/40-tsp-container.xml:/etc/clickhouse-server/config.d/40-tsp-container.xml:ro
+    healthcheck:
+      # /ping 无需认证, 避免账号密码参与健康判定
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    # 默认不对宿主机暴露端口: 仅 compose 网络内访问。
+    # 需要在宿主调试时取消注释(8123 已被宿主其它 CK 占用时改左值, 如 18123):
+    # ports:
+    #   - "127.0.0.1:8123:8123"

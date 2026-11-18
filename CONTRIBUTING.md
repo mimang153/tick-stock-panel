@@ -4,7 +4,7 @@ This document applies to the entire repository and is shared by contributors, AI
 
 `CONTRIBUTING.md` is the project's contribution and review standard. It does not replace the user-facing documentation in `README.md` or the domain documentation under `docs/`. Every contributor and AI coding agent must read this document before modifying code, committing, or reviewing a PR.
 
-When doing secondary development, also follow [`docs/secondary-development.md`](docs/secondary-development.md). On the frontend, prefer real, existing controlled slots or registration entry points; on the backend, prefer small-grained strategy interfaces and dependency injection. When existing extension points cannot express a core behavior change, modifying the source directly is allowed, but the change must stay focused and must come with compatibility verification.
+When doing secondary development, also follow [`docs/base_v1.0/secondary-development.md`](docs/base_v1.0/secondary-development.md). On the frontend, prefer real, existing controlled slots or registration entry points; on the backend, prefer small-grained strategy interfaces and dependency injection. When existing extension points cannot express a core behavior change, modifying the source directly is allowed, but the change must stay focused and must come with compatibility verification.
 
 ## 1. Core Principles
 
@@ -131,7 +131,7 @@ Data sources are already pluginized. Any general feature must access data throug
 - Only features explicitly marked as TickFlow-exclusive may depend on TickFlow directly, and they must not affect other providers.
 - When a provider lacks a capability, the system must clearly indicate it, skip the feature, or fail closed. Silently switching to wrong data or wrong semantics is forbidden.
 - Plugin load failures, missing fields, and empty data must have isolation tests. They must not cause application startup failure or make other data sources unavailable.
-- New data source adapters must update the corresponding contract in `docs/custom-data-source.md` or `docs/plugin-development.md`.
+- New data source adapters must update the corresponding contract in `docs/base_v1.0/custom-data-source.md` or `docs/base_v1.0/plugin-development.md`.
 
 ### Capability Routing Matrix Contract
 
@@ -254,6 +254,7 @@ pnpm build
 git diff --check
 ```
 
+- Storage-related tests connect to a real ClickHouse (`tsp_test` database) and fail rather than skip when it is unreachable. Start it with the dev compose: `docker compose -f docker-compose.dev.yml up -d clickhouse` (`tsp` / `tsp123456`).
 - For the backend, run at least the tests of the affected module, not just a single newly added test.
 - New files and this change must not introduce Ruff warnings. Do not reformat the whole repository in a feature PR just to clean up historical warnings.
 - Any frontend TypeScript, component, style, or API type change requires at least one `pnpm build`.
@@ -438,7 +439,7 @@ The measure of following this guide is not how much documentation is written, bu
 
 `CONTRIBUTING.md` 是项目贡献与审查规范，不替代 `README.md`、`docs/` 中的用户文档和领域文档。所有贡献者和 AI 编码代理在修改代码、提交或审查 PR 前都应阅读本文档。
 
-涉及代码二次开发时，同时遵循 [`docs/secondary-development.md`](docs/secondary-development.md)。前端优先使用真实存在的受控插槽或注册入口，后端优先使用小粒度策略接口和依赖注入；现有扩展点无法表达核心行为变化时允许直接修改源码，但必须保持改动聚焦并补足兼容性验证。
+涉及代码二次开发时，同时遵循 [`docs/base_v1.0/secondary-development.md`](docs/base_v1.0/secondary-development.md)。前端优先使用真实存在的受控插槽或注册入口，后端优先使用小粒度策略接口和依赖注入；现有扩展点无法表达核心行为变化时允许直接修改源码，但必须保持改动聚焦并补足兼容性验证。
 
 ## 1. 基本原则
 
@@ -566,7 +567,7 @@ The measure of following this guide is not how much documentation is written, bu
 - 只有明确标注为 TickFlow 专属的功能才可以直接依赖 TickFlow，并且不得影响其他 provider。
 - provider 缺少某项能力时，应明确提示、跳过该功能或 fail-closed；禁止静默换用错误数据或错误口径。
 - 插件加载失败、字段缺失和空数据必须有隔离测试，不能导致应用启动失败或其他数据源不可用。
-- 新增数据源适配应同步更新 `docs/custom-data-source.md` 或 `docs/plugin-development.md` 中对应契约。
+- 新增数据源适配应同步更新 `docs/base_v1.0/custom-data-source.md` 或 `docs/base_v1.0/plugin-development.md` 中对应契约。
 
 ### 能力路由矩阵契约
 
@@ -689,6 +690,7 @@ pnpm build
 git diff --check
 ```
 
+- 存储层相关测试连真实 ClickHouse（`tsp_test` 库），连不上直接失败而非跳过。用开发 compose 起 CK：`docker compose -f docker-compose.dev.yml up -d clickhouse`（账号 `tsp` / `tsp123456`）。
 - 后端至少运行受影响模块的测试，不应只运行新加的单个测试。
 - 新增文件和本次改动不得引入 Ruff 告警。不要为清理历史告警而在功能 PR 中全仓格式化。
 - 前端任何 TypeScript、组件、样式或 API 类型改动至少执行一次 `pnpm build`。

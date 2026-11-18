@@ -18,6 +18,7 @@
   ② 限速安全 clamp: safe = 60/((rpm*0.8)/batches), 涨跌停多就自动放慢
   ③ 系统接管通知: 用户设置会超限时, 推 toast 告知已自动调整
 """
+
 from __future__ import annotations
 
 import logging
@@ -25,13 +26,12 @@ import math
 import os
 import threading
 import time
-from datetime import date, time as dt_time
-
-from app.market_time import cn_now, cn_today
-from pathlib import Path
+from datetime import date
+from datetime import time as dt_time
 
 import polars as pl
 
+from app.market_time import cn_now, cn_today
 from app.tickflow.capabilities import Cap
 from app.tickflow.rate_limits import (
     apply_safety_rpm,
@@ -68,16 +68,16 @@ class DepthService:
         self._fetch_lock = threading.Lock()
         self._running = False
         self._thread: threading.Thread | None = None
-        self._repo = None              # 延迟注入(KlineRepository)
-        self._app_state = None         # 延迟注入(FastAPI app.state)
+        self._repo = None  # 延迟注入(KlineRepository)
+        self._app_state = None  # 延迟注入(FastAPI app.state)
 
         # 内存缓存: {symbol: SealedEntry}
         # SealedEntry = {sealed_up, sealed_down, ask1_vol, bid1_vol, status, fetched_ts}
         self._sealed_cache: dict[str, dict] = {}
         self._sealed_ready = False
-        self._sealed_date: date | None = None     # sealed 数据对应的交易日(可能是昨天,如休市)
-        self._sealed_fetched_ts: float = 0.0   # 上次拉取的 perf_counter
-        self._sealed_fetched_at: float = 0.0   # 上次拉取的 wall-clock 时间戳
+        self._sealed_date: date | None = None  # sealed 数据对应的交易日(可能是昨天,如休市)
+        self._sealed_fetched_ts: float = 0.0  # 上次拉取的 perf_counter
+        self._sealed_fetched_at: float = 0.0  # 上次拉取的 wall-clock 时间戳
         self._persisted_date: date | None = None  # 已落盘的日期
 
         # 系统接管状态(防通知刷屏)
@@ -90,6 +90,13 @@ class DepthService:
 
     def set_repo(self, repo) -> None:
         self._repo = repo
+
+    @staticmethod
+    def _depth_store():
+        """五档盘口存储门面（CK 唯一读源）。"""
+        from app.storage.runtime import require_storage
+
+        return require_storage().store
 
     def set_app_state(self, app_state) -> None:
         self._app_state = app_state
@@ -111,18 +118,17 @@ class DepthService:
         logger.info("depth sealed: 启动补跑今天定版")
         try:
             self.finalize()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.warning("depth sealed 启动补跑失败: %s", e)
 
     def _restore_from_parquet(self, d: date) -> None:
-        """从 parquet 恢复内存缓存(服务重启后)。"""
+        """从 CK 恢复内存缓存(服务重启后)。"""
         if not self._repo:
             return
-        out = self._repo.store.data_dir / "depth5" / f"date={d.isoformat()}" / "part.parquet"
-        if not out.exists():
-            return
         try:
-            df = pl.read_parquet(out)
+            df = self._depth_store().read_depth5(start=d, end=d)
+            if df.is_empty():
+                return
             cache: dict[str, dict] = {}
             for row in df.to_dicts():
                 sym = row.get("symbol")
@@ -134,16 +140,17 @@ class DepthService:
                     "ask1_vol": row.get("ask1_vol"),
                     "bid1_vol": row.get("bid1_vol"),
                     "status": row.get("status"),
-                    "fetched_ts": row.get("fetched_at"),
+                    # CK 列名 fetched_at，内存缓存沿用 fetched_ts
+                    "fetched_ts": row.get("fetched_at", row.get("fetched_ts")),
                 }
             with self._lock:
                 self._sealed_cache = cache
                 self._sealed_ready = True
                 self._sealed_date = d
                 self._persisted_date = d
-            logger.info("depth sealed: 从 parquet 恢复 %d 只 (日期=%s)", len(cache), d)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("depth sealed 从 parquet 恢复失败: %s", e)
+            logger.info("depth sealed: 从 CK 恢复 %d 只 (日期=%s)", len(cache), d)
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+            logger.warning("depth sealed 从 CK 恢复失败: %s", e)
 
     def start_polling(self) -> None:
         """启动盘中轮询线程(连板梯队监控开启 + 实时行情开启 + 有能力)。
@@ -155,6 +162,7 @@ class DepthService:
         if not self._has_capability():
             return
         from app.services import preferences
+
         if not preferences.get_limit_ladder_monitor_enabled():
             return
         if not preferences.get_realtime_quotes_enabled():
@@ -196,7 +204,7 @@ class DepthService:
             with self._lock:
                 count = len(self._sealed_cache)
             return {"ok": True, "count": count, "msg": f"已修正 {count} 只"}
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.warning("depth run_once 失败: %s", e)
             return {"ok": False, "count": 0, "msg": f"修正失败: {e}"}
 
@@ -235,13 +243,13 @@ class DepthService:
         syms_up: list[str] = []
         syms_down: list[str] = []
         if "signal_limit_up" in enriched.columns:
-            syms_up = enriched.filter(
-                pl.col("signal_limit_up").fill_null(False)
-            )["symbol"].to_list()
+            syms_up = enriched.filter(pl.col("signal_limit_up").fill_null(False))[
+                "symbol"
+            ].to_list()
         if "signal_limit_down" in enriched.columns:
-            syms_down = enriched.filter(
-                pl.col("signal_limit_down").fill_null(False)
-            )["symbol"].to_list()
+            syms_down = enriched.filter(pl.col("signal_limit_down").fill_null(False))[
+                "symbol"
+            ].to_list()
 
         all_syms = list(dict.fromkeys(syms_up + syms_down))  # 去重保序
         if not all_syms:
@@ -270,7 +278,9 @@ class DepthService:
             bid1 = bid_vols[0] if bid_vols else None
             # depth 返回的 timestamp(毫秒 epoch), 回退到当前 wall-clock
             depth_ts = d.get("timestamp")
-            fetched = (depth_ts / 1000.0) if isinstance(depth_ts, (int, float)) and depth_ts else now_wall
+            fetched = (
+                (depth_ts / 1000.0) if isinstance(depth_ts, int | float) and depth_ts else now_wall
+            )
             entry = {
                 # 涨停真封: 涨停价上卖一(主动卖压)为 0
                 "sealed_up": (ask1 == 0) if sym in up_set and ask1 is not None else None,
@@ -290,9 +300,14 @@ class DepthService:
             self._sealed_fetched_ts = now_perf
             self._sealed_fetched_at = now_wall
 
-        logger.info("depth sealed: 拉取 %d 只 (涨停%d/跌停%d) 日期=%s%s",
-                    len(new_cache), len(syms_up), len(syms_down),
-                    enriched_date, " → 落盘" if persist else "")
+        logger.info(
+            "depth sealed: 拉取 %d 只 (涨停%d/跌停%d) 日期=%s%s",
+            len(new_cache),
+            len(syms_up),
+            len(syms_down),
+            enriched_date,
+            " → 落盘" if persist else "",
+        )
 
         # 缓存已更新: 通知 SSE 推 depth_updated, 触发连板梯队刷新封单数据。
         self._notify_depth_updated(len(new_cache))
@@ -317,7 +332,7 @@ class DepthService:
                     logger.warning("depth provider %s 未声明 depth5, 跳过本轮", provider_name)
                     return {}
                 provider = custom_sources.get_provider(provider_name)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
                 logger.warning("depth provider %s 解析失败, 跳过本轮: %s", provider_name, e)
                 return {}
 
@@ -343,7 +358,7 @@ class DepthService:
                         provider_name,
                         i + 1,
                     )
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
                 logger.warning(
                     "depth provider %s 第 %d 批失败(%d 只): %s",
                     provider_name,
@@ -373,43 +388,53 @@ class DepthService:
 
         rows = []
         for sym, e in cache.items():
-            rows.append({
-                "symbol": sym,
-                "sealed_up": e.get("sealed_up"),
-                "sealed_down": e.get("sealed_down"),
-                "ask1_vol": e.get("ask1_vol"),
-                "bid1_vol": e.get("bid1_vol"),
-                "status": e.get("status"),
-                "fetched_at": e.get("fetched_ts"),
-            })
+            rows.append(
+                {
+                    "symbol": sym,
+                    "sealed_up": e.get("sealed_up"),
+                    "sealed_down": e.get("sealed_down"),
+                    "ask1_vol": e.get("ask1_vol"),
+                    "bid1_vol": e.get("bid1_vol"),
+                    "status": e.get("status"),
+                    "fetched_at": e.get("fetched_ts"),
+                }
+            )
         # 显式 schema: sealed_up/sealed_down 是 bool 与 None 混合, 不指定 schema
         # polars 会按首行推断类型, 后续遇到不一致 (bool vs null) 报
         # "could not append value: false of type: bool to the builder"。
-        df = pl.DataFrame(rows, schema={
-            "symbol": pl.Utf8,
-            "sealed_up": pl.Boolean,
-            "sealed_down": pl.Boolean,
-            "ask1_vol": pl.Int64,
-            "bid1_vol": pl.Int64,
-            "status": pl.Utf8,
-            "fetched_at": pl.Float64,
-        })
+        df = pl.DataFrame(
+            rows,
+            schema={
+                "symbol": pl.Utf8,
+                "sealed_up": pl.Boolean,
+                "sealed_down": pl.Boolean,
+                "ask1_vol": pl.Int64,
+                "bid1_vol": pl.Int64,
+                "status": pl.Utf8,
+                "fetched_at": pl.Float64,
+            },
+        )
         ds = today.isoformat()
-        out = self._repo.store.data_dir / "depth5" / f"date={ds}" / "part.parquet"
+        out = self._repo.store.data_dir / "depth5" / f"date={ds}" / "part.parquet"  # type: ignore[attr-defined]
         out.parent.mkdir(parents=True, exist_ok=True)
-        # 原子写: 先写临时文件再 os.replace, 避免读侧 (get_sealed_map) 读到半写 parquet
+        # 原子写: 先写临时文件再 os.replace, 避免读侧读到半写 parquet
         tmp = out.with_name(out.name + ".tmp")
         df.write_parquet(tmp)
         os.replace(tmp, out)
+        # 读路径已切 CK：Parquet 只是过渡期副本，CK 是页面数据源
+        self._depth_store().write_depth5(df.with_columns(pl.lit(today).cast(pl.Date).alias("date")))
         self._persisted_date = today
-        logger.info("depth sealed 落盘: %d 行 → %s", df.height, out)
+        logger.info("depth sealed 落盘: %d 行 → %s (CK+Parquet)", df.height, out)
 
     def _persisted_for_date(self, d: date) -> bool:
-        """检查某日 depth5 文件是否已存在。"""
+        """检查某日 depth5 是否已落库（CK）。"""
         if not self._repo:
             return False
-        out = self._repo.store.data_dir / "depth5" / f"date={d.isoformat()}" / "part.parquet"
-        return out.exists()
+        try:
+            return self._depth_store().depth5_has(d)
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+            logger.debug("depth5 存在性检查失败: %s", e)
+            return False
 
     # ================================================================
     # 查询(供 limit_ladder API 用)
@@ -425,7 +450,12 @@ class DepthService:
         age: 距上次拉取秒数(盘后定版为 None)
         """
         # 内存缓存(sealed 数据对应的交易日 = target_date 时才用)
-        if self._sealed_date and target_date == self._sealed_date and self._sealed_ready and self._sealed_cache:
+        if (
+            self._sealed_date
+            and target_date == self._sealed_date
+            and self._sealed_ready
+            and self._sealed_cache
+        ):
             return self._read_from_memory(is_down)
         # parquet(历史或盘后定版)
         return self._read_from_parquet(target_date, is_down)
@@ -450,15 +480,15 @@ class DepthService:
         return result
 
     def _read_from_parquet(self, target_date: date, is_down: bool) -> dict:
+        """历史/盘后定版读取（CK 唯一读源，方法名沿用历史叫法）。"""
         if not self._repo:
             return {}
-        out = self._repo.store.data_dir / "depth5" / f"date={target_date.isoformat()}" / "part.parquet"
-        if not out.exists():
-            return {}
         try:
-            df = pl.read_parquet(out)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("depth5 parquet 读取失败: %s", e)
+            df = self._depth_store().read_depth5(start=target_date, end=target_date)
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+            logger.warning("depth5 CK 读取失败: %s", e)
+            return {}
+        if df.is_empty():
             return {}
         sealed_key = "sealed_down" if is_down else "sealed_up"
         # 封单量: 涨停=买一量, 跌停=卖一量
@@ -486,7 +516,12 @@ class DepthService:
 
     def get_sealed_age(self, target_date: date) -> float | None:
         """返回 sealed 数据 age(秒), 盘后定版为 None。"""
-        if self._sealed_date and target_date == self._sealed_date and self._sealed_ready and self._sealed_fetched_ts:
+        if (
+            self._sealed_date
+            and target_date == self._sealed_date
+            and self._sealed_ready
+            and self._sealed_fetched_ts
+        ):
             return time.perf_counter() - self._sealed_fetched_ts
         return None
 
@@ -501,8 +536,10 @@ class DepthService:
                 if self._is_continuous_trading():
                     self._poll_once()
                 else:
-                    logger.debug("depth sealed: 非连续竞价时段, 跳过(避免集合竞价盘口覆盖 11:30 定格值)")
-            except Exception as e:  # noqa: BLE001
+                    logger.debug(
+                        "depth sealed: 非连续竞价时段, 跳过(避免集合竞价盘口覆盖 11:30 定格值)"
+                    )
+            except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
                 logger.warning("depth sealed 轮询异常: %s", e)
 
             # 等待下一轮(用 _running 检查保证能及时退出)
@@ -522,7 +559,9 @@ class DepthService:
         interval, taken_over, user_interval = self._compute_interval(n)
 
         # 系统接管通知(状态切换时才推, 防刷屏)
-        if taken_over and (self._last_taken_over is False or self._last_user_interval != user_interval):
+        if taken_over and (
+            self._last_taken_over is False or self._last_user_interval != user_interval
+        ):
             self._notify_takeover(n, user_interval, interval)
         self._last_taken_over = taken_over
         self._last_user_interval = user_interval
@@ -553,9 +592,11 @@ class DepthService:
         from app.tickflow.policy import tier_label
 
         capset = self._get_capset()
-        lim = capset.limits(__import__("app.tickflow.capabilities", fromlist=["Cap"]).Cap.DEPTH5_BATCH)
-        batch_size = (lim.batch if lim and lim.batch else 100)
-        rpm = (lim.rpm if lim and lim.rpm else 30)
+        lim = capset.limits(
+            __import__("app.tickflow.capabilities", fromlist=["Cap"]).Cap.DEPTH5_BATCH
+        )
+        batch_size = lim.batch if lim and lim.batch else 100
+        rpm = lim.rpm if lim and lim.rpm else 30
 
         # ① 套餐范围 clamp
         tier = tier_label().split()[0].split("+")[0].strip().lower()
@@ -602,8 +643,10 @@ class DepthService:
         qs = getattr(self._app_state, "quote_service", None)
         if not qs:
             return
-        msg = (f"五档轮询: 当前涨跌停 {n_stocks} 只, 您设置的 {user_interval:.0f} 秒间隔会超限, "
-               f"系统已自动调整为 {actual_interval:.0f} 秒")
+        msg = (
+            f"五档轮询: 当前涨跌停 {n_stocks} 只, 您设置的 {user_interval:.0f} 秒间隔会超限, "
+            f"系统已自动调整为 {actual_interval:.0f} 秒"
+        )
         alert = {
             "source": "depth",
             "type": "takeover",
@@ -611,7 +654,7 @@ class DepthService:
         }
         try:
             qs.push_alerts([alert])
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.debug("depth 接管通知推送失败: %s", e)
 
     def _notify_depth_updated(self, count: int) -> None:
@@ -623,7 +666,7 @@ class DepthService:
             return
         try:
             qs.notify_depth_updated()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.debug("depth 更新通知推送失败: %s", e)
 
     # ================================================================
@@ -638,12 +681,14 @@ class DepthService:
         本轮修复前此处只查 capset, 导致「五档已切到插件但启动补跑被跳过」。
         """
         from app.data_providers.capabilities import capability_gate
+
         ok, _ = capability_gate("depth5")
         return ok
 
     def _capability_label(self) -> str:
         """门禁日志标签: "五档盘口 ← fuyao" / "…(档位不足)", 便于判断该切哪个源。"""
         from app.data_providers.capabilities import capability_gate
+
         _, label = capability_gate("depth5")
         return label
 
@@ -654,6 +699,7 @@ class DepthService:
             if cs:
                 return cs
         from app.tickflow.policy import detect_capabilities
+
         return detect_capabilities()
 
     @staticmethod

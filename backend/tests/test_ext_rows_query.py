@@ -4,6 +4,7 @@ timeseries 日期范围合并读取。
 范围读取是路径敏感操作 (拼 `date=` 分区目录), 与 date_guard 同一套防穿越
 校验 (_partition_date); 过滤/排序的 400 语义单独覆盖。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -21,12 +22,16 @@ def _cfg(mode: str = "timeseries") -> ExtConfig:
         id="hot",
         label="人气",
         mode=mode,  # type: ignore[arg-type]
-        fields=[ExtField("symbol", "string"), ExtField("concept", "string"), ExtField("heat", "float")],
+        fields=[
+            ExtField("symbol", "string"),
+            ExtField("concept", "string"),
+            ExtField("heat", "float"),
+        ],
     )
 
 
-def _layout(tmp_path: Path) -> Path:
-    """三个时序分区: 09-09 / 09-10 / 09-11。"""
+def _layout(tmp_path: Path, ck_runtime=None) -> Path:
+    """三个时序分区: 09-09 / 09-10 / 09-11 (本地 + CK 双写, 与生产镜像同构)。"""
     data_dir = tmp_path / "data"
     rows_by_day = {
         "2026-09-09": [("000001.SZ", "AI", 1.0), ("600519.SH", "白酒", 2.0)],
@@ -35,16 +40,34 @@ def _layout(tmp_path: Path) -> Path:
     }
     for day, rows in rows_by_day.items():
         part = data_dir / "ext_data" / "hot" / "timeseries" / f"date={day}"
-        part.mkdir(parents=True)
-        pl.DataFrame(
-            {"symbol": [r[0] for r in rows], "concept": [r[1] for r in rows], "heat": [r[2] for r in rows]}
-        ).write_parquet(part / "part.parquet")
+        part.mkdir(parents=True, exist_ok=True)
+        df = pl.DataFrame(
+            {
+                "symbol": [r[0] for r in rows],
+                "concept": [r[1] for r in rows],
+                "heat": [r[2] for r in rows],
+            }
+        )
+        df.write_parquet(part / "part.parquet")
+        if ck_runtime is not None:
+            ck_runtime.write_ext_timeseries(
+                df.with_columns(
+                    pl.lit("hot").alias("ext_id"),
+                    pl.lit(day).cast(pl.Date).alias("date"),
+                    pl.lit("").alias("time_value"),
+                )
+            )
     return data_dir
 
 
 # ── 日期范围读取 ──────────────────────────────────────────
-def test_read_range_merges_partitions(tmp_path: Path) -> None:
-    df, active = _read_ext_dataframe(_cfg(), _layout(tmp_path), start_date="2026-09-09", end_date="2026-09-10")
+def test_read_range_merges_partitions(tmp_path: Path, ck_runtime) -> None:
+    df, active = _read_ext_dataframe(
+        _cfg(),
+        _layout(tmp_path, ck_runtime),
+        start_date="2026-09-09",
+        end_date="2026-09-10",
+    )
     assert len(df) == 3
     assert active == "2026-09-09..2026-09-10"
     # 范围合并自动补行级分区日期 (表本身无 date 列 → 补 date 列)
@@ -52,23 +75,25 @@ def test_read_range_merges_partitions(tmp_path: Path) -> None:
     assert set(df.filter(pl.col("symbol") == "600519.SH")["date"].to_list()) == {"2026-09-09"}
 
 
-def test_read_range_open_ended(tmp_path: Path) -> None:
-    data_dir = _layout(tmp_path)
+def test_read_range_open_ended(tmp_path: Path, ck_runtime) -> None:
+    data_dir = _layout(tmp_path, ck_runtime)
     df, active = _read_ext_dataframe(_cfg(), data_dir, start_date="2026-09-10")
     assert len(df) == 3 and active == "2026-09-10..2026-09-11"
     df, active = _read_ext_dataframe(_cfg(), data_dir, end_date="2026-09-09")
     assert len(df) == 2 and active == "2026-09-09..2026-09-09"
 
 
-def test_read_range_reversed_rejected(tmp_path: Path) -> None:
+def test_read_range_reversed_rejected(tmp_path: Path, ck_runtime) -> None:
     with pytest.raises(HTTPException) as e:
-        _read_ext_dataframe(_cfg(), _layout(tmp_path), start_date="2026-09-11", end_date="2026-09-09")
+        _read_ext_dataframe(
+            _cfg(), _layout(tmp_path, ck_runtime), start_date="2026-09-11", end_date="2026-09-09"
+        )
     assert e.value.status_code == 400
 
 
-def test_read_range_bad_date_rejected(tmp_path: Path) -> None:
+def test_read_range_bad_date_rejected(tmp_path: Path, ck_runtime) -> None:
     with pytest.raises(HTTPException) as e:
-        _read_ext_dataframe(_cfg(), _layout(tmp_path), start_date="../../kline_daily")
+        _read_ext_dataframe(_cfg(), _layout(tmp_path, ck_runtime), start_date="../../kline_daily")
     assert e.value.status_code == 400
 
 
@@ -82,26 +107,39 @@ def test_snapshot_mode_rejects_range(tmp_path: Path) -> None:
     assert e.value.status_code == 400
 
 
-def test_exact_date_still_wins_over_range(tmp_path: Path) -> None:
+def test_exact_date_still_wins_over_range(tmp_path: Path, ck_runtime) -> None:
     df, active = _read_ext_dataframe(
-        _cfg(), _layout(tmp_path),
-        snapshot_date="2026-09-10", start_date="2026-09-09", end_date="2026-09-11",
+        _cfg(),
+        _layout(tmp_path, ck_runtime),
+        snapshot_date="2026-09-10",
+        start_date="2026-09-09",
+        end_date="2026-09-11",
     )
     assert len(df) == 1 and active == "2026-09-10"
 
 
-def test_read_range_tolerates_schema_drift(tmp_path: Path) -> None:
-    """分区 schema 不一致 (配置中途加字段 → 早期分区少列): diagonal 合并, 缺列补 null。
+def test_read_range_tolerates_schema_drift(tmp_path: Path, ck_runtime) -> None:
+    """分区 schema 不一致 (配置中途加字段 → 早期分区少列): 缺列补 null。
 
     真实场景: ext_fuyao_hot 早期 4 列、后期 7 列, vertical concat 直接 ShapeError。
+    CK 侧 values map 按行携带列名, 早期行缺 extra_tag 键 → 读出 null。
     """
-    data_dir = _layout(tmp_path)
+    data_dir = _layout(tmp_path, ck_runtime)
     # 给最后一天追加一列新字段 (模拟中途加列)
     last = data_dir / "ext_data" / "hot" / "timeseries" / "date=2026-09-11" / "part.parquet"
     df = pl.read_parquet(last).with_columns(pl.lit("x").alias("extra_tag"))
     df.write_parquet(last)
+    ck_runtime.write_ext_timeseries(
+        df.with_columns(
+            pl.lit("hot").alias("ext_id"),
+            pl.lit("2026-09-11").cast(pl.Date).alias("date"),
+            pl.lit("").alias("time_value"),
+        )
+    )
 
-    out, _active = _read_ext_dataframe(_cfg(), data_dir, start_date="2026-09-09", end_date="2026-09-11")
+    out, _active = _read_ext_dataframe(
+        _cfg(), data_dir, start_date="2026-09-09", end_date="2026-09-11"
+    )
     assert len(out) == 5
     assert "extra_tag" in out.columns
     # 早期分区的 extra_tag 为 null, 后期有值
@@ -111,11 +149,13 @@ def test_read_range_tolerates_schema_drift(tmp_path: Path) -> None:
 
 # ── 过滤 / 排序 ────────────────────────────────────────────
 def _df() -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": ["000001.SZ", "600519.SH", "300750.SZ"],
-        "concept": ["AI", "白酒", "AI"],
-        "heat": [1.0, 2.5, 3.0],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["000001.SZ", "600519.SH", "300750.SZ"],
+            "concept": ["AI", "白酒", "AI"],
+            "heat": [1.0, 2.5, 3.0],
+        }
+    )
 
 
 def test_filter_single_value_and_in_list() -> None:

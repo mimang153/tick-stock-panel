@@ -10,9 +10,23 @@ from app.services.index_const import CORE_INDEX_SYMBOLS
 
 @pytest.fixture
 def market(monkeypatch, tmp_path):
-    monkeypatch.setattr(watchlist, "list_symbols", lambda: [
-        {"symbol": "000985.SH"}, {"symbol": "159558.SZ"}, {"symbol": "600519.SH"},
-    ])
+    monkeypatch.setattr(
+        watchlist,
+        "list_symbols",
+        lambda: [
+            {"symbol": "000985.SH"},
+            {"symbol": "159558.SZ"},
+            {"symbol": "600519.SH"},
+        ],
+    )
+    # 生产 _fetch_full_market_quotes 会二次校验 load() 里的 configured provider;
+    # 真实用户配置可能是 fuyao, 这里连同原始配置一起覆盖为 tickflow。
+    _real_load = preferences.load
+    monkeypatch.setattr(
+        preferences,
+        "load",
+        lambda: {**_real_load(), "realtime_data_provider": "tickflow"},
+    )
     monkeypatch.setattr(preferences, "get_realtime_data_provider", lambda: "tickflow")
     monkeypatch.setattr(preferences, "get_realtime_pull_stock", lambda: True)
     monkeypatch.setattr(preferences, "get_realtime_pull_etf", lambda: False)
@@ -25,12 +39,18 @@ def market(monkeypatch, tmp_path):
     service = quote_service.QuoteService()
     service.set_repo(repo)
     captured = []
-    monkeypatch.setattr(service, "_process_full_market_records", lambda records, **kw: captured.append((records, kw)))
+    monkeypatch.setattr(
+        service,
+        "_process_full_market_records",
+        lambda records, **kw: captured.append((records, kw)),
+    )
     quotes = SimpleNamespace(
         get_by_universes=Mock(return_value=[{"symbol": "600519.SH", "last_price": 10}]),
         get=Mock(side_effect=lambda *, symbols: [{"symbol": s, "last_price": 20} for s in symbols]),
     )
-    monkeypatch.setattr("app.tickflow.client.get_paid_realtime_client", lambda: SimpleNamespace(quotes=quotes))
+    monkeypatch.setattr(
+        "app.tickflow.client.get_paid_realtime_client", lambda: SimpleNamespace(quotes=quotes)
+    )
     return service, quotes, captured
 
 
@@ -85,8 +105,10 @@ def test_stock_demand_works_without_bulk_universe(market, monkeypatch):
 
 def test_custom_index_supplement_includes_watchlist_and_detail(market, monkeypatch):
     service, _, captured = market
-    provider = SimpleNamespace(get_realtime=lambda: [{"symbol": "600519.SH", "last_price": 10}],
-                               get_realtime_indices=Mock(return_value=[]))
+    provider = SimpleNamespace(
+        get_realtime=lambda: [{"symbol": "600519.SH", "last_price": 10}],
+        get_realtime_indices=Mock(return_value=[]),
+    )
     monkeypatch.setattr(preferences, "get_realtime_data_provider", lambda: "custom")
     monkeypatch.setattr("app.data_providers.custom.provider_has_dataset", lambda *a: True)
     monkeypatch.setattr("app.data_providers.custom.get_provider", lambda *a: provider)
@@ -96,11 +118,13 @@ def test_custom_index_supplement_includes_watchlist_and_detail(market, monkeypat
     assert captured
 
 
-def test_custom_targeted_quotes_follow_asset_route_without_duplicate_stock_fetch(market, monkeypatch):
+def test_custom_targeted_quotes_follow_asset_route_without_duplicate_stock_fetch(
+    market, monkeypatch
+):
     service, quotes, captured = market
     provider = SimpleNamespace(
         get_realtime=lambda: [{"symbol": "600519.SH", "last_price": 10}],
-        get_realtime_symbols=Mock(return_value=[{"symbol": "159558.SZ", "last_price": .827}]),
+        get_realtime_symbols=Mock(return_value=[{"symbol": "159558.SZ", "last_price": 0.827}]),
     )
     monkeypatch.setattr(preferences, "get_realtime_data_provider", lambda: "custom")
     monkeypatch.setattr("app.data_providers.custom.provider_has_dataset", lambda *a: True)
@@ -120,14 +144,27 @@ def test_partial_quotes_merge_both_raw_and_enriched_instead_of_replacing(market,
     repo.merge_live_daily_asset = lambda asset, frame: writes.append(("raw", asset))
     repo.flush_live_daily = Mock(side_effect=AssertionError("partial stock must merge"))
     repo.flush_live_daily_asset = Mock(side_effect=AssertionError("partial ETF must merge"))
-    monkeypatch.setattr(service, "_flush_live_enriched", lambda frame, extra, *, asset_type, merge=False: writes.append(("enriched", asset_type, merge)))
+    monkeypatch.setattr(
+        service,
+        "_flush_live_enriched",
+        lambda frame, extra, *, asset_type, merge=False: writes.append(
+            ("enriched", asset_type, merge)  # type: ignore[arg-type]
+        ),
+    )
     monkeypatch.setattr(service, "_broadcast_quote_updated", lambda: None)
     monkeypatch.setattr(service, "_update_volume_delta", lambda *a: None)
     monkeypatch.setattr(quote_service, "_persist_last_fetch", lambda *a: None)
-    rows = [{"symbol": s, "last_price": 10., "open": 10., "high": 11., "low": 9., "volume": 100.}
-            for s in ["600519.SH", "159558.SZ"]]
-    service._process_full_market_records(rows, t0=0., now_ts=0., partial_assets={"stock", "etf"})
-    assert writes == [("raw", "stock"), ("raw", "etf"), ("enriched", "stock", True), ("enriched", "etf", True)]
+    rows = [
+        {"symbol": s, "last_price": 10.0, "open": 10.0, "high": 11.0, "low": 9.0, "volume": 100.0}
+        for s in ["600519.SH", "159558.SZ"]
+    ]
+    service._process_full_market_records(rows, t0=0.0, now_ts=0.0, partial_assets={"stock", "etf"})
+    assert writes == [
+        ("raw", "stock"),
+        ("raw", "etf"),
+        ("enriched", "stock", True),
+        ("enriched", "etf", True),
+    ]
 
 
 def test_subscription_api_only_registers_and_validates_no_inline_fetch(market):
@@ -141,12 +178,25 @@ def test_subscription_api_only_registers_and_validates_no_inline_fetch(market):
     app.include_router(router)
     app.state.quote_service = service
     client = TestClient(app)
-    assert client.put("/api/intraday/subscriptions/detail", json={"symbols": ["000300.sh"]}).json()["lease_seconds"] == 90
+    assert (
+        client.put("/api/intraday/subscriptions/detail", json={"symbols": ["000300.sh"]}).json()[
+            "lease_seconds"
+        ]
+        == 90
+    )
     quotes.get.assert_not_called()
     service._fetch_full_market_quotes()
     assert "000300.SH" in quotes.get.call_args.kwargs["symbols"]
-    assert client.put("/api/intraday/subscriptions/detail", json={"symbols": ["invalid"]}).status_code == 400
-    assert client.put("/api/intraday/subscriptions/detail", json={"symbols": ["000300.SH"] * 65}).status_code == 422
+    assert (
+        client.put("/api/intraday/subscriptions/detail", json={"symbols": ["invalid"]}).status_code
+        == 400
+    )
+    assert (
+        client.put(
+            "/api/intraday/subscriptions/detail", json={"symbols": ["000300.SH"] * 65}
+        ).status_code
+        == 422
+    )
     assert client.delete("/api/intraday/subscriptions/detail").status_code == 200
     assert client.delete("/api/intraday/subscriptions/detail").status_code == 200
     service._fetch_full_market_quotes()
@@ -224,11 +274,17 @@ def test_paused_worker_cannot_be_forced_to_write_by_refresh(market, monkeypatch)
 
 def test_last_fetch_persistence_does_not_change_source_version(monkeypatch, tmp_path):
     monkeypatch.setattr("app.config.settings.data_dir", tmp_path)
-    monkeypatch.setattr(preferences, "load", lambda: {"daily_data_provider": "tickflow", "last_fetch_ms": 100})
+    monkeypatch.setattr(
+        preferences, "load", lambda: {"daily_data_provider": "tickflow", "last_fetch_ms": 100}
+    )
     first = preferences.data_source_stamp()
-    monkeypatch.setattr(preferences, "load", lambda: {"daily_data_provider": "tickflow", "last_fetch_ms": 200})
+    monkeypatch.setattr(
+        preferences, "load", lambda: {"daily_data_provider": "tickflow", "last_fetch_ms": 200}
+    )
     assert preferences.data_source_stamp() == first
-    monkeypatch.setattr(preferences, "load", lambda: {"daily_data_provider": "fuyao", "last_fetch_ms": 200})
+    monkeypatch.setattr(
+        preferences, "load", lambda: {"daily_data_provider": "fuyao", "last_fetch_ms": 200}
+    )
     assert preferences.data_source_stamp() != first
 
 
@@ -251,23 +307,27 @@ def test_many_visible_symbols_respect_capability_batch_limit(market, monkeypatch
     from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
     service, quotes, _ = market
-    service.set_app_state(SimpleNamespace(capabilities=CapabilitySet({Cap.QUOTE_BATCH: CapabilityLimits(batch=2)})))
+    service.set_app_state(
+        SimpleNamespace(capabilities=CapabilitySet({Cap.QUOTE_BATCH: CapabilityLimits(batch=2)}))
+    )
     service._fetch_full_market_quotes()
-    batches = [call.kwargs['symbols'] for call in quotes.get.call_args_list]
+    batches = [call.kwargs["symbols"] for call in quotes.get.call_args_list]
     assert len(batches) > 1
     assert all(len(batch) <= 2 for batch in batches)
     flat = [s for batch in batches for s in batch]
     assert len(flat) == len(set(flat))
-    assert {'000985.SH', '159558.SZ'} <= set(flat)
+    assert {"000985.SH", "159558.SZ"} <= set(flat)
 
 
 def test_temporarily_unreadable_watchlist_keeps_market_and_detail_demand(market, monkeypatch):
     service, quotes, _ = market
     service._fetch_full_market_quotes()
-    path = service._repo.store.data_dir / 'user_data' / 'watchlist.parquet'
+    path = service._repo.store.data_dir / "user_data" / "watchlist.parquet"
     path.parent.mkdir(parents=True)
-    path.write_bytes(b'unreadable concurrent replacement')
-    monkeypatch.setattr(watchlist, 'list_symbols', Mock(side_effect=OSError('temporarily unavailable')))
-    service.subscribe_quotes('detail', ['000300.SH'])
+    path.write_bytes(b"unreadable concurrent replacement")
+    monkeypatch.setattr(
+        watchlist, "list_symbols", Mock(side_effect=OSError("temporarily unavailable"))
+    )
+    service.subscribe_quotes("detail", ["000300.SH"])
     service._fetch_full_market_quotes()
-    assert {'000985.SH', '000300.SH', '159558.SZ'} <= set(quotes.get.call_args.kwargs['symbols'])
+    assert {"000985.SH", "000300.SH", "159558.SZ"} <= set(quotes.get.call_args.kwargs["symbols"])

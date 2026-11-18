@@ -1,4 +1,5 @@
 """自动挖掘 L1 筛选 (auto_mining) 与 /api/backtest/mining/auto 契约测试。"""
+
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -26,13 +27,20 @@ def _item(**overrides: Any) -> dict[str, Any]:
 def test_classify_balanced_gate_branches() -> None:
     gate = SCREEN_GATES["balanced"]
     assert classify_factor(_item(), gate) is None
-    assert "计算失败" in classify_factor(_item(error="boom"), gate)
-    assert "样本不足" in classify_factor(_item(ic_mean=None), gate)
-    assert "预测力弱" in classify_factor(_item(ic_mean=0.01), gate)
-    assert "稳定度低" in classify_factor(_item(ic_mean=0.05, ir=0.1), gate)
-    assert "NW t" in classify_factor(_item(t_newey_west=None), gate)
-    assert "不显著" in classify_factor(_item(t_newey_west=1.0), gate)
-    assert "多重检验" in classify_factor(_item(q_value=0.5), gate)
+    assert classify_factor is not None
+    assert "计算失败" in classify_factor(_item(error="boom"), gate)  # type: ignore[operator]
+    assert classify_factor is not None
+    assert "样本不足" in classify_factor(_item(ic_mean=None), gate)  # type: ignore[operator]
+    assert classify_factor is not None
+    assert "预测力弱" in classify_factor(_item(ic_mean=0.01), gate)  # type: ignore[operator]
+    assert classify_factor is not None
+    assert "稳定度低" in classify_factor(_item(ic_mean=0.05, ir=0.1), gate)  # type: ignore[operator]
+    assert classify_factor is not None
+    assert "NW t" in classify_factor(_item(t_newey_west=None), gate)  # type: ignore[operator]
+    assert classify_factor is not None
+    assert "不显著" in classify_factor(_item(t_newey_west=1.0), gate)  # type: ignore[operator]
+    assert classify_factor is not None
+    assert "多重检验" in classify_factor(_item(q_value=0.5), gate)  # type: ignore[operator]
     # q 缺失按通过 (探索档小样本口径)
     assert classify_factor(_item(q_value=None), gate) is None
 
@@ -62,8 +70,13 @@ class _StubService:
 
 def _batch_item(name: str, **overrides: Any) -> SimpleNamespace:
     base = {
-        "factor_name": name, "label": f"label_{name}", "group": "g",
-        "ic_mean": 0.05, "ir": 0.4, "t_newey_west": 2.5, "q_value": 0.05,
+        "factor_name": name,
+        "label": f"label_{name}",
+        "group": "g",
+        "ic_mean": 0.05,
+        "ir": 0.4,
+        "t_newey_west": 2.5,
+        "q_value": 0.05,
         "error": None,
     }
     base.update(overrides)
@@ -77,23 +90,29 @@ def _stub_batch(monkeypatch: pytest.MonkeyPatch) -> type[_StubService]:
     return _StubService
 
 
-def test_screen_pool_order_truncation_and_reasons(monkeypatch: pytest.MonkeyPatch, _stub_batch: type[_StubService]) -> None:
-    monkeypatch.setattr(auto_mining, "factor_columns_view", lambda: [
-        {"id": name, "asset_types": ["stock"]} for name in ("a", "b", "c", "d", "e", "f")
-    ])
+def test_screen_pool_order_truncation_and_reasons(
+    monkeypatch: pytest.MonkeyPatch, _stub_batch: type[_StubService]
+) -> None:
+    monkeypatch.setattr(
+        auto_mining,
+        "factor_columns_view",
+        lambda: [{"id": name, "asset_types": ["stock"]} for name in ("a", "b", "c", "d", "e", "f")],
+    )
     items = [
-        _batch_item("a", ic_mean=0.10, ir=0.8),   # |ic|*|ir|=0.08 → 第 1
-        _batch_item("b", ic_mean=0.05, ir=0.4),   # 0.02 → 第 2
-        _batch_item("c", ic_mean=-0.06, ir=-0.5), # 0.03 → 第 3 (负 IC 反向)
-        _batch_item("d", ic_mean=0.01),           # 预测力弱
-        _batch_item("e", ir=0.1),                 # 稳定度低
+        _batch_item("a", ic_mean=0.10, ir=0.8),  # |ic|*|ir|=0.08 → 第 1
+        _batch_item("b", ic_mean=0.05, ir=0.4),  # 0.02 → 第 2
+        _batch_item("c", ic_mean=-0.06, ir=-0.5),  # 0.03 → 第 3 (负 IC 反向)
+        _batch_item("d", ic_mean=0.01),  # 预测力弱
+        _batch_item("e", ir=0.1),  # 稳定度低
         _batch_item("f", t_newey_west=float("nan")),  # NaN 清洗 → 样本不足
     ]
     _stub_batch.results = items
     summary = screen_all_factors(
-        object(), asset_type="stock",
+        object(),
+        asset_type="stock",
         start=date.today() - timedelta(days=800),
-        end=date.today(), profile="balanced",
+        end=date.today(),
+        profile="balanced",
         max_factors=2,
     )
     assert summary["pool"] == ["a", "c"]  # 0.08 > 0.03 > 0.02, 截断到 2
@@ -111,11 +130,16 @@ def test_screen_pool_order_truncation_and_reasons(monkeypatch: pytest.MonkeyPatc
     assert sum(counts.values()) == 3
 
 
-def test_screen_window_capped_and_daily_rebalance(monkeypatch: pytest.MonkeyPatch, _stub_batch: type[_StubService]) -> None:
+def test_screen_window_capped_and_daily_rebalance(
+    monkeypatch: pytest.MonkeyPatch, _stub_batch: type[_StubService]
+) -> None:
     _stub_batch.results = []
     start = date.today() - timedelta(days=1000)
     screen_all_factors(
-        object(), asset_type="stock", start=start, end=date.today(),
+        object(),
+        asset_type="stock",
+        start=start,
+        end=date.today(),
         profile="exploratory",
     )
     config = _stub_batch.calls[0]
@@ -134,8 +158,9 @@ class _FakeManager:
         self.start_calls: list[dict[str, Any]] = []
 
     def start(self, request, fingerprint, force=False, source="manual", run_id=None):
-        self.start_calls.append({"request": request, "fingerprint": fingerprint,
-                                 "force": force, "source": source})
+        self.start_calls.append(
+            {"request": request, "fingerprint": fingerprint, "force": force, "source": source}
+        )
         return self.store.create(request, fingerprint)
 
 
@@ -163,9 +188,15 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> Any:
 
 def _screening(pool: list[str]) -> dict[str, Any]:
     return {
-        "profile": "balanced", "gate": {"min_abs_ic": 0.02}, "n_total": 61,
-        "n_qualified": len(pool), "pool": pool, "pool_truncated": False,
-        "qualified": [], "failed": [], "reason_counts": {},
+        "profile": "balanced",
+        "gate": {"min_abs_ic": 0.02},
+        "n_total": 61,
+        "n_qualified": len(pool),
+        "pool": pool,
+        "pool_truncated": False,
+        "qualified": [],
+        "failed": [],
+        "reason_counts": {},
         "screen_window": {"start": "2025-08-31", "end": "2026-08-31"},
         "elapsed_ms": 1.0,
     }
@@ -173,7 +204,8 @@ def _screening(pool: list[str]) -> dict[str, Any]:
 
 def test_auto_start_contract_with_pool(client: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        auto_mining, "screen_all_factors",
+        auto_mining,
+        "screen_all_factors",
         lambda *a, **k: _screening(["f1", "f2"]),
     )
     response = client.client.post("/api/backtest/mining/auto", json={"asset_type": "stock"})
@@ -196,7 +228,8 @@ def test_auto_start_contract_with_pool(client: Any, monkeypatch: pytest.MonkeyPa
 
 def test_auto_start_no_qualified_factors(client: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        auto_mining, "screen_all_factors",
+        auto_mining,
+        "screen_all_factors",
         lambda *a, **k: _screening([]),
     )
     response = client.client.post("/api/backtest/mining/auto", json={})
@@ -208,7 +241,11 @@ def test_auto_start_no_qualified_factors(client: Any, monkeypatch: pytest.Monkey
 
 
 def test_auto_start_rejects_bad_date_range(client: Any) -> None:
-    response = client.client.post("/api/backtest/mining/auto", json={
-        "start": "2026-09-01", "end": "2026-08-01",
-    })
+    response = client.client.post(
+        "/api/backtest/mining/auto",
+        json={
+            "start": "2026-09-01",
+            "end": "2026-08-01",
+        },
+    )
     assert response.status_code == 422

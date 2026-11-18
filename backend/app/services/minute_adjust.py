@@ -74,18 +74,23 @@ def _load_factor_frames(data_dir: Path, asset_type: str) -> tuple[pl.DataFrame, 
 
     返回空帧表示该资产类型无因子数据 (调用方按恒等处理)。
     """
-    table_dir = _factor_table_dir(data_dir, asset_type)
-    files = sorted(table_dir.glob("*.parquet")) if table_dir.exists() else []
-    if not files:
-        return (pl.DataFrame(), pl.DataFrame())
-    newest = max(f.stat().st_mtime for f in files)
-    key = (str(data_dir), table_dir.name)
+    from app.storage.runtime import require_storage
+
+    store = require_storage().store
+    etf = asset_type == "etf"
+    key = (str(data_dir), asset_type)
+    # 用因子行数做轻量签名: 行数不变即复用缓存, 避免每次同步都重读全表
     with _factor_cache_lock:
         cached = _factor_cache.get(key)
-        if cached is not None and cached[0] == newest:
-            return cached[1], cached[2]
+    try:
+        current_rows = len(store.read_adj_factor(etf=etf, columns=["symbol"]))
+    except Exception as exc:  # noqa: BLE001 - 因子不可用时按恒等处理
+        logger.warning("minute_adjust: 读取除权因子失败: %s", exc)
+        return (pl.DataFrame(), pl.DataFrame())
+    if cached is not None and cached[0] == float(current_rows):
+        return cached[1], cached[2]
 
-    factors = pl.read_parquet([str(f) for f in files])
+    factors = store.read_adj_factor(etf=etf)
     if factors.is_empty() or not {"symbol", "trade_date", "ex_factor"}.issubset(factors.columns):
         frames = (pl.DataFrame(), pl.DataFrame())
     else:
@@ -103,7 +108,7 @@ def _load_factor_frames(data_dir: Path, asset_type: str) -> tuple[pl.DataFrame, 
         total = fs.group_by("symbol").agg(pl.col("cum").last().alias("total"))
         frames = (fs.select("symbol", "trade_date", "cum"), total)
     with _factor_cache_lock:
-        _factor_cache[key] = (newest, frames[0], frames[1])
+        _factor_cache[key] = (float(factors.height), frames[0], frames[1])
     return frames
 
 
@@ -124,7 +129,14 @@ def compute_ratio_pairs(
         return pairs.with_columns(pl.lit(1.0).alias("_ratio"))
     pairs = (
         pairs.sort(["symbol", "_d"])
-        .join_asof(fs, left_on="_d", right_on="trade_date", by="symbol", strategy="backward", check_sortedness=False)
+        .join_asof(
+            fs,
+            left_on="_d",
+            right_on="trade_date",
+            by="symbol",
+            strategy="backward",
+            check_sortedness=False,
+        )
         .join(total, on="symbol", how="left")
         .with_columns(
             (pl.col("cum").fill_null(1.0) / pl.col("total").fill_null(1.0)).alias("_ratio")
@@ -166,16 +178,36 @@ def apply_minute_adjustment(
 # 存量迁移: 拉取时前复权的旧分区 → 原始口径 (日K原始收盘价锚点换算)
 # ================================================================
 
+
 def _daily_close_lookup(daily_dir: Path, trade_day: date) -> dict[str, float] | None:
-    """读某交易日日K分区的原始收盘价 {symbol: close}。分区缺失返回 None。"""
-    part = daily_dir / f"date={trade_day.isoformat()}" / "part.parquet"
-    if not part.exists():
-        return None
-    try:
-        df = pl.read_parquet(part, columns=["symbol", "close"])
-    except Exception as e:
-        logger.warning("迁移读日K分区失败 %s: %s", part, e)
-        return None
+    """读某交易日日K的原始收盘价 {symbol: close}。无数据返回 None。
+
+    CK 为唯一读源（kline_daily 的 close 即原始价锚点）；存储未初始化
+    （离线脚本/单测）时回退本地分区文件。
+    """
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is not None:
+        try:
+            df = runtime.store.read_daily(
+                "kline_daily",
+                start=trade_day,
+                end=trade_day,
+                columns=["symbol", "close"],
+            )
+        except Exception as e:  # noqa: BLE001 - 锚点读取失败按缺锚点处理
+            logger.warning("迁移读日K锚点失败 %s: %s", trade_day, e)
+            return None
+    else:
+        part = daily_dir / f"date={trade_day.isoformat()}" / "part.parquet"
+        if not part.exists():
+            return None
+        try:
+            df = pl.read_parquet(part, columns=["symbol", "close"])
+        except Exception as e:  # noqa: BLE001 - 已有日志, 迁移读失败跳过该分区
+            logger.warning("迁移读日K分区失败 %s: %s", part, e)
+            return None
     if df.is_empty():
         return None
     return dict(zip(df["symbol"].to_list(), df["close"].to_list(), strict=True))
@@ -188,9 +220,7 @@ def _partition_anchor_ratio(minute_df: pl.DataFrame, daily_close: dict[str, floa
     k≈1 → 已是原始价; k 偏离 1 → 该 symbol 为拉取时前复权数据, 价格需除以 k。
     """
     last_close = (
-        minute_df.sort("datetime")
-        .group_by("symbol")
-        .agg(pl.col("close").last().alias("_last"))
+        minute_df.sort("datetime").group_by("symbol").agg(pl.col("close").last().alias("_last"))
     )
     anchors = (
         pl.DataFrame({"symbol": list(daily_close.keys()), "_raw": list(daily_close.values())})
@@ -199,11 +229,53 @@ def _partition_anchor_ratio(minute_df: pl.DataFrame, daily_close: dict[str, floa
         .filter(
             pl.col("_k").is_finite()
             & (pl.col("_k") > 0.2)
-            & (pl.col("_k") < 5.0)   # 锚点换算的合理界: 远超个股除权幅度视为数据异常
+            & (pl.col("_k") < 5.0)  # 锚点换算的合理界: 远超个股除权幅度视为数据异常
         )
         .select("symbol", "_k")
     )
     return anchors
+
+
+def _migrate_minute_partition(
+    part_dir: Path,
+    daily_root: Path,
+    write_lock: threading.Lock | None,
+    stats: dict,
+) -> bool:
+    """换算单个分钟分区；返回 True 表示缺日K锚点需跳过本轮进度回调。"""
+    try:
+        trade_day = date.fromisoformat(part_dir.name[5:])
+        daily_close = _daily_close_lookup(daily_root, trade_day)
+        if not daily_close:
+            stats["skipped_no_daily"] += 1
+            return True
+        part = part_dir / "part.parquet"
+        df = pl.read_parquet(part)
+        if df.is_empty() or "close" not in df.columns:
+            return True
+        anchors = _partition_anchor_ratio(df, daily_close)
+        conv = anchors.filter((pl.col("_k") - 1.0).abs() > 1e-9)
+        if not conv.is_empty():
+            fixed = (
+                df.join(conv, on="symbol", how="left")
+                .with_columns(
+                    [pl.col(c) / pl.col("_k").fill_null(1.0) for c in PRICE_COLS if c in df.columns]
+                )
+                .drop("_k")
+                .sort(["symbol", "datetime"])
+            )
+            tmp = part.with_suffix(".parquet.tmp")
+            fixed.write_parquet(tmp)
+            if write_lock is not None:
+                with write_lock:
+                    tmp.replace(part)
+            else:
+                tmp.replace(part)
+            stats["converted_symbols"] += conv.height
+    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
+        stats["failed"] += 1
+        logger.warning("分钟分区迁移失败 %s: %s", part_dir.name, e)
+    return False
 
 
 def migrate_minute_to_raw(
@@ -220,7 +292,13 @@ def migrate_minute_to_raw(
     返回统计: partitions / converted_symbols / skipped_no_daily / failed / marked。
     """
     data_dir = Path(data_dir)
-    stats = {"partitions": 0, "converted_symbols": 0, "skipped_no_daily": 0, "failed": 0, "marked": False}
+    stats = {
+        "partitions": 0,
+        "converted_symbols": 0,
+        "skipped_no_daily": 0,
+        "failed": 0,
+        "marked": False,
+    }
     if minute_basis_is_raw(data_dir):
         stats["marked"] = True
         return stats
@@ -234,40 +312,11 @@ def migrate_minute_to_raw(
             continue
         partitions = sorted(p for p in minute_root.glob("date=*") if (p / "part.parquet").exists())
         for part_dir in partitions:
-            trade_day = date.fromisoformat(part_dir.name[5:])
             stats["partitions"] += 1
-            try:
-                daily_close = _daily_close_lookup(daily_root, trade_day)
-                if not daily_close:
-                    # 无日K锚点的分区无法换算, 不算失败: 留待日K补齐后续跑
-                    stats["skipped_no_daily"] += 1
-                    continue
-                part = part_dir / "part.parquet"
-                df = pl.read_parquet(part)
-                if df.is_empty() or "close" not in df.columns:
-                    continue
-                anchors = _partition_anchor_ratio(df, daily_close)
-                conv = anchors.filter((pl.col("_k") - 1.0).abs() > 1e-9)
-                if not conv.is_empty():
-                    fixed = (
-                        df.join(conv, on="symbol", how="left")
-                        .with_columns(
-                            [pl.col(c) / pl.col("_k").fill_null(1.0) for c in PRICE_COLS if c in df.columns]
-                        )
-                        .drop("_k")
-                        .sort(["symbol", "datetime"])
-                    )
-                    tmp = part.with_suffix(".parquet.tmp")
-                    fixed.write_parquet(tmp)
-                    if write_lock is not None:
-                        with write_lock:
-                            tmp.replace(part)
-                    else:
-                        tmp.replace(part)
-                    stats["converted_symbols"] += conv.height
-            except Exception as e:
-                stats["failed"] += 1
-                logger.warning("分钟分区迁移失败 %s: %s", part_dir.name, e)
+            skipped = _migrate_minute_partition(part_dir, daily_root, write_lock, stats)
+            if skipped:
+                # 无日K锚点留待日K补齐后续跑, 与本轮进度回调语义保持一致
+                continue
             if progress_cb is not None:
                 progress_cb(stats)
 
@@ -281,6 +330,8 @@ def migrate_minute_to_raw(
         stats["marked"] = True
         logger.info(
             "分钟K已迁移为原始口径: %d 分区, 换算 %d symbol·日, 跳过 %d",
-            stats["partitions"], stats["converted_symbols"], stats["skipped_no_daily"],
+            stats["partitions"],
+            stats["converted_symbols"],
+            stats["skipped_no_daily"],
         )
     return stats

@@ -5,6 +5,7 @@
 
 Starter+ 盘后可用 quotes.get(universes) 顺便补充 name。
 """
+
 from __future__ import annotations
 
 import logging
@@ -13,7 +14,6 @@ from pathlib import Path
 import polars as pl
 
 from app.market_time import cn_today
-from app.services.fs_utils import atomic_write_parquet
 from app.tickflow import client as tf_client
 from app.tickflow.client import get_client
 
@@ -65,7 +65,7 @@ def _fetch_instruments_via_provider() -> list[dict] | None:
         return None
     try:
         items = provider.get_instruments("stock") or []
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("provider %s get_instruments 失败: %s", provider_name, e)
         return None
     rows = _flatten_instruments(items)
@@ -73,8 +73,20 @@ def _fetch_instruments_via_provider() -> list[dict] | None:
     return rows
 
 
-def sync_instruments(data_dir: Path) -> int:
-    """全量同步标的维表 → data/instruments/instruments.parquet。
+def load_instruments(storage=None) -> pl.DataFrame:
+    """统一读取标的维表（ClickHouse 为唯一数据源）。
+
+    供原先直接 `read_parquet(data/instruments/instruments.parquet)` 的调用方替换。
+    """
+    if storage is None:
+        from app.storage.runtime import require_storage
+
+        storage = require_storage().store
+    return storage.read_instruments("stock")
+
+
+def sync_instruments(data_dir: Path, storage=None) -> int:
+    """全量同步标的维表 → ClickHouse。
 
     返回写入的行数。
     """
@@ -91,21 +103,24 @@ def sync_instruments(data_dir: Path) -> int:
                 if items:
                     all_rows.extend(_flatten_instruments(items, current_limits=current_limits))
                     logger.info("instruments %s: %d stocks", ex, len(items))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
                 logger.warning("get_instruments(%s) failed: %s", ex, e)
 
     if not all_rows:
         return 0
 
     df = pl.DataFrame(all_rows)
-    df = _preserve_instrument_fields(df, data_dir)
-    df = df.with_columns(pl.lit(cn_today()).alias("as_of"))
+    if storage is None:
+        from app.storage.runtime import require_storage
 
-    out = data_dir / "instruments" / "instruments.parquet"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_parquet(df, out)
+        storage = require_storage().store
+    existing = load_instruments(storage)
+    df = _preserve_instrument_fields(df, existing)
+    df = df.with_columns(pl.lit(cn_today()).cast(pl.Date).alias("as_of"))
 
-    logger.info("instruments synced: %d rows → %s", df.height, out)
+    storage.write_instruments("stock", df)
+
+    logger.info("instruments synced: %d rows → clickhouse", df.height)
     return df.height
 
 
@@ -114,11 +129,14 @@ def sync_instruments(data_dir: Path) -> int:
 # 依赖换手率与流通市值的策略筛不出任何标的 —— 因此绝不能用 null 覆盖已有值。
 # 涨跌停价随交易日变化，不从历史维表继承。
 _SHARE_FIELDS = (
-    "listing_date", "total_shares", "float_shares", "tick_size",
+    "listing_date",
+    "total_shares",
+    "float_shares",
+    "tick_size",
 )
 
 
-def _preserve_instrument_fields(df: pl.DataFrame, data_dir: Path) -> pl.DataFrame:
+def _preserve_instrument_fields(df: pl.DataFrame, existing: pl.DataFrame) -> pl.DataFrame:
     """用现有维表补全 provider 未提供的名称、股本和交易规则字段。
 
     新增标的仍保留 null (没有历史值可用, 不伪造); 只在同一 symbol 上把
@@ -132,17 +150,11 @@ def _preserve_instrument_fields(df: pl.DataFrame, data_dir: Path) -> pl.DataFram
     if all(df[c].null_count() == 0 for c in available):
         return df  # provider 已提供全部字段, 无需补全
 
-    path = data_dir / "instruments" / "instruments.parquet"
-    if not path.exists():
+    if existing.is_empty():
         logger.warning(
             "instruments provider 缺少标的信息且无历史维表可补全: %s",
             "/".join(c for c in available if df[c].null_count()),
         )
-        return df
-    try:
-        existing = pl.read_parquet(path)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("instruments 历史维表读取失败, 无法补全股本字段: %s", e)
         return df
     if "symbol" not in existing.columns:
         return df
@@ -159,18 +171,16 @@ def _preserve_instrument_fields(df: pl.DataFrame, data_dir: Path) -> pl.DataFram
         # 逐行 coalesce: provider 有值用 provider, 为空才回落历史值。这样
         # 「部分标的缺字段」也能补齐, 而不只处理整列为空的源。
         if merged[col].null_count() and merged[prev].is_not_null().any():
-            merged = merged.with_columns(
-                pl.coalesce(pl.col(col), pl.col(prev)).alias(col)
-            )
+            merged = merged.with_columns(pl.coalesce(pl.col(col), pl.col(prev)).alias(col))
             filled.append(col)
     merged = merged.drop([f"{c}_prev" for c in keep[1:] if f"{c}_prev" in merged.columns])
     if filled:
-        restored = int(merged.select(
-            [pl.col(c).is_not_null().sum() for c in filled]
-        ).row(0)[0])
+        restored = int(merged.select([pl.col(c).is_not_null().sum() for c in filled]).row(0)[0])
         logger.info(
             "instruments provider 缺 %s, 已逐行从历史维表补全 (首列非空 %d/%d)",
-            "/".join(filled), restored, merged.height,
+            "/".join(filled),
+            restored,
+            merged.height,
         )
     return merged
 
@@ -199,17 +209,17 @@ def enrich_names_from_quotes(
     if not name_map:
         return 0
 
-    inst_path = data_dir / "instruments" / "instruments.parquet"
-    if not inst_path.exists():
+    df = load_instruments()
+    if df.is_empty():
         return 0
 
-    df = pl.read_parquet(inst_path)
-
     # 只更新空 name 的行
-    updates = pl.DataFrame({
-        "symbol": list(name_map.keys()),
-        "_new_name": list(name_map.values()),
-    })
+    updates = pl.DataFrame(
+        {
+            "symbol": list(name_map.keys()),
+            "_new_name": list(name_map.values()),
+        }
+    )
     df = df.join(updates, on="symbol", how="left")
     df = df.with_columns(
         pl.when(pl.col("name").is_null() | (pl.col("name") == ""))
@@ -218,6 +228,8 @@ def enrich_names_from_quotes(
         .alias("name"),
     ).drop("_new_name")
 
-    atomic_write_parquet(df, inst_path)
+    from app.storage.runtime import require_storage
+
+    require_storage().store.write_instruments("stock", df)
     logger.info("instruments name enriched from quotes: %d names", len(name_map))
     return len(name_map)

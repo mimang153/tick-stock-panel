@@ -1,4 +1,5 @@
 """自定义信号归档测试 — 可逆标记位 + created_at 治理 + 计算不受影响。"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -39,6 +40,7 @@ def test_archive_unarchive_roundtrip(tmp_path):
     legacy_edit = {**_SIGNAL, "name": "归档测试v2"}
     edited = client.post("/api/custom-signals", json=legacy_edit)
     assert edited.status_code == 200
+    assert on_disk is not None
     assert edited.json()["signal"]["created_at"] == on_disk["created_at"]
 
     archived = client.post("/api/custom-signals/archive_test/archive")
@@ -59,6 +61,7 @@ def test_archive_unarchive_roundtrip(tmp_path):
     assert restored.status_code == 200
     assert restored.json()["signal"]["archived"] is False
     assert restored.json()["signal"]["archived_at"] is None
+    assert on_disk is not None
     assert restored.json()["signal"]["created_at"] == on_disk["created_at"]
 
 

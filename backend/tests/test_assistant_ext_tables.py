@@ -6,6 +6,7 @@
 - 错误契约: 未知表、非法过滤字段、非法日期均按 ok=False 回填, 不抛异常。
 - QUICK_SUGGESTS 全量携带 group 字段(空会话分组卡片依赖)。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -15,7 +16,7 @@ from app.custom.assistant import tools as assistant_tools
 from app.services.ext_data import ExtConfig, ExtConfigStore, ExtField, rows_to_parquet
 
 
-def _make_timeseries_table(data_dir: Path, days: list[str]) -> None:
+def _make_timeseries_table(data_dir: Path, days: list[str], ck=None) -> None:
     cfg = ExtConfig(
         id="demo_pool",
         label="演示池",
@@ -27,16 +28,27 @@ def _make_timeseries_table(data_dir: Path, days: list[str]) -> None:
         description="测试用扩展表",
     )
     ExtConfigStore(data_dir).upsert(cfg)
+    import polars as pl
+
+    rows = [
+        {"symbol": "600519.SH", "score": 88.5},
+        {"symbol": "000001.SZ", "score": 72.0},
+    ]
     for day in days:
-        rows_to_parquet(
-            [
-                {"symbol": "600519.SH", "score": 88.5},
-                {"symbol": "000001.SZ", "score": 72.0},
-            ],
-            cfg,
-            data_dir,
-            snapshot_date=date.fromisoformat(day),
-        )
+        rows_to_parquet(rows, cfg, data_dir, snapshot_date=date.fromisoformat(day))
+        # query_ext_table 经 read_ext_timeseries 读 CK，需同步写 CK
+        if ck is not None:
+            ck.write_ext_timeseries(
+                pl.DataFrame(
+                    {
+                        "ext_id": ["demo_pool"] * len(rows),
+                        "symbol": [r["symbol"] for r in rows],
+                        "score": [r["score"] for r in rows],
+                        "date": [date.fromisoformat(day)] * len(rows),
+                        "time_value": [""] * len(rows),
+                    }
+                )
+            )
 
 
 def _make_snapshot_table(data_dir: Path) -> None:
@@ -79,13 +91,15 @@ def test_list_ext_tables_empty_gives_note(tmp_path: Path) -> None:
     assert result["tables"] == [] and "还没有配置" in result["note"]
 
 
-async def test_query_ext_table_rows_filter_sort_range(tmp_path: Path) -> None:
-    _make_timeseries_table(tmp_path, ["2026-09-24", "2026-09-25"])
+async def test_query_ext_table_rows_filter_sort_range(tmp_path: Path, ck_runtime) -> None:
+    _make_timeseries_table(tmp_path, ["2026-09-24", "2026-09-25"], ck_runtime)
     ctx = assistant_tools.ToolContext.build(data_dir=tmp_path)
 
     # 默认: 最新分区
     payload = await assistant_tools.execute_assistant_tool(
-        "query_ext_table", {"table": "demo_pool"}, ctx,
+        "query_ext_table",
+        {"table": "demo_pool"},
+        ctx,
     )
     assert payload["ok"] is True
     result = payload["result"]
@@ -118,24 +132,30 @@ async def test_query_ext_table_snapshot_mode(tmp_path: Path) -> None:
     ctx = assistant_tools.ToolContext.build(data_dir=tmp_path)
 
     payload = await assistant_tools.execute_assistant_tool(
-        "query_ext_table", {"table": "snap_tags"}, ctx,
+        "query_ext_table",
+        {"table": "snap_tags"},
+        ctx,
     )
     assert payload["ok"] is True
     assert payload["result"]["rows"][0]["tag"] == "电池"
 
     # 快照表不支持日期范围 → 契约回错
     bad = await assistant_tools.execute_assistant_tool(
-        "query_ext_table", {"table": "snap_tags", "start_date": "2026-09-01"}, ctx,
+        "query_ext_table",
+        {"table": "snap_tags", "start_date": "2026-09-01"},
+        ctx,
     )
     assert bad["ok"] is False and "快照" in bad["error"]
 
 
-async def test_query_ext_table_error_contract(tmp_path: Path) -> None:
-    _make_timeseries_table(tmp_path, ["2026-09-25"])
+async def test_query_ext_table_error_contract(tmp_path: Path, ck_runtime) -> None:
+    _make_timeseries_table(tmp_path, ["2026-09-25"], ck_runtime)
     ctx = assistant_tools.ToolContext.build(data_dir=tmp_path)
 
     missing = await assistant_tools.execute_assistant_tool(
-        "query_ext_table", {"table": "nope"}, ctx,
+        "query_ext_table",
+        {"table": "nope"},
+        ctx,
     )
     assert missing["ok"] is False and "不存在" in missing["error"]
 
@@ -143,22 +163,28 @@ async def test_query_ext_table_error_contract(tmp_path: Path) -> None:
     assert no_table["ok"] is False and "table" in no_table["error"]
 
     bad_filter = await assistant_tools.execute_assistant_tool(
-        "query_ext_table", {"table": "demo_pool", "filter": "nope:1"}, ctx,
+        "query_ext_table",
+        {"table": "demo_pool", "filter": "nope:1"},
+        ctx,
     )
     assert bad_filter["ok"] is False and "不存在" in bad_filter["error"]
 
     bad_date = await assistant_tools.execute_assistant_tool(
-        "query_ext_table", {"table": "demo_pool", "date": "not-a-date"}, ctx,
+        "query_ext_table",
+        {"table": "demo_pool", "date": "not-a-date"},
+        ctx,
     )
     assert bad_date["ok"] is False and "日期格式错误" in bad_date["error"]
 
 
 def test_summarize_ext_table_results() -> None:
     assert "扩展表" in assistant_tools.summarize_tool_result(
-        "list_ext_tables", {"ok": True, "result": {"tables": [{}, {}], "count": 2}},
+        "list_ext_tables",
+        {"ok": True, "result": {"tables": [{}, {}], "count": 2}},
     )
     assert "暂无" in assistant_tools.summarize_tool_result(
-        "list_ext_tables", {"ok": True, "result": {"tables": [], "count": 0}},
+        "list_ext_tables",
+        {"ok": True, "result": {"tables": [], "count": 0}},
     )
     assert "2/4" in assistant_tools.summarize_tool_result(
         "query_ext_table",

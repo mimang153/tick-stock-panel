@@ -18,18 +18,24 @@ DAY = date(2026, 10, 29)
 
 
 def frame(day=DAY, close=10.0):
-    return pl.DataFrame({
-        "symbol": ["600000.SH"], "date": [day],
-        "open": [close], "high": [close], "low": [close],
-        "close": [close], "volume": [1000.0],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "date": [day],
+            "open": [close],
+            "high": [close],
+            "low": [close],
+            "close": [close],
+            "volume": [1000.0],
+        }
+    )
 
 
 @pytest.fixture
-def repo(tmp_path):
+def repo(tmp_path, ck_runtime):
+    # enriched 读写源已切 CK: append/refresh 都经全局 runtime
     result = KlineRepository(DataStore(tmp_path))
     yield result
-    result.db.close()
 
 
 def warm_history(repo):
@@ -42,7 +48,8 @@ def warm_history(repo):
     repo._enriched_history_generation = repo.get_matrix_data_generation()
     if hasattr(repo, "get_enriched_generation_snapshot"):
         repo._enriched_history_snapshot = (
-            history, repo.get_enriched_generation_snapshot("stock"),
+            history,
+            repo.get_enriched_generation_snapshot("stock"),
         )
     return history
 
@@ -62,7 +69,6 @@ def test_live_tick_reuses_older_history_and_watchlist_baseline(repo):
 def test_repository_refresh_records_a_scoped_snapshot(repo):
     history = pl.concat([frame(DAY + timedelta(days=i), 10.0 + i / 10) for i in range(5)])
     repo.append_enriched(history)
-    assert repo.refresh_view("kline_enriched", repo._enriched_glob)
     repo._refresh_enriched()
     before = repo.get_enriched_range(DAY, DAY)
     assert before is not None
@@ -89,7 +95,9 @@ def test_panel_reuses_history_across_ticks_but_reloads_revisions(repo, asset_typ
     args = (None, DAY, DAY, ["symbol", "date", "close"], asset_type)
     first = engine.load_panel(*args)
     for offset in (1, 1, 2):
-        repo.flush_live_enriched_asset(asset_type, frame(DAY + timedelta(days=offset), 12.0 + offset))
+        repo.flush_live_enriched_asset(
+            asset_type, frame(DAY + timedelta(days=offset), 12.0 + offset)
+        )
         assert engine.load_panel(*args).equals(first)
     assert engine._cache.stats()["compute_count"] == 1
     repo.flush_live_enriched_asset(asset_type, frame(DAY, 9.0))
@@ -115,8 +123,10 @@ def test_matrix_cache_respects_coverage_and_historical_corrections(repo, monkeyp
     repo.append_enriched(pl.concat([frame(), frame(DAY + timedelta(days=1), 11.0)]))
     engine = BacktestEngine(repo)
     plan = SimpleNamespace(
-        execution_backend="matrix_native", base_columns={"close"},
-        instrument_columns=set(), matrix_columns=set(),
+        execution_backend="matrix_native",
+        base_columns={"close"},
+        instrument_columns=set(),
+        matrix_columns=set(),
     )
 
     def load(end=DAY):
@@ -146,10 +156,7 @@ def test_prefix_versions_survive_restart_noop_and_abandon(repo):
     empty.abandon()
     assert get_enriched_generation_snapshot(repo.store.data_dir) == current
     restarted = KlineRepository(DataStore(repo.store.data_dir))
-    try:
-        assert restarted.get_enriched_generation_snapshot() == current
-    finally:
-        restarted.db.close()
+    assert restarted.get_enriched_generation_snapshot() == current
 
 
 def test_range_metadata_is_bounded_and_unknown_changes_reset_it(repo):
@@ -189,9 +196,14 @@ def test_legacy_writer_and_failed_recovery_cannot_reuse_scoped_versions(repo):
     assert repo.get_enriched_range(DAY, DAY) is None
     assert repo.get_enriched_generation_snapshot().through(DAY) == "legacy-writer"
     incomplete = EnrichedPublication(repo.store.data_dir)
-    incomplete.write_parquet(frame(), repo.store.data_dir / "kline_daily_enriched/date=2026-10-29/part.parquet")
+    incomplete.write_parquet(
+        frame(), repo.store.data_dir / "kline_daily_enriched/date=2026-10-29/part.parquet"
+    )
     incomplete.abandon()
     recovery = EnrichedPublication(repo.store.data_dir, recover=True)
     recovery.begin()
     recovery.abandon()
-    assert repo.get_enriched_generation_snapshot().through(DAY) not in {old.through(DAY), "legacy-writer"}
+    assert repo.get_enriched_generation_snapshot().through(DAY) not in {
+        old.through(DAY),
+        "legacy-writer",
+    }

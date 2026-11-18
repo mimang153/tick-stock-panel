@@ -33,8 +33,10 @@ def session(symbol=SYM, day=DAY):
 
 
 @pytest.fixture
-def market(tmp_path, monkeypatch):
-    repo = KlineRepository(DataStore(tmp_path))
+def market(tmp_path, monkeypatch, ck_runtime):
+    # count_remaining_gaps 走 require_storage() 读 CK kline_minute；
+    # ck_runtime 初始化全局 runtime 并让 kline_sync 的分钟写入镜像生效。
+    repo = KlineRepository(DataStore(tmp_path), storage=ck_runtime)
     caps = CapabilitySet()
     caps.grant(Cap.KLINE_MINUTE_BATCH)
     monkeypatch.setattr(kline_sync, "_selected_minute_provider_name", lambda: "test")
@@ -76,7 +78,7 @@ def test_targeted_repair_filters_provider_and_counts_only_new_bars(market, monke
         frame = pl.concat(
             [session(), session("000001.SZ"), session(day=DAY + timedelta(days=1))]
         ).drop("amount")
-        for _ in range(2):
+        for _ in range(2):  # type: ignore[assignment]
             on_segment(frame)
 
     monkeypatch.setattr(kline_sync, "sync_minute_batch", fetch)
@@ -118,7 +120,9 @@ def test_legacy_migration_keeps_published_bars_and_unreadable_source(market):
     kline_sync._migrate_symbol_to_date_partition(repo)
     kline_sync._migrate_symbol_to_date_partition(repo)
     df = pl.read_parquet(folder / f"date={DAY}" / "part.parquet")
-    assert df.filter(pl.col("symbol") != SYM).equals(other)
+    # 迁移后 CK 镜像回读会补齐 OHLC 列（0 占位）；按业务列比较，不依赖列数完全一致
+    cols = ["symbol", "datetime", "close", "volume", "amount"]
+    assert df.filter(pl.col("symbol") != SYM).select(cols).equals(other.select(cols))
     prices = df.filter(pl.col("symbol") == SYM)["close"].to_list()
     assert prices == [5.0] * 120 + [9.0] * 120
     assert not old.exists()

@@ -6,6 +6,7 @@ settle_day(当日) 却把当日开盘之后才创建 (或涨跌停排队) 的 ne
 都是拿下单时已经知道的价格回填成交。盘中自动跟单 (缺省 next_open) 因此系统性
 按当日开盘价买入。
 """
+
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
@@ -64,16 +65,23 @@ def test_next_open_placed_after_open_waits_for_next_trading_day(data_dir, monkey
     """14:00 下的次日开盘单: 当日结算不成交 (不计顺延), 次日按次日开盘价成交。"""
     _freeze(monkeypatch, DAY, time(14, 0))
     paper.create_account(data_dir, 1_000_000)
-    order, err = paper.create_order(data_dir, SYM, "buy", qty=100, order_type="next_open", ref_price=10.8)
+    order, err = paper.create_order(
+        data_dir, SYM, "buy", qty=100, order_type="next_open", ref_price=10.8
+    )
     assert err is None
 
     assert paper.settle_day(data_dir, DAY.isoformat())["filled"] == 0
+    assert order is not None
     got = paper.get_order(data_dir, order["id"])
+    assert got is not None
     assert got["status"] == "pending" and got["postponed"] == 0
 
     assert paper.settle_day(data_dir, NEXT.isoformat())["filled"] == 1
+    assert order is not None
     got = paper.get_order(data_dir, order["id"])
+    assert got is not None
     assert got["status"] == "filled"
+    assert got is not None
     assert got["fill_price"] == pytest.approx(paper.apply_slippage(10.5, "buy", 5.0))
 
 
@@ -81,10 +89,14 @@ def test_next_open_placed_before_open_fills_same_day_open(data_dir, monkeypatch)
     """开盘前 (08:00) 下的次日开盘单: 当日开盘价就是下一次开盘, 当日结算照常成交。"""
     _freeze(monkeypatch, DAY, time(8, 0))
     paper.create_account(data_dir, 1_000_000)
-    order, err = paper.create_order(data_dir, SYM, "buy", qty=100, order_type="next_open", ref_price=10.0)
+    order, err = paper.create_order(
+        data_dir, SYM, "buy", qty=100, order_type="next_open", ref_price=10.0
+    )
     assert err is None
     assert paper.settle_day(data_dir, DAY.isoformat())["filled"] == 1
+    assert order is not None
     got = paper.get_order(data_dir, order["id"])
+    assert got is not None
     assert got["fill_price"] == pytest.approx(paper.apply_slippage(10.2, "buy", 5.0))
 
 
@@ -93,10 +105,14 @@ def test_etf_market_order_intraday_waits_for_next_open(data_dir, monkeypatch):
     _freeze(monkeypatch, DAY, time(10, 30))
     paper.create_account(data_dir, 1_000_000)
     order, err = paper.create_order(data_dir, ETF, "buy", qty=100, asset_type="etf", ref_price=10.5)
+    assert order is not None
     assert err is None and order["order_type"] == "next_open"
     assert paper.settle_day(data_dir, DAY.isoformat())["filled"] == 0
     assert paper.settle_day(data_dir, NEXT.isoformat())["filled"] == 1
-    assert paper.get_order(data_dir, order["id"])["fill_price"] == pytest.approx(paper.apply_slippage(10.5, "buy", 5.0))
+    assert order is not None
+    assert paper.get_order(data_dir, order["id"])["fill_price"] == pytest.approx(  # type: ignore[index]
+        paper.apply_slippage(10.5, "buy", 5.0)
+    )
 
 
 def test_limit_queue_intraday_waits_for_next_open(data_dir, monkeypatch):
@@ -106,34 +122,57 @@ def test_limit_queue_intraday_waits_for_next_open(data_dir, monkeypatch):
     order, err = paper.create_order(data_dir, SYM, "buy", qty=100, ref_price=10.5)
     assert err is None
     assert paper.evaluate_intraday(data_dir, {SYM: 11.0}) == []  # 涨停 11.0 → 排队
+    assert order is not None
     queued = paper.get_order(data_dir, order["id"])
-    assert queued["status"] == "pending" and queued["order_type"] == "next_open" and queued["postponed"] == 1
+    assert queued is not None
+    assert (
+        queued["status"] == "pending"
+        and queued["order_type"] == "next_open"
+        and queued["postponed"] == 1
+    )
 
     assert paper.settle_day(data_dir, DAY.isoformat())["filled"] == 0
+    assert order is not None
     got = paper.get_order(data_dir, order["id"])
+    assert got is not None
     assert got["status"] == "pending" and got["postponed"] == 1
 
     assert paper.settle_day(data_dir, NEXT.isoformat())["filled"] == 1
-    assert paper.get_order(data_dir, order["id"])["fill_price"] == pytest.approx(paper.apply_slippage(10.5, "buy", 5.0))
+    assert order is not None
+    assert paper.get_order(data_dir, order["id"])["fill_price"] == pytest.approx(  # type: ignore[index]
+        paper.apply_slippage(10.5, "buy", 5.0)
+    )
 
 
 def test_auto_rule_intraday_order_waits_for_next_open(data_dir, monkeypatch):
     """自动跟单在盘中 (13:30) 触发的次日开盘单: 不按当日开盘价成交。"""
     _freeze(monkeypatch, DAY, time(13, 30))
     paper.create_account(data_dir, 1_000_000)
-    paper_auto.create_auto_rule(data_dir, {
-        "name": "跟策略", "match_kind": "strategy", "match_id": "strat_1",
-        "side": "buy", "size_mode": "fixed_amount", "size_value": 5000,
-        "order_type": "next_open", "cooldown_days": 5,
-    })
-    created = paper_auto.on_rule_events(data_dir, [
-        {"source": "strategy", "strategy_id": "strat_1", "symbol": SYM, "price": 10.6},
-    ])
+    paper_auto.create_auto_rule(
+        data_dir,
+        {
+            "name": "跟策略",
+            "match_kind": "strategy",
+            "match_id": "strat_1",
+            "side": "buy",
+            "size_mode": "fixed_amount",
+            "size_value": 5000,
+            "order_type": "next_open",
+            "cooldown_days": 5,
+        },
+    )
+    created = paper_auto.on_rule_events(
+        data_dir,
+        [
+            {"source": "strategy", "strategy_id": "strat_1", "symbol": SYM, "price": 10.6},
+        ],
+    )
     assert len(created) == 1 and created[0]["order_type"] == "next_open"
 
     assert paper.settle_day(data_dir, DAY.isoformat())["filled"] == 0
     assert paper.settle_day(data_dir, NEXT.isoformat())["filled"] == 1
     got = paper.get_order(data_dir, created[0]["id"])
+    assert got is not None
     assert got["fill_price"] == pytest.approx(paper.apply_slippage(10.5, "buy", 5.0))
 
 
@@ -141,21 +180,31 @@ def test_close_order_placed_after_close_waits_for_next_close(data_dir, monkeypat
     """收盘后 (15:05) 下的收盘单: 当日收盘价已知, 留到次日按次日收盘价成交。"""
     _freeze(monkeypatch, DAY, time(15, 5))
     paper.create_account(data_dir, 1_000_000)
-    order, err = paper.create_order(data_dir, SYM, "buy", qty=100, order_type="close", ref_price=10.8)
+    order, err = paper.create_order(
+        data_dir, SYM, "buy", qty=100, order_type="close", ref_price=10.8
+    )
     assert err is None
     assert paper.settle_day(data_dir, DAY.isoformat())["filled"] == 0
     assert paper.settle_day(data_dir, NEXT.isoformat())["filled"] == 1
-    assert paper.get_order(data_dir, order["id"])["fill_price"] == pytest.approx(paper.apply_slippage(10.9, "buy", 5.0))
+    assert order is not None
+    assert paper.get_order(data_dir, order["id"])["fill_price"] == pytest.approx(  # type: ignore[index]
+        paper.apply_slippage(10.9, "buy", 5.0)
+    )
 
 
 def test_close_order_placed_in_session_fills_same_day_close(data_dir, monkeypatch):
     """盘中 (14:00) 下的收盘单照常按当日收盘价成交。"""
     _freeze(monkeypatch, DAY, time(14, 0))
     paper.create_account(data_dir, 1_000_000)
-    order, err = paper.create_order(data_dir, SYM, "buy", qty=100, order_type="close", ref_price=10.8)
+    order, err = paper.create_order(
+        data_dir, SYM, "buy", qty=100, order_type="close", ref_price=10.8
+    )
     assert err is None
     assert paper.settle_day(data_dir, DAY.isoformat())["filled"] == 1
-    assert paper.get_order(data_dir, order["id"])["fill_price"] == pytest.approx(paper.apply_slippage(10.8, "buy", 5.0))
+    assert order is not None
+    assert paper.get_order(data_dir, order["id"])["fill_price"] == pytest.approx(  # type: ignore[index]
+        paper.apply_slippage(10.8, "buy", 5.0)
+    )
 
 
 def test_market_order_placed_after_close_not_filled_by_close_fallback(data_dir, monkeypatch):
@@ -165,24 +214,36 @@ def test_market_order_placed_after_close_not_filled_by_close_fallback(data_dir, 
     order, err = paper.create_order(data_dir, SYM, "buy", qty=100, ref_price=10.8)
     assert err is None
     assert paper.settle_day(data_dir, DAY.isoformat())["filled"] == 0
-    assert paper.get_order(data_dir, order["id"])["status"] == "pending"
+    assert order is not None
+    assert paper.get_order(data_dir, order["id"])["status"] == "pending"  # type: ignore[index]
 
     _freeze(monkeypatch, NEXT, time(9, 35))
     assert len(paper.evaluate_intraday(data_dir, {SYM: 10.6})) == 1
-    assert paper.get_order(data_dir, order["id"])["fill_price"] == pytest.approx(paper.apply_slippage(10.6, "buy", 5.0))
+    assert order is not None
+    assert paper.get_order(data_dir, order["id"])["fill_price"] == pytest.approx(  # type: ignore[index]
+        paper.apply_slippage(10.6, "buy", 5.0)
+    )
 
 
 def test_naive_stamp_is_beijing_and_unparseable_stamp_keeps_old_behavior(data_dir, monkeypatch):
     """兼容: 无时区的时间戳按北京墙钟判定; 时间戳缺失/损坏的旧订单不拦截 (沿用原行为)。"""
     _freeze(monkeypatch, DAY, time(14, 0))
     paper.create_account(data_dir, 1_000_000)
-    naive, _ = paper.create_order(data_dir, SYM, "buy", qty=100, order_type="next_open", ref_price=10.8)
-    broken, _ = paper.create_order(data_dir, SYM, "buy", qty=100, order_type="next_open", ref_price=10.8)
+    naive, _ = paper.create_order(
+        data_dir, SYM, "buy", qty=100, order_type="next_open", ref_price=10.8
+    )
+    broken, _ = paper.create_order(
+        data_dir, SYM, "buy", qty=100, order_type="next_open", ref_price=10.8
+    )
+    assert naive is not None
     naive["created_at"] = f"{DAY.isoformat()}T14:00:00"
     paper.save_order(data_dir, naive)
+    assert broken is not None
     broken["created_at"] = ""
     paper.save_order(data_dir, broken)
 
     assert paper.settle_day(data_dir, DAY.isoformat())["filled"] == 1
-    assert paper.get_order(data_dir, naive["id"])["status"] == "pending"
-    assert paper.get_order(data_dir, broken["id"])["status"] == "filled"
+    assert naive is not None
+    assert paper.get_order(data_dir, naive["id"])["status"] == "pending"  # type: ignore[index]
+    assert broken is not None
+    assert paper.get_order(data_dir, broken["id"])["status"] == "filled"  # type: ignore[index]

@@ -4,9 +4,10 @@
 拉取线程(僵尸)仍在写盘, UI 状态与实际不对齐; 重复点击还可能撞执行锁。
 均为纯逻辑, 不触网。
 """
+
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -19,7 +20,7 @@ def _iso(dt: datetime) -> str:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @pytest.fixture(autouse=True)
@@ -40,6 +41,7 @@ def _make_running_job(store: JobStore, timeout_s: int) -> str:
 
 # ── 进度停滞判定 ────────────────────────────────────────────────────────
 
+
 def test_stalled_job_is_reaped(monkeypatch, tmp_path):
     """无进度上报超过阈值 → 标记失败 + 置取消标志 + 释放执行槽。"""
     monkeypatch.setattr(preferences, "load", lambda: {})
@@ -54,7 +56,9 @@ def test_stalled_job_is_reaped(monkeypatch, tmp_path):
     store.reap_stale()
 
     j = store.get(jid)
+    assert j is not None
     assert j["status"] == "failed"
+    assert j is not None
     assert "进度停滞" in j["error"]
     # 协作式取消: 僵尸线程通过 flag 感知(记录已被 fail 弹出, flag 仍在)
     assert pipeline_jobs.is_cancelled(jid)
@@ -72,7 +76,7 @@ def test_progressing_job_is_not_reaped(monkeypatch, tmp_path):
     store._active_jobs[jid]["last_progress_at"] = _iso(_now() - timedelta(seconds=10))
 
     store.reap_stale()
-    assert store.get(jid)["status"] == "running"
+    assert store.get(jid)["status"] == "running"  # type: ignore[index]
 
 
 def test_hard_cap_terminates_endless_progress(tmp_path):
@@ -85,7 +89,9 @@ def test_hard_cap_terminates_endless_progress(tmp_path):
 
     store.reap_stale()
     j = store.get(jid)
+    assert j is not None
     assert j["status"] == "failed"
+    assert j is not None
     assert "硬上限" in j["error"]
 
 
@@ -94,7 +100,7 @@ def test_progress_updates_heartbeat(tmp_path):
     store = JobStore(store_dir=tmp_path / "jobs")
     jid = _make_running_job(store, timeout_s=60)
     store.progress(jid, "sync", 10, "chunk 1/10")
-    assert store.get(jid)["last_progress_at"] is not None
+    assert store.get(jid)["last_progress_at"] is not None  # type: ignore[index]
 
 
 def test_new_stage_resets_stage_progress(tmp_path):
@@ -102,10 +108,11 @@ def test_new_stage_resets_stage_progress(tmp_path):
     jid = _make_running_job(store, timeout_s=60)
     store.progress(jid, "integrity_check", 95, "检查完成", stage_pct=100)
     store.progress(jid, "sync_daily", 12, "开始修补")
-    assert store.get(jid)["stage_pct"] == 0
+    assert store.get(jid)["stage_pct"] == 0  # type: ignore[index]
 
 
 # ── 协作式取消 ──────────────────────────────────────────────────────────
+
 
 def test_progress_raises_after_cancel(tmp_path):
     """取消后, 僵尸线程下一次 progress() 回调抛 JobCancelledError 自行退出。"""
@@ -124,13 +131,14 @@ def test_progress_raises_after_record_popped(tmp_path):
     store.terminate(jid, "超时自动取消")
 
     # 记录已从内存弹出
-    assert store.get(jid)["status"] == "failed"
+    assert store.get(jid)["status"] == "failed"  # type: ignore[index]
     with pytest.raises(JobCancelledError):
         store.progress(jid, "sync", 20, "zombie chunk")
 
 
 def test_cancelled_error_survives_chunk_isolation():
     """JobCancelledError 继承 BaseException: 同步循环的分块异常隔离不得吞掉它。"""
+
     def chunk_loop(cancel_at: int) -> str:
         for i in range(5):
             try:
@@ -145,6 +153,7 @@ def test_cancelled_error_survives_chunk_isolation():
 
 
 # ── 执行槽所有权 ────────────────────────────────────────────────────────
+
 
 def test_run_slot_ownership_guard():
     """非持有者的释放一律忽略 —— 僵尸线程 finally 不得误释放新任务的槽。"""
@@ -177,6 +186,7 @@ def test_run_slot_reap_release_prevents_zombie_release():
 
 # ── 手动取消 API 端点契约 (数据页「停止」按钮) ──────────────────────────
 
+
 def test_manual_cancel_endpoint_contract(monkeypatch, tmp_path):
     """POST /api/pipeline/jobs/{id}/cancel: running/pending 可停, 终态 400, 未知 404。"""
     from fastapi import FastAPI
@@ -202,7 +212,9 @@ def test_manual_cancel_endpoint_contract(monkeypatch, tmp_path):
     assert resp.status_code == 200
     assert resp.json() == {"cancelled": jid}
     j = store.get(jid)
+    assert j is not None
     assert j["status"] == "failed"
+    assert j is not None
     assert "手动取消" in j["error"]
     assert pipeline_jobs.is_cancelled(jid)
     assert pipeline_jobs.try_acquire_run_slot("next") is True
@@ -218,6 +230,7 @@ def test_manual_cancel_endpoint_contract(monkeypatch, tmp_path):
 
 # ── 排队等待有上界(「分钟K同步卡死空转」修复) ──────────────────────────
 
+
 def test_queued_pending_job_is_reaped(monkeypatch, tmp_path):
     """pending(排队等重任务槽)停滞超阈值 → 同样被回收: 可读错误 + 置取消标志。
 
@@ -232,7 +245,9 @@ def test_queued_pending_job_is_reaped(monkeypatch, tmp_path):
     store.reap_stale()
 
     j = store.get(jid)
+    assert j is not None
     assert j["status"] == "failed"
+    assert j is not None
     assert "排队等待重任务执行槽" in j["error"]
     assert pipeline_jobs.is_cancelled(jid)
 
@@ -244,7 +259,7 @@ def test_fresh_pending_job_is_not_reaped(monkeypatch, tmp_path):
     jid, _ = store.create(timeout_s=600)
 
     store.reap_stale()
-    assert store.get(jid)["status"] == "pending"
+    assert store.get(jid)["status"] == "pending"  # type: ignore[index]
 
 
 def test_pending_skips_hard_total_cap(monkeypatch, tmp_path):
@@ -256,7 +271,7 @@ def test_pending_skips_hard_total_cap(monkeypatch, tmp_path):
     store._active_jobs[jid]["last_progress_at"] = _iso(_now() - timedelta(seconds=10))
 
     store.reap_stale()
-    assert store.get(jid)["status"] == "pending"
+    assert store.get(jid)["status"] == "pending"  # type: ignore[index]
 
 
 def test_run_with_capacity_fails_readably_when_slot_hogged(monkeypatch, tmp_path):
@@ -280,7 +295,9 @@ def test_run_with_capacity_fails_readably_when_slot_hogged(monkeypatch, tmp_path
 
     assert ran == []  # fn 从未执行, 无数据写入
     j = store.get(jid)
+    assert j is not None
     assert j["status"] == "failed"
+    assert j is not None
     assert "排队等待重任务执行槽超时" in j["error"]
 
 
@@ -297,4 +314,4 @@ def test_run_with_capacity_runs_when_slot_free(monkeypatch, tmp_path):
     jid, _ = store.create(timeout_s=60)
     assert pipeline_jobs.run_with_capacity(jid, lambda: "ok") == "ok"
     # succeed() 由调用方(API task)负责; run_with_capacity 只负责 start
-    assert store.get(jid)["status"] == "running"
+    assert store.get(jid)["status"] == "running"  # type: ignore[index]

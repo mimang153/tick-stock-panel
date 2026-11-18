@@ -24,15 +24,17 @@ from app.tickflow.repository import DataStore, KlineRepository
 
 
 def _frame(value: float = 10.0) -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": ["000001.SZ"],
-        "date": [date(2026, 8, 14)],
-        "open": [value],
-        "high": [value],
-        "low": [value],
-        "close": [value],
-        "volume": [1_000.0],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["000001.SZ"],
+            "date": [date(2026, 8, 14)],
+            "open": [value],
+            "high": [value],
+            "low": [value],
+            "close": [value],
+            "volume": [1_000.0],
+        }
+    )
 
 
 def test_repository_enriched_noop_does_not_bump_generation(tmp_path) -> None:
@@ -53,8 +55,8 @@ def test_commit_twice_is_idempotent_issue417(tmp_path) -> None:
     first = tmp_path / "kline_daily_enriched" / "date=2026-08-13" / "part.parquet"
     second = tmp_path / "kline_daily_enriched" / "date=2026-08-14" / "part.parquet"
     publication.write_parquet(_frame(10.0), first)
-    assert publication.commit() is not None   # 分区1: 有变化, 正常发布
-    assert publication.commit() is None       # 分区2: 无变化, 空提交幂等
+    assert publication.commit() is not None  # 分区1: 有变化, 正常发布
+    assert publication.commit() is None  # 分区2: 无变化, 空提交幂等
     # 已提交过的发布对象继续写入仍可用 (write 重新认领)
     publication.write_parquet(_frame(11.0), second)
     assert publication.commit() is not None
@@ -66,18 +68,32 @@ def test_repository_changed_partition_before_unchanged_issue417(tmp_path) -> Non
     repo = KlineRepository(DataStore(tmp_path))
     d1, d2 = date(2026, 8, 13), date(2026, 8, 14)
     base = {"symbol": ["000001.SZ"] * 2, "date": [d1, d2]}
-    repo.append_enriched(pl.DataFrame({
-        **base,
-        "open": [10.0, 10.0], "high": [10.0, 10.0], "low": [10.0, 10.0],
-        "close": [10.0, 10.0], "volume": [1_000.0, 1_000.0],
-    }))
+    repo.append_enriched(
+        pl.DataFrame(
+            {
+                **base,
+                "open": [10.0, 10.0],
+                "high": [10.0, 10.0],
+                "low": [10.0, 10.0],
+                "close": [10.0, 10.0],
+                "volume": [1_000.0, 1_000.0],
+            }
+        )
+    )
     first = repo.get_matrix_data_generation("stock")
     # 第二批: d1 有变化, d2 与库中内容一致 (无变化分区排在其后)
-    repo.append_enriched(pl.DataFrame({
-        **base,
-        "open": [10.5, 10.0], "high": [10.5, 10.0], "low": [10.5, 10.0],
-        "close": [10.5, 10.0], "volume": [1_000.0, 1_000.0],
-    }))
+    repo.append_enriched(
+        pl.DataFrame(
+            {
+                **base,
+                "open": [10.5, 10.0],
+                "high": [10.5, 10.0],
+                "low": [10.5, 10.0],
+                "close": [10.5, 10.0],
+                "volume": [1_000.0, 1_000.0],
+            }
+        )
+    )
     assert repo.get_matrix_data_generation("stock") != first
     assert repo.get_matrix_data_generation("stock") != first  # 幂等不抛
 
@@ -102,9 +118,7 @@ def test_failed_multi_partition_publication_remains_fail_closed(
     with pytest.raises(OSError, match="injected"):
         publication.write_parquet(_frame(11.0), second)
 
-    marker = json.loads(
-        (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
-    )
+    marker = json.loads((tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8"))
     assert marker["state"] == "publishing"
     assert first.is_file()
     assert not second.is_file()
@@ -138,9 +152,7 @@ def test_recovery_takes_over_when_owner_process_has_exited(tmp_path, monkeypatch
         "owner_pid": 12345,
         "updated_at_ns": 0,
     }
-    (tmp_path / ".matrix_generation_stock.json").write_text(
-        json.dumps(stale), encoding="utf-8"
-    )
+    (tmp_path / ".matrix_generation_stock.json").write_text(json.dumps(stale), encoding="utf-8")
 
     monkeypatch.setattr("app.enriched_generation.psutil.pid_exists", lambda _: False)
 
@@ -149,9 +161,7 @@ def test_recovery_takes_over_when_owner_process_has_exited(tmp_path, monkeypatch
     recovered.write_parquet(_frame(10.0), out)
     recovered.commit()
 
-    marker = json.loads(
-        (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
-    )
+    marker = json.loads((tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8"))
     assert marker["state"] == "ready"
     assert get_enriched_generation(tmp_path, "stock") == marker["generation"]
     assert pl.read_parquet(out)["close"].item() == pytest.approx(10.0)
@@ -180,14 +190,14 @@ def test_panel_reader_retries_when_generation_changes_during_scan(tmp_path) -> N
         store=SimpleNamespace(data_dir=tmp_path),
         get_matrix_data_generation=lambda _asset_type: next(generations),
     )
-    engine = BacktestEngine(repo)
+    engine = BacktestEngine(repo)  # type: ignore[arg-type]
     calls: list[str] = []
 
     def load(*_args):
         calls.append("scan")
         return _frame(float(len(calls)))
 
-    engine._load_panel_inner = load
+    engine._load_panel_inner = load  # type: ignore[method-assign]
     panel = engine.load_panel(
         None,
         date(2026, 8, 14),
@@ -209,7 +219,7 @@ def test_matrix_reader_retries_when_generation_changes_during_build(
         get_matrix_data_generation=lambda _asset_type: next(generations),
         get_instruments_asset=lambda _asset_type: pl.DataFrame(),
     )
-    engine = BacktestEngine(repo)
+    engine = BacktestEngine(repo)  # type: ignore[arg-type]
     calls: list[str | None] = []
     expected = SimpleNamespace(
         execution_backend="matrix_native",
@@ -236,42 +246,42 @@ def test_matrix_reader_retries_when_generation_changes_during_build(
     assert calls == ["generation-a", "generation-b"]
 
 
-def test_live_flush_write_recovers_stale_marker_from_dead_process(
-    tmp_path, monkeypatch
-) -> None:
+def test_live_flush_write_recovers_stale_marker_from_dead_process(tmp_path, monkeypatch) -> None:
     """实时 enriched 落盘(repository 路径)遇到僵死 publishing 标记应接管自愈,
     而非持续抛错直到下一次盘后管道。"""
     from app.tickflow.repository import DataStore, KlineRepository
 
     (tmp_path / ".matrix_generation_stock.json").write_text(
-        json.dumps({
-            "state": "publishing",
-            "generation": "stale-generation",
-            "publication_id": "stale-publication",
-            "owner_pid": 999999999,
-            "updated_at_ns": 0,
-        }),
+        json.dumps(
+            {
+                "state": "publishing",
+                "generation": "stale-generation",
+                "publication_id": "stale-publication",
+                "owner_pid": 999999999,
+                "updated_at_ns": 0,
+            }
+        ),
         encoding="utf-8",
     )
 
     repo = KlineRepository(DataStore(tmp_path))
     repo.append_enriched(_frame(10.0))
 
-    marker = json.loads(
-        (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
-    )
+    marker = json.loads((tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8"))
     assert marker["state"] == "ready"
 
 
 def _stale_publishing_marker(tmp_path, owner_pid: int = 999999999) -> None:
     (tmp_path / ".matrix_generation_stock.json").write_text(
-        json.dumps({
-            "state": "publishing",
-            "generation": "stale-generation",
-            "publication_id": "stale-publication",
-            "owner_pid": owner_pid,
-            "updated_at_ns": 0,
-        }),
+        json.dumps(
+            {
+                "state": "publishing",
+                "generation": "stale-generation",
+                "publication_id": "stale-publication",
+                "owner_pid": owner_pid,
+                "updated_at_ns": 0,
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -283,9 +293,7 @@ def test_reader_self_heals_stale_publishing_marker_from_dead_owner(tmp_path) -> 
 
     generation = get_enriched_generation(tmp_path, "stock")
 
-    marker = json.loads(
-        (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
-    )
+    marker = json.loads((tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8"))
     assert marker["state"] == "ready"
     # 恢复时换新 generation: 磁盘可能残留部分替换的文件, 按代缓存需要失效。
     assert generation not in ("", "stale-generation")
@@ -293,17 +301,13 @@ def test_reader_self_heals_stale_publishing_marker_from_dead_owner(tmp_path) -> 
     assert get_enriched_generation(tmp_path, "stock") == generation
 
 
-def test_reader_still_fails_closed_while_owner_is_alive(
-    tmp_path, monkeypatch
-) -> None:
+def test_reader_still_fails_closed_while_owner_is_alive(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("app.enriched_generation._process_is_alive", lambda pid: True)
     _stale_publishing_marker(tmp_path, owner_pid=os.getpid() + 1)
 
     with pytest.raises(EnrichedGenerationUnavailableError, match="being published"):
         get_enriched_generation(tmp_path, "stock")
-    marker = json.loads(
-        (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
-    )
+    marker = json.loads((tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8"))
     assert marker["state"] == "publishing"  # 标记未被读取方改动
 
 
@@ -320,9 +324,7 @@ def test_reader_respects_active_in_process_publication(tmp_path) -> None:
 
 
 def _is_ready_marker(tmp_path) -> bool:
-    marker = json.loads(
-        (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
-    )
+    marker = json.loads((tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8"))
     return marker["state"] == "ready"
 
 
@@ -345,9 +347,7 @@ def test_data_generation_await_retries_during_publication(tmp_path, monkeypatch)
     assert calls["n"] == 3
 
 
-def test_data_generation_await_times_out_and_respects_cancel(
-    tmp_path, monkeypatch
-) -> None:
+def test_data_generation_await_times_out_and_respects_cancel(tmp_path, monkeypatch) -> None:
     engine = BacktestEngine(KlineRepository(DataStore(tmp_path)))
     monkeypatch.setattr("app.backtest.engine._GENERATION_POLL_S", 0.001)
 
@@ -384,6 +384,7 @@ def test_worker_error_message_translates_publishing_error() -> None:
 # 长任务与实时行情争抢发布代: 等待错开而不是整批失败
 # ---------------------------------------------------------------------------
 
+
 def test_long_task_waits_for_short_live_publication(tmp_path) -> None:
     """回归: 盘后/手动全量同步撞上实时行情的一轮发布 (几百毫秒) 时,
     修复前直接抛 "another enriched publication is active", 8 分钟任务白跑。"""
@@ -417,7 +418,9 @@ def test_claim_wait_times_out_with_original_error(tmp_path) -> None:
     holder.begin()
     try:
         waiter = EnrichedPublication(tmp_path, recover=True, claim_wait_s=0.3)
-        with pytest.raises(EnrichedGenerationUnavailableError, match="another enriched publication is active"):
+        with pytest.raises(
+            EnrichedGenerationUnavailableError, match="another enriched publication is active"
+        ):
             waiter.begin()
     finally:
         holder.abandon()
@@ -441,6 +444,7 @@ def test_begin_without_write_releases_claim(tmp_path) -> None:
 # 残留发布标记的自愈: 心跳超时接管 + 启动自检
 # ---------------------------------------------------------------------------
 
+
 def _write_stale_marker(tmp_path, *, owner_pid: int, age_seconds: float) -> str:
     generation = "base-generation"
     marker = {
@@ -450,9 +454,7 @@ def _write_stale_marker(tmp_path, *, owner_pid: int, age_seconds: float) -> str:
         "owner_pid": owner_pid,
         "updated_at_ns": time.time_ns() - int(age_seconds * 1_000_000_000),
     }
-    (tmp_path / ".matrix_generation_stock.json").write_text(
-        json.dumps(marker), encoding="utf-8"
-    )
+    (tmp_path / ".matrix_generation_stock.json").write_text(json.dumps(marker), encoding="utf-8")
     return generation
 
 
@@ -496,22 +498,16 @@ def test_abandon_resets_state_even_if_lock_is_held(tmp_path, monkeypatch) -> Non
     publication.begin()
 
     def always_busy(*_args, **_kwargs):
-        raise EnrichedGenerationUnavailableError(
-            "another enriched publication is active"
-        )
+        raise EnrichedGenerationUnavailableError("another enriched publication is active")
 
-    monkeypatch.setattr(
-        "app.enriched_generation._exclusive_generation_lock", always_busy
-    )
+    monkeypatch.setattr("app.enriched_generation._exclusive_generation_lock", always_busy)
     publication.abandon()
 
     assert publication._publishing is False
     assert publication._changed is False
 
 
-def test_stale_heartbeat_allows_takeover_even_if_owner_process_alive(
-    tmp_path, monkeypatch
-) -> None:
+def test_stale_heartbeat_allows_takeover_even_if_owner_process_alive(tmp_path, monkeypatch) -> None:
     """属主进程活着但很久没有心跳 (已停止发布): 应允许接管。
 
     现场: 后端进程没退出, 但发布对象已被丢弃; 停止实时行情后再无写入方,
@@ -624,7 +620,7 @@ def test_heartbeat_is_noop_before_begin(tmp_path) -> None:
     assert not (tmp_path / ".matrix_generation_stock.json").exists()
 
 
-def test_run_pipeline_releases_claim_when_compute_fails(tmp_path, monkeypatch) -> None:
+def test_run_pipeline_releases_claim_when_compute_fails(tmp_path, monkeypatch, ck_runtime) -> None:
     """管道在计算阶段抛异常: 不得留下任何发布认领。
 
     修复前 run_pipeline 没有任何 abandon 调用; 一旦在写过分区之后失败,
@@ -636,6 +632,7 @@ def test_run_pipeline_releases_claim_when_compute_fails(tmp_path, monkeypatch) -
     daily = tmp_path / "kline_daily" / "date=2026-08-14"
     daily.mkdir(parents=True)
     _frame().write_parquet(daily / "part.parquet")
+    ck_runtime.write_daily("kline_daily", _frame())
 
     def boom(*_args, **_kwargs):
         raise RuntimeError("injected compute failure")
@@ -650,7 +647,7 @@ def test_run_pipeline_releases_claim_when_compute_fails(tmp_path, monkeypatch) -
     assert get_enriched_generation(tmp_path, "stock")
 
 
-def test_run_pipeline_abandons_claim_after_partial_write(tmp_path, monkeypatch) -> None:
+def test_run_pipeline_abandons_claim_after_partial_write(tmp_path, monkeypatch, ck_runtime) -> None:
     """已写入部分分区后失败: 保持 fail-closed, 但同一进程内可立即被接管。
 
     不能直接放行读取 (数据可能半新半旧), 也不能让对象永久自认"发布中" ——
@@ -661,9 +658,9 @@ def test_run_pipeline_abandons_claim_after_partial_write(tmp_path, monkeypatch) 
     for ds in ("2026-08-13", "2026-08-14"):
         d = tmp_path / "kline_daily" / f"date={ds}"
         d.mkdir(parents=True)
-        _frame().with_columns(pl.lit(date.fromisoformat(ds)).alias("date")).write_parquet(
-            d / "part.parquet"
-        )
+        frame = _frame().with_columns(pl.lit(date.fromisoformat(ds)).alias("date"))
+        frame.write_parquet(d / "part.parquet")
+        ck_runtime.write_daily("kline_daily", frame)
 
     original_write = EnrichedPublication.write_parquet
     calls = {"n": 0}
@@ -691,6 +688,7 @@ def test_run_pipeline_abandons_claim_after_partial_write(tmp_path, monkeypatch) 
     follower = EnrichedPublication(tmp_path, recover=True, claim_wait_s=0.2)
     follower.write_parquet(_frame(10.0), out)
     assert follower.commit()
-    assert get_enriched_generation(tmp_path, "stock") == json.loads(
-        (tmp_path / ".matrix_generation_stock.json").read_text()
-    )["generation"]
+    assert (
+        get_enriched_generation(tmp_path, "stock")
+        == json.loads((tmp_path / ".matrix_generation_stock.json").read_text())["generation"]
+    )

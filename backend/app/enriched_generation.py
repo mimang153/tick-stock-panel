@@ -38,6 +38,8 @@ CLAIM_STALE_SECONDS = 600.0
 # A bounded prefix-version timeline: changes on D invalidate D and later windows
 # (indicators may depend on all preceding history), never windows ending before D.
 _MAX_RANGE_GENERATIONS = 128
+# 需要同步镜像到 CK 的 enriched 表（读路径已切 CK）
+_ENRICHED_TABLES = frozenset({"kline_daily_enriched", "kline_etf_enriched", "kline_index_enriched"})
 
 
 @dataclass(frozen=True)
@@ -47,7 +49,9 @@ class EnrichedGenerationSnapshot:
     ranges: tuple[tuple[date, str], ...] = ()
 
     def through(self, end: date) -> str:
-        return next((token for day, token in reversed(self.ranges) if day <= end), self.base_generation)
+        return next(
+            (token for day, token in reversed(self.ranges) if day <= end), self.base_generation
+        )
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -75,9 +79,12 @@ def _snapshot(payload: dict[str, Any]) -> EnrichedGenerationSnapshot:
         return EnrichedGenerationSnapshot(generation, generation)
     try:
         base = payload["base_generation"]
-        ranges = tuple((date.fromisoformat(day), token) for day, token in payload["range_generations"])
+        ranges = tuple(
+            (date.fromisoformat(day), token) for day, token in payload["range_generations"]
+        )
         if (
-            not isinstance(base, str) or not base
+            not isinstance(base, str)
+            or not base
             or len(ranges) > _MAX_RANGE_GENERATIONS
             or any(not isinstance(token, str) or not token for _, token in ranges)
             or any(a[0] >= b[0] for a, b in pairwise(ranges))
@@ -85,7 +92,9 @@ def _snapshot(payload: dict[str, Any]) -> EnrichedGenerationSnapshot:
         ):
             raise ValueError("invalid range generations")
     except (KeyError, TypeError, ValueError) as exc:
-        raise EnrichedGenerationUnavailableError("enriched range generation marker is invalid") from exc
+        raise EnrichedGenerationUnavailableError(
+            "enriched range generation marker is invalid"
+        ) from exc
     return EnrichedGenerationSnapshot(generation, base, ranges)
 
 
@@ -109,9 +118,7 @@ def _read_marker(path: Path) -> dict[str, Any] | None:
             "enriched data generation marker is invalid"
         ) from exc
     if not isinstance(payload, dict):
-        raise EnrichedGenerationUnavailableError(
-            "enriched data generation marker is invalid"
-        )
+        raise EnrichedGenerationUnavailableError("enriched data generation marker is invalid")
     return payload
 
 
@@ -144,7 +151,7 @@ def _unlock_file(stream: BinaryIO) -> None:
         import msvcrt
 
         stream.seek(0)
-        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
         return
     import fcntl
 
@@ -157,7 +164,7 @@ def _try_lock_file(stream: BinaryIO) -> None:
 
         stream.seek(0)
         try:
-            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
         except OSError as exc:
             raise EnrichedGenerationUnavailableError(
                 "another enriched publication is active"
@@ -168,9 +175,7 @@ def _try_lock_file(stream: BinaryIO) -> None:
     try:
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
-        raise EnrichedGenerationUnavailableError(
-            "another enriched publication is active"
-        ) from exc
+        raise EnrichedGenerationUnavailableError("another enriched publication is active") from exc
 
 
 @contextmanager
@@ -466,10 +471,7 @@ class EnrichedPublication:
         try:
             with _exclusive_generation_lock(self.data_dir, self.asset_type):
                 current = _read_marker(path)
-                if (
-                    current is not None
-                    and current.get("publication_id") == self._publication_id
-                ):
+                if current is not None and current.get("publication_id") == self._publication_id:
                     self._refresh_heartbeat(path, current)
         except EnrichedGenerationUnavailableError:
             return
@@ -504,9 +506,7 @@ class EnrichedPublication:
                                 current is not None
                                 and current.get("publication_id") == self._publication_id
                             ):
-                                _write_marker(
-                                    path, self._base_snapshot.payload()
-                                )
+                                _write_marker(path, self._base_snapshot.payload())  # type: ignore[union-attr]
                         break
                     except EnrichedGenerationUnavailableError:
                         if time.monotonic() >= deadline:
@@ -528,6 +528,7 @@ class EnrichedPublication:
             self._changed = True
             self._record_changed_partition(df, out)
             _fsync_directory(out.parent)
+            self._mirror_to_ck(df, out)
 
         try:
             df.write_parquet(temporary)
@@ -538,14 +539,35 @@ class EnrichedPublication:
         finally:
             temporary.unlink(missing_ok=True)
 
+    def _mirror_to_ck(self, df: pl.DataFrame, out: Path) -> None:
+        """Parquet 分区落盘后同步写 CK。
+
+        读路径已切 CK（设计文档 §8.4）：只写 Parquet 会让页面永远看不到新指标。
+        表名由落盘路径反推（``<base>/date=YYYY-MM-DD/part.parquet``），只镜像
+        enriched 三张表；其余路径（日K/除权等）由仓储自己的写入口负责。
+        存储层未初始化（离线脚本、单测）时跳过，不改变原有 Parquet 行为。
+        """
+        directory = out.parent.parent.name
+        if directory not in _ENRICHED_TABLES:
+            return
+        from app.storage.runtime import get_storage
+
+        runtime = get_storage()
+        if runtime is None:
+            return
+        runtime.store.write_daily(directory, df)
+
     def _record_changed_partition(self, df: pl.DataFrame, out: Path) -> None:
-        directory = {"stock": "kline_daily_enriched", "etf": "kline_etf_enriched"}.get(self.asset_type)
+        directory = {"stock": "kline_daily_enriched", "etf": "kline_etf_enriched"}.get(
+            self.asset_type
+        )
         try:
             day = date.fromisoformat(out.parent.name.removeprefix("date="))
             known = (
                 directory is not None
                 and out.parent.parent.resolve() == (self.data_dir / directory).resolve()
-                and "date" in df.columns and df["date"].dtype == pl.Date
+                and "date" in df.columns
+                and df["date"].dtype == pl.Date
                 and df["date"].null_count() == 0
                 and (df.is_empty() or (df["date"].min() == day == df["date"].max()))
             )
@@ -578,12 +600,11 @@ class EnrichedPublication:
         with _exclusive_generation_lock(self.data_dir, self.asset_type):
             current = _read_marker(path)
             if current is None or current.get("publication_id") != self._publication_id:
-                raise EnrichedGenerationUnavailableError(
-                    "enriched publication ownership was lost"
-                )
+                raise EnrichedGenerationUnavailableError("enriched publication ownership was lost")
             generation = uuid.uuid4().hex
-            snapshot = self._base_snapshot.changed(
-                generation, self._changed_from if self._range_known else None,
+            snapshot = self._base_snapshot.changed(  # type: ignore[union-attr]
+                generation,
+                self._changed_from if self._range_known else None,
             )
             _write_marker(path, snapshot.payload())
         self._publishing = False
@@ -608,18 +629,21 @@ class EnrichedPublication:
         ):
             return
         generation = current.get("generation")
-        _write_marker(path, {
-            "state": "publishing",
-            "generation": (
-                generation
-                if isinstance(generation, str) and generation
-                else self._base_generation
-            ),
-            "publication_id": self._publication_id,
-            "owner_pid": os.getpid(),
-            "updated_at_ns": now_ns,
-            **({"purpose": self.purpose} if self.purpose is not None else {}),
-        })
+        _write_marker(
+            path,
+            {
+                "state": "publishing",
+                "generation": (
+                    generation
+                    if isinstance(generation, str) and generation
+                    else self._base_generation
+                ),
+                "publication_id": self._publication_id,
+                "owner_pid": os.getpid(),
+                "updated_at_ns": now_ns,
+                **({"purpose": self.purpose} if self.purpose is not None else {}),
+            },
+        )
 
     def _claim_or_verify(self) -> None:
         path = _marker_path(self.data_dir, self.asset_type)
@@ -631,17 +655,13 @@ class EnrichedPublication:
             current = None
         if self._publishing:
             if current is None or current.get("publication_id") != self._publication_id:
-                raise EnrichedGenerationUnavailableError(
-                    "enriched publication ownership was lost"
-                )
+                raise EnrichedGenerationUnavailableError("enriched publication ownership was lost")
             self._refresh_heartbeat(path, current)
             return
         _ACTIVE_PUBLICATIONS[self._publication_id] = self
         if current is not None and current.get("state", "ready") != "ready":
             if _publication_claim_is_running(current):
-                raise EnrichedGenerationUnavailableError(
-                    "another enriched publication is active"
-                )
+                raise EnrichedGenerationUnavailableError("another enriched publication is active")
             if not self.recover:
                 raise EnrichedGenerationUnavailableError(
                     "another enriched publication is incomplete"
@@ -652,24 +672,29 @@ class EnrichedPublication:
                 )
         generation = None if current is None else current.get("generation")
         if (
-            not isinstance(generation, str) or not generation
+            not isinstance(generation, str)
+            or not generation
             or (current is not None and not _is_ready_payload(current))
         ):
             generation = uuid.uuid4().hex
         self._base_generation = generation
         self._base_snapshot = (
-            _snapshot(current) if current is not None and _is_ready_payload(current)
+            _snapshot(current)
+            if current is not None and _is_ready_payload(current)
             else EnrichedGenerationSnapshot(generation, generation)
         )
         self._changed_from = None
         # Recovering a partial publication cannot retain any old range versions.
         self._range_known = current is None or _is_ready_payload(current)
-        _write_marker(path, {
-            "state": "publishing",
-            "generation": generation,
-            "publication_id": self._publication_id,
-            "owner_pid": os.getpid(),
-            "updated_at_ns": time.time_ns(),
-            **({"purpose": self.purpose} if self.purpose is not None else {}),
-        })
+        _write_marker(
+            path,
+            {
+                "state": "publishing",
+                "generation": generation,
+                "publication_id": self._publication_id,
+                "owner_pid": os.getpid(),
+                "updated_at_ns": time.time_ns(),
+                **({"purpose": self.purpose} if self.purpose is not None else {}),
+            },
+        )
         self._publishing = True

@@ -8,6 +8,7 @@
 - create_strategy 复用 api/strategy.py 的 save_strategy_code_core 校验链,
   落盘为 ai_ 前缀的 research_only 草稿; 非法代码被拒且不留残文件。
 """
+
 from __future__ import annotations
 
 import json
@@ -21,6 +22,7 @@ from app.custom.assistant import chat_service
 from app.custom.assistant import tools as assistant_tools
 
 # ── 开关默认值与读取 ──────────────────────────────────────────
+
 
 def test_auto_approve_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """未设置过 → False (安全默认)。"""
@@ -61,12 +63,17 @@ def test_create_strategy_schema_registered() -> None:
 
 # ── 闸门: 开关打开 → 不发确认事件 ─────────────────────────────
 
+
 def _script_round(script: list[dict[str, Any]]):
     async def fake_round(messages, tool_schemas, *, temperature=0.3, timeout=240.0):
         step = script.pop(0)
         for piece in step.get("text_pieces", []):
             yield {"type": "text", "delta": piece}
-        yield {"type": "round_end", "tool_calls": step.get("tool_calls", []), "finish_reason": "stop"}
+        yield {
+            "type": "round_end",
+            "tool_calls": step.get("tool_calls", []),
+            "finish_reason": "stop",
+        }
 
     return fake_round
 
@@ -79,12 +86,12 @@ async def _drive_chat(
     monkeypatch.setattr(chat_service, "ai_configured", lambda: True)
     monkeypatch.setattr(chat_service, "is_codex_cli_provider", lambda provider=None: False)
     script = [{"tool_calls": tool_calls}, {"text_pieces": ["完成"]}]
-    monkeypatch.setattr(chat_service, "stream_openai_round", _script_round(script))
+    monkeypatch.setattr(chat_service, "stream_openai_round", _script_round(script))  # type: ignore[arg-type]
     monkeypatch.setattr(assistant_tools, "execute_assistant_tool", fake_execute)
 
     events: list[dict[str, Any]] = []
     async for line in chat_service.chat_stream(history=[{"role": "user", "content": "帮我操作"}]):
-        events.append(json.loads(line))
+        events.append(json.loads(line))  # noqa: PERF401 - PERF401: 循环内含多行处理/异常, 改写推导式损可读性
     return events
 
 
@@ -128,6 +135,7 @@ async def test_auto_approve_skips_confirm_and_executes(monkeypatch: pytest.Monke
 
 
 # ── create_strategy: 复用保存校验 ─────────────────────────────
+
 
 def _valid_strategy_code(sid: str = "ai_test") -> str:
     return f'''"""测试策略"""
@@ -175,7 +183,9 @@ def test_create_strategy_rejects_oversize_code() -> None:
         assistant_tools._create_strategy({"name": "x", "code": big}, ctx)
 
 
-def test_create_strategy_uses_save_core_and_writes_draft(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_create_strategy_uses_save_core_and_writes_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """正常路径: 走 save_strategy_code_core 落盘, 结果带 ai_ 前缀与草稿态标记。"""
     from app.api import strategy as strategy_api
 
@@ -213,7 +223,9 @@ def test_create_strategy_uses_save_core_and_writes_draft(tmp_path: Path, monkeyp
     assert captured["name"] == "测试策略"
 
 
-def test_create_strategy_propagates_validation_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_create_strategy_propagates_validation_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """校验失败: 错误要透传给模型, 不吞掉。"""
     from app.api import strategy as strategy_api
 
@@ -232,6 +244,7 @@ def test_create_strategy_propagates_validation_error(tmp_path: Path, monkeypatch
 # 助手没有文件读取工具, 提示词让模型「去读 prompts/xxx.md」是够不着的指令。
 # show_guide=true 把编写规范作为工具返回值直接给模型, 且该调用只读、不弹确认卡。
 
+
 def test_show_guide_returns_guide_without_saving() -> None:
     ctx = assistant_tools.ToolContext.build(data_dir=".", engine=object())
     out = assistant_tools._create_strategy({"show_guide": True}, ctx)
@@ -246,9 +259,13 @@ def test_show_guide_call_is_read_only() -> None:
 
 
 def test_save_call_is_not_read_only() -> None:
-    assert assistant_actions.is_read_only_call(
-        "create_strategy", {"name": "x", "code": "y"},
-    ) is False
+    assert (
+        assistant_actions.is_read_only_call(
+            "create_strategy",
+            {"name": "x", "code": "y"},
+        )
+        is False
+    )
 
 
 def test_read_only_check_ignores_other_tools() -> None:
@@ -279,16 +296,22 @@ async def test_show_guide_skips_confirm_gate(monkeypatch: pytest.MonkeyPatch) ->
 # 探测发现: 问「RSI 最低的十只」时榜首全是新股 (RSI=0), 因为上市初期序列太短,
 # 递推指标失真。按值排序不过滤, 整个榜单被新股挤满。
 
-def test_listing_dates_parses_iso_strings(tmp_path: Path) -> None:
+
+def test_listing_dates_parses_iso_strings(tmp_path: Path, ck_runtime) -> None:
     """instruments 的 listing_date 是 ISO 字符串 (不是 date 类型), 必须能解析。"""
     import polars as pl
 
     d = tmp_path / "instruments"
     d.mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": ["600000.SH", "301999.SZ", "301998.SZ"],
-        "listing_date": ["2000-01-04", "2026-10-01", None],
-    }).write_parquet(d / "instruments.parquet")
+    inst = pl.DataFrame(
+        {
+            "symbol": ["600000.SH", "301999.SZ", "301998.SZ"],
+            "listing_date": ["2000-01-04", "2026-10-01", None],
+        }
+    )
+    inst.write_parquet(d / "instruments.parquet")
+    # _listing_dates 经 load_instruments() 读 CK，需同步写 CK instruments
+    ck_runtime.write_instruments("stock", inst)
 
     class _Store:
         data_dir = tmp_path
@@ -302,8 +325,9 @@ def test_listing_dates_parses_iso_strings(tmp_path: Path) -> None:
     assert "301998.SZ" not in got  # 空值不参与过滤
 
 
-def test_listing_dates_missing_table_returns_empty(tmp_path: Path) -> None:
-    """维表缺失时退化为不过滤, 不抛错。"""
+def test_listing_dates_missing_table_returns_empty(tmp_path: Path, ck_runtime) -> None:
+    """维表缺失时退化为不过滤, 不抛错（CK 空库即维表缺失）。"""
+
     class _Store:
         data_dir = tmp_path
 
@@ -313,23 +337,31 @@ def test_listing_dates_missing_table_returns_empty(tmp_path: Path) -> None:
     assert assistant_tools._listing_dates(_Repo()) == {}
 
 
-def test_factor_values_filters_new_listings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_factor_values_filters_new_listings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ck_runtime
+) -> None:
     """上市不足 min_listed_days 的标的要从榜单里剔除, 并在返回值里说明。"""
     import polars as pl
 
     inst = tmp_path / "instruments"
     inst.mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": ["600000.SH", "301999.SZ"],
-        "listing_date": ["2000-01-04", "2026-10-01"],
-    }).write_parquet(inst / "instruments.parquet")
+    inst_df = pl.DataFrame(
+        {
+            "symbol": ["600000.SH", "301999.SZ"],
+            "listing_date": ["2000-01-04", "2026-10-01"],
+        }
+    )
+    inst_df.write_parquet(inst / "instruments.parquet")
+    ck_runtime.write_instruments("stock", inst_df)
 
-    enriched = pl.DataFrame({
-        "symbol": ["301999.SZ", "600000.SH"],
-        "rsi_14": [0.0, 35.5],
-        "change_pct": [-0.11, 0.02],
-        "date": ["2026-10-23", "2026-10-23"],
-    })
+    enriched = pl.DataFrame(
+        {
+            "symbol": ["301999.SZ", "600000.SH"],
+            "rsi_14": [0.0, 35.5],
+            "change_pct": [-0.11, 0.02],
+            "date": ["2026-10-23", "2026-10-23"],
+        }
+    )
 
     class _Store:
         data_dir = tmp_path
@@ -345,10 +377,11 @@ def test_factor_values_filters_new_listings(tmp_path: Path, monkeypatch: pytest.
 
     ctx = assistant_tools.ToolContext.build(repo=_Repo(), data_dir=str(tmp_path))
     out = assistant_tools._get_factor_values(
-        {"factor": "rsi_14", "top": 10, "direction": "asc"}, ctx,
+        {"factor": "rsi_14", "top": 10, "direction": "asc"},
+        ctx,
     )
     symbols = [r["symbol"] for r in out["rows"]]
-    assert "301999.SZ" not in symbols       # 新股被排除
+    assert "301999.SZ" not in symbols  # 新股被排除
     assert symbols == ["600000.SH"]
     assert out["excluded_new_listings"] == 1
     assert "次新股" in out["note"]
@@ -360,17 +393,21 @@ def test_factor_values_allows_disabling_filter(tmp_path: Path) -> None:
 
     inst = tmp_path / "instruments"
     inst.mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": ["600000.SH", "301999.SZ"],
-        "listing_date": ["2000-01-04", "2026-10-01"],
-    }).write_parquet(inst / "instruments.parquet")
+    pl.DataFrame(
+        {
+            "symbol": ["600000.SH", "301999.SZ"],
+            "listing_date": ["2000-01-04", "2026-10-01"],
+        }
+    ).write_parquet(inst / "instruments.parquet")
 
-    enriched = pl.DataFrame({
-        "symbol": ["301999.SZ", "600000.SH"],
-        "rsi_14": [0.0, 35.5],
-        "change_pct": [-0.11, 0.02],
-        "date": ["2026-10-23", "2026-10-23"],
-    })
+    enriched = pl.DataFrame(
+        {
+            "symbol": ["301999.SZ", "600000.SH"],
+            "rsi_14": [0.0, 35.5],
+            "change_pct": [-0.11, 0.02],
+            "date": ["2026-10-23", "2026-10-23"],
+        }
+    )
 
     class _Store:
         data_dir = tmp_path
@@ -386,7 +423,8 @@ def test_factor_values_allows_disabling_filter(tmp_path: Path) -> None:
 
     ctx = assistant_tools.ToolContext.build(repo=_Repo(), data_dir=str(tmp_path))
     out = assistant_tools._get_factor_values(
-        {"factor": "rsi_14", "top": 10, "direction": "asc", "min_listed_days": 0}, ctx,
+        {"factor": "rsi_14", "top": 10, "direction": "asc", "min_listed_days": 0},
+        ctx,
     )
     assert [r["symbol"] for r in out["rows"]] == ["301999.SZ", "600000.SH"]
     assert "excluded_new_listings" not in out
@@ -397,13 +435,16 @@ def test_factor_values_allows_disabling_filter(tmp_path: Path) -> None:
 # 历史上写工具分别返回 created / added / started, 模型要逐工具记住哪个字段表示
 # "已生效"。统一补 action_ok 后只需认一个字段 (原字段保留, 不破坏既有消费方)。
 
+
 def test_action_result_marked_for_write_tools() -> None:
     out = assistant_tools._mark_action_result(
-        "create_strategy", {}, {"created": True, "strategy_id": "ai_x"},
+        "create_strategy",
+        {},
+        {"created": True, "strategy_id": "ai_x"},
     )
     assert out["action_ok"] is True
     assert out["action"] == "create_strategy"
-    assert out["created"] is True          # 原字段保留
+    assert out["created"] is True  # 原字段保留
     assert out["strategy_id"] == "ai_x"
 
 
@@ -423,6 +464,7 @@ def test_action_result_ignores_non_dict() -> None:
 
 async def test_execute_marks_action_result(monkeypatch: pytest.MonkeyPatch) -> None:
     """经过统一执行入口后, 写工具结果带上 action_ok。"""
+
     async def fake_handler(args, ctx):
         return {"created": True}
 
@@ -436,6 +478,8 @@ async def test_execute_marks_action_result(monkeypatch: pytest.MonkeyPatch) -> N
 def test_show_guide_call_is_not_marked_as_action() -> None:
     """取编写规范不落盘, 不能标成 action_ok —— 否则模型会以为策略已创建。"""
     out = assistant_tools._mark_action_result(
-        "create_strategy", {"show_guide": True}, {"guide": "...", "next": "..."},
+        "create_strategy",
+        {"show_guide": True},
+        {"guide": "...", "next": "..."},
     )
     assert "action_ok" not in out

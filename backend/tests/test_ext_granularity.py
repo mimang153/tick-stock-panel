@@ -4,8 +4,10 @@
 日内多盘柱状图喂到「同日多行同值」数据时归一化退化。粒度声明让日级表走
 「近 N 日每日一值」口径, 判断用时间列值形态 (非零时刻→日内) 而非盘数。
 """
+
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,20 +24,42 @@ def _config(
     mode: str = "timeseries",
 ) -> ExtConfig:
     return ExtConfig(
-        id="flow", label="资金流", mode=mode,  # type: ignore[arg-type]
+        id="flow",
+        label="资金流",
+        mode=mode,  # type: ignore[arg-type]
         fields=[
             ExtField("symbol", "string", "标的代码"),
             ExtField("net", "float", "主力净流入"),
             ExtField("ts", "string", "时刻"),
         ],
-        pull=PullConfig(url="https://example.test/flow", time_field=time_field, granularity=granularity),
+        pull=PullConfig(
+            url="https://example.test/flow", time_field=time_field, granularity=granularity
+        ),
     )
 
 
-def _write_part(tmp_path: Path, config_id: str, day: str, df: pl.DataFrame) -> None:
+_CK_STORE = {"store": None}
+
+
+def _write_part(
+    tmp_path: Path, config_id: str, day: str, df: pl.DataFrame, ck_runtime=None
+) -> None:
+    """写入一个日分区（本地 + CK ext_timeseries 双写，与生产镜像同构）。
+
+    端点读路径已切 CK：``store`` fixture 会注入 ck_runtime。CK 镜像直接复用
+    生产函数 ``_mirror_ext_to_ck``，保证 time_value 的推导口径（日内时刻列 >
+    业务日期列 > 空串）与写入链完全一致。
+    """
     part = tmp_path / "ext_data" / config_id / "timeseries" / f"date={day}"
     part.mkdir(parents=True, exist_ok=True)
     df.write_parquet(part / "part.parquet")
+    ck = ck_runtime if ck_runtime is not None else _CK_STORE["store"]
+    if ck is not None:
+        from app.services.ext_data import _mirror_ext_to_ck
+
+        config = ExtConfigStore(tmp_path).get(config_id) or _config()
+        config.id = config_id
+        _mirror_ext_to_ck(config, df, date.fromisoformat(day), store=ck)
 
 
 def _request(tmp_path: Path) -> SimpleNamespace:
@@ -44,14 +68,17 @@ def _request(tmp_path: Path) -> SimpleNamespace:
 
 
 @pytest.fixture()
-def store(tmp_path, monkeypatch):
-    """挂好 _store/_data_dir 的请求工厂; 配置由用例自行 upsert。"""
+def store(tmp_path, monkeypatch, ck_runtime):
+    """挂好 _store/_data_dir 的请求工厂 + CK 读源; 配置由用例自行 upsert。"""
     monkeypatch.setattr(ext_api, "_store", lambda request: ExtConfigStore(tmp_path))
     monkeypatch.setattr(ext_api, "_data_dir", lambda request: tmp_path)
-    return tmp_path
+    _CK_STORE["store"] = ck_runtime
+    yield tmp_path
+    _CK_STORE["store"] = None
 
 
 # ---------- PullConfig.granularity ----------
+
 
 def test_pull_config_granularity_roundtrip_and_normalize():
     for ok in ("auto", "intraday", "daily"):
@@ -68,15 +95,25 @@ def test_pull_config_granularity_roundtrip_and_normalize():
 
 # ---------- _granularity_effective: 判断表 ----------
 
+
 def test_effective_snapshot_mode_is_none(store):
     assert ext_api._granularity_effective(_config(mode="snapshot"), store) is None
 
 
 def test_effective_no_time_field_is_daily(store):
     # 落盘契约: 未配 time_field = 每日快照表 (按 symbol 去重) → 日级
-    _write_part(store, "flow", "2026-10-23", pl.DataFrame({
-        "symbol": ["600000.SH"], "net": [1.5], "ts": ["09:25:00"],
-    }))
+    _write_part(
+        store,
+        "flow",
+        "2026-10-23",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"],
+                "net": [1.5],
+                "ts": ["09:25:00"],
+            }
+        ),
+    )
     assert ext_api._granularity_effective(_config(), store) == "daily"
 
 
@@ -86,43 +123,79 @@ def test_effective_time_field_no_data_defaults_intraday(store):
 
 
 def test_effective_nonzero_times_is_intraday(store):
-    _write_part(store, "flow", "2026-10-23", pl.DataFrame({
-        "symbol": ["600000.SH"] * 3,
-        "net": [-100.0, -100.0, -100.0],
-        "ts": ["2026-10-23 09:20:00", "09:25:00", "2026-10-23 09:30:00"],
-    }))
+    _write_part(
+        store,
+        "flow",
+        "2026-10-23",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"] * 3,
+                "net": [-100.0, -100.0, -100.0],
+                "ts": ["2026-10-23 09:20:00", "09:25:00", "2026-10-23 09:30:00"],
+            }
+        ),
+    )
     assert ext_api._granularity_effective(_config(time_field="ts"), store) == "intraday"
 
 
 def test_effective_date_form_or_midnight_times_is_daily(store):
     # 时间列配了日期形态值或 00:00:00 → 日级 (把日期列配成时间列的典型错配被纠正)
-    _write_part(store, "flow", "2026-10-23", pl.DataFrame({
-        "symbol": ["600000.SH"] * 2,
-        "net": [1.0, 2.0],
-        "ts": ["2026-10-23 00:00:00", "2026-10-22"],
-    }))
+    _write_part(
+        store,
+        "flow",
+        "2026-10-23",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"] * 2,
+                "net": [1.0, 2.0],
+                "ts": ["2026-10-23 00:00:00", "2026-10-22"],
+            }
+        ),
+    )
     assert ext_api._granularity_effective(_config(time_field="ts"), store) == "daily"
 
 
 def test_effective_declared_overrides_detection(store):
     # 数据形态是日内, 但显式声明日级 → 日级 (用户可钉死)
-    _write_part(store, "flow", "2026-10-23", pl.DataFrame({
-        "symbol": ["600000.SH"], "net": [1.0], "ts": ["09:25:00"],
-    }))
-    assert ext_api._granularity_effective(_config(time_field="ts", granularity="daily"), store) == "daily"
+    _write_part(
+        store,
+        "flow",
+        "2026-10-23",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"],
+                "net": [1.0],
+                "ts": ["09:25:00"],
+            }
+        ),
+    )
+    assert (
+        ext_api._granularity_effective(_config(time_field="ts", granularity="daily"), store)
+        == "daily"
+    )
     # 无时间列但显式声明日内 → 日内 (强意图)
     assert ext_api._granularity_effective(_config(granularity="intraday"), store) == "intraday"
 
 
 # ---------- series 端点: 日级口径 ----------
 
+
 def test_series_daily_near_n_days(store):
     ExtConfigStore(store).upsert(_config())  # 无 time_field → auto=daily
     for day, v in [("2026-10-21", 1.0), ("2026-10-22", 2.0), ("2026-10-23", 3.0)]:
-        _write_part(store, "flow", day, pl.DataFrame({
-            "symbol": ["600000.SH", "000001.SZ"], "net": [v, v * 10], "ts": [None, None],
-        }))
-    res = ext_api.ext_series(_request(store), "flow", field="net", days=2, date=None, symbols=None)
+        _write_part(
+            store,
+            "flow",
+            day,
+            pl.DataFrame(
+                {
+                    "symbol": ["600000.SH", "000001.SZ"],
+                    "net": [v, v * 10],
+                    "ts": [None, None],
+                }
+            ),
+        )
+    res = ext_api.ext_series(_request(store), "flow", field="net", days=2, date=None, symbols=None)  # type: ignore[arg-type]
     assert res["granularity"] == "daily"
     assert res["date"] == "2026-10-22..2026-10-23"
     # 近 2 日 = 10-22/10-23, 不含 10-21
@@ -132,112 +205,231 @@ def test_series_daily_near_n_days(store):
 
 def test_series_daily_same_day_multi_row_takes_last_non_null(store):
     ExtConfigStore(store).upsert(_config())
-    _write_part(store, "flow", "2026-10-23", pl.DataFrame({
-        "symbol": ["600000.SH"] * 3, "net": [1.0, None, 7.0], "ts": [None] * 3,
-    }))
-    res = ext_api.ext_series(_request(store), "flow", field="net", days=10, date=None, symbols=None)
+    _write_part(
+        store,
+        "flow",
+        "2026-10-23",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"] * 3,
+                "net": [1.0, None, 7.0],
+                "ts": [None] * 3,
+            }
+        ),
+    )
+    res = ext_api.ext_series(_request(store), "flow", field="net", days=10, date=None, symbols=None)  # type: ignore[arg-type]
     # 同日多行 → 末个非空值 (日末定型语义), 每日只有一点
     assert res["items"]["600000.SH"] == [["2026-10-23", 7.0]]
 
 
 def test_series_daily_uses_mapped_business_date_instead_of_pull_partition(store):
     config = _config(time_field="__pull_ts__", granularity="daily")
-    config.pull.field_map = {"date": "日期", "net": "主力净流入"}
+    config.pull.field_map = {"date": "日期", "net": "主力净流入"}  # type: ignore[union-attr]
     ExtConfigStore(store).upsert(config)
-    _write_part(store, "flow", "2026-11-04", pl.DataFrame({
-        "symbol": ["600000.SH"], "日期": ["2026-11-04"], "net": [10.0],
-    }))
-    _write_part(store, "flow", "2026-11-05", pl.DataFrame({
-        "symbol": ["600000.SH"] * 4,
-        "日期": ["2026-11-04", "2026-11-04", "2026-11-05", "2026-11-05"],
-        "net": [10.0, 10.0, 20.0, 20.0],
-        "__pull_ts__": ["09:24:00", "09:34:00", "15:42:00", "15:52:00"],
-    }))
+    _write_part(
+        store,
+        "flow",
+        "2026-11-04",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"],
+                "日期": ["2026-11-04"],
+                "net": [10.0],
+            }
+        ),
+    )
+    _write_part(
+        store,
+        "flow",
+        "2026-11-05",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"] * 4,
+                "日期": ["2026-11-04", "2026-11-04", "2026-11-05", "2026-11-05"],
+                "net": [10.0, 10.0, 20.0, 20.0],
+                "__pull_ts__": ["09:24:00", "09:34:00", "15:42:00", "15:52:00"],
+            }
+        ),
+    )
     # 次日盘前仍可能返回上一交易日快照; 拉取日期不能伪造成新的业务日期。
-    _write_part(store, "flow", "2026-11-06", pl.DataFrame({
-        "symbol": ["600000.SH"] * 2, "日期": ["2026-11-05"] * 2, "net": [20.0, 20.0],
-    }))
-    res = ext_api.ext_series(_request(store), "flow", field="net", days=10, date=None, symbols=None)
+    _write_part(
+        store,
+        "flow",
+        "2026-11-06",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"] * 2,
+                "日期": ["2026-11-05"] * 2,
+                "net": [20.0, 20.0],
+            }
+        ),
+    )
+    res = ext_api.ext_series(_request(store), "flow", field="net", days=10, date=None, symbols=None)  # type: ignore[arg-type]
     assert res["granularity"] == "daily"
     assert res["items"]["600000.SH"] == [["2026-11-04", 10.0], ["2026-11-05", 20.0]]
 
 
 def test_series_daily_mapped_date_does_not_expose_future_values(store):
     config = _config(granularity="daily")
-    config.pull.field_map = {"date": "日期"}
+    config.pull.field_map = {"date": "日期"}  # type: ignore[union-attr]
     ExtConfigStore(store).upsert(config)
-    _write_part(store, "flow", "2026-11-05", pl.DataFrame({
-        "symbol": ["600000.SH"] * 3,
-        "日期": ["2026-11-04", None, "2026-11-06"],
-        "net": [10.0, 20.0, 999.0],
-    }))
-    res = ext_api.ext_series(_request(store), "flow", field="net", days=10, date="2026-11-05", symbols=None)
+    _write_part(
+        store,
+        "flow",
+        "2026-11-05",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"] * 3,
+                "日期": ["2026-11-04", None, "2026-11-06"],
+                "net": [10.0, 20.0, 999.0],
+            }
+        ),
+    )
+    res = ext_api.ext_series(
+        _request(store),  # type: ignore[arg-type]
+        "flow",
+        field="net",
+        days=10,
+        date="2026-11-05",
+        symbols=None,  # type: ignore[arg-type]
+    )
     assert res["items"]["600000.SH"] == [["2026-11-04", 10.0]]
 
 
 def test_series_daily_missing_mapped_date_falls_back_to_partition(store):
     config = _config(granularity="daily")
-    config.pull.field_map = {"date": "日期"}
+    config.pull.field_map = {"date": "日期"}  # type: ignore[union-attr]
     ExtConfigStore(store).upsert(config)
-    _write_part(store, "flow", "2026-11-05", pl.DataFrame({
-        "symbol": ["600000.SH"], "net": [10.0],
-    }))
-    res = ext_api.ext_series(_request(store), "flow", field="net", days=10, date=None, symbols=None)
+    _write_part(
+        store,
+        "flow",
+        "2026-11-05",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"],
+                "net": [10.0],
+            }
+        ),
+    )
+    res = ext_api.ext_series(_request(store), "flow", field="net", days=10, date=None, symbols=None)  # type: ignore[arg-type]
     assert res["items"]["600000.SH"] == [["2026-11-05", 10.0]]
 
 
 def test_series_daily_date_param_is_window_right_edge(store):
     ExtConfigStore(store).upsert(_config())
     for day in ("2026-10-21", "2026-10-22", "2026-10-23"):
-        _write_part(store, "flow", day, pl.DataFrame({
-            "symbol": ["600000.SH"], "net": [1.0], "ts": [None],
-        }))
-    res = ext_api.ext_series(_request(store), "flow", field="net", days=10, date="2026-10-22", symbols=None)
+        _write_part(
+            store,
+            "flow",
+            day,
+            pl.DataFrame(
+                {
+                    "symbol": ["600000.SH"],
+                    "net": [1.0],
+                    "ts": [None],
+                }
+            ),
+        )
+    res = ext_api.ext_series(
+        _request(store),  # type: ignore[arg-type]
+        "flow",
+        field="net",
+        days=10,
+        date="2026-10-22",
+        symbols=None,  # type: ignore[arg-type]
+    )
     assert res["date"] == "2026-10-21..2026-10-22"
     assert [p[0] for p in res["items"]["600000.SH"]] == ["2026-10-21", "2026-10-22"]
 
 
 def test_series_daily_symbols_filter_and_empty(store):
     ExtConfigStore(store).upsert(_config())
-    _write_part(store, "flow", "2026-10-23", pl.DataFrame({
-        "symbol": ["600000.SH", "000001.SZ"], "net": [1.0, 2.0], "ts": [None, None],
-    }))
-    res = ext_api.ext_series(_request(store), "flow", field="net", days=10, date=None, symbols="600000.SH")
+    _write_part(
+        store,
+        "flow",
+        "2026-10-23",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH", "000001.SZ"],
+                "net": [1.0, 2.0],
+                "ts": [None, None],
+            }
+        ),
+    )
+    res = ext_api.ext_series(
+        _request(store),  # type: ignore[arg-type]
+        "flow",
+        field="net",
+        days=10,
+        date=None,
+        symbols="600000.SH",  # type: ignore[arg-type]
+    )
     assert set(res["items"]) == {"600000.SH"}
     # 无分区 → items 空 (fail-closed)
-    empty = ext_api.ext_series(_request(store), "flow", field="net", days=10, date="2020-01-01", symbols=None)
+    empty = ext_api.ext_series(
+        _request(store),  # type: ignore[arg-type]
+        "flow",
+        field="net",
+        days=10,
+        date="2020-01-01",
+        symbols=None,  # type: ignore[arg-type]
+    )
     assert empty["items"] == {}
 
 
 def test_series_declared_daily_without_time_field_ok(store):
     # 显式声明日级 + 无时间列: 走近 N 日口径, 不再 400
     ExtConfigStore(store).upsert(_config(granularity="daily"))
-    _write_part(store, "flow", "2026-10-23", pl.DataFrame({
-        "symbol": ["600000.SH"], "net": [5.0], "ts": [None],
-    }))
-    res = ext_api.ext_series(_request(store), "flow", field="net", days=10, date=None, symbols=None)
+    _write_part(
+        store,
+        "flow",
+        "2026-10-23",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"],
+                "net": [5.0],
+                "ts": [None],
+            }
+        ),
+    )
+    res = ext_api.ext_series(_request(store), "flow", field="net", days=10, date=None, symbols=None)  # type: ignore[arg-type]
     assert res["items"]["600000.SH"] == [["2026-10-23", 5.0]]
 
 
 def test_series_declared_intraday_without_time_field_400(store):
     ExtConfigStore(store).upsert(_config(granularity="intraday"))
     from fastapi import HTTPException
+
     with pytest.raises(HTTPException) as e:
-        ext_api.ext_series(_request(store), "flow", field="net", days=10, date=None, symbols=None)
+        ext_api.ext_series(_request(store), "flow", field="net", days=10, date=None, symbols=None)  # type: ignore[arg-type]
     assert "time_field" in str(e.value.detail)
 
 
 # ---------- series 端点: 日内口径不回归 ----------
 
-def test_series_intraday_unchanged(store):
+
+def test_series_intraday_unchanged(store, ck_runtime):
     ExtConfigStore(store).upsert(_config(time_field="ts"))
-    _write_part(store, "flow", "2026-10-23", pl.DataFrame({
-        "symbol": ["600000.SH", "600000.SH", "000001.SZ"],
-        "net": [1.0, 2.0, 3.0],
-        "ts": ["09:20:00", "09:25:00", "09:20:00"],
-    }))
+    _write_part(
+        store,
+        "flow",
+        "2026-10-23",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH", "600000.SH", "000001.SZ"],
+                "net": [1.0, 2.0, 3.0],
+                "ts": ["09:20:00", "09:25:00", "09:20:00"],
+            }
+        ),
+        ck_runtime=ck_runtime,
+    )
     res = ext_api.ext_series(
-        _request(store), "flow", field="net", days=10, date="2026-10-23", symbols="600000.SH",
+        _request(store),  # type: ignore[arg-type]
+        "flow",
+        field="net",
+        days=10,
+        date="2026-10-23",
+        symbols="600000.SH",
     )
     assert res["granularity"] != "daily"
     assert res["items"]["600000.SH"] == [["09:20:00", 1.0], ["09:25:00", 2.0]]
@@ -246,35 +438,69 @@ def test_series_intraday_unchanged(store):
 def test_series_can_display_multi_snapshot_table_by_day_without_changing_config(store):
     ExtConfigStore(store).upsert(_config(time_field="ts", granularity="intraday"))
     for day, values in [("2026-11-04", [1.0, 2.0]), ("2026-11-05", [3.0, 4.0])]:
-        _write_part(store, "flow", day, pl.DataFrame({
-            "symbol": ["600000.SH"] * 2, "net": values, "ts": ["09:20:00", "09:25:00"],
-        }))
+        _write_part(
+            store,
+            "flow",
+            day,
+            pl.DataFrame(
+                {
+                    "symbol": ["600000.SH"] * 2,
+                    "net": values,
+                    "ts": ["09:20:00", "09:25:00"],
+                }
+            ),
+        )
     res = ext_api.ext_series(
-        _request(store), "flow", field="net", date="2026-11-05", days=2,
-        symbols="600000.SH", granularity="daily",
+        _request(store),  # type: ignore[arg-type]
+        "flow",
+        field="net",
+        date="2026-11-05",
+        days=2,
+        symbols="600000.SH",
+        granularity="daily",
     )
     assert res["items"]["600000.SH"] == [["2026-11-04", 2.0], ["2026-11-05", 4.0]]
-    assert ExtConfigStore(store).get("flow").pull.granularity == "intraday"
+    assert ExtConfigStore(store).get("flow").pull.granularity == "intraday"  # type: ignore[union-attr]
     # 切回日内仍可读取所有盘次, 按日展示不改写原始记录。
     intraday = ext_api.ext_series(
-        _request(store), "flow", field="net", date="2026-11-05", days=2,
-        symbols="600000.SH", granularity="intraday",
+        _request(store),  # type: ignore[arg-type]
+        "flow",
+        field="net",
+        date="2026-11-05",
+        days=2,
+        symbols="600000.SH",
+        granularity="intraday",
     )
     assert intraday["items"]["600000.SH"] == [["09:20:00", 3.0], ["09:25:00", 4.0]]
 
 
-def test_series_can_display_daily_default_table_as_intraday_if_snapshots_exist(store):
+def test_series_can_display_daily_default_table_as_intraday_if_snapshots_exist(store, ck_runtime):
     ExtConfigStore(store).upsert(_config(time_field="ts", granularity="daily"))
-    _write_part(store, "flow", "2026-11-05", pl.DataFrame({
-        "symbol": ["600000.SH"] * 2, "net": [1.0, 2.0], "ts": ["09:20:00", "09:25:00"],
-    }))
+    _write_part(
+        store,
+        "flow",
+        "2026-11-05",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"] * 2,
+                "net": [1.0, 2.0],
+                "ts": ["09:20:00", "09:25:00"],
+            }
+        ),
+        ck_runtime=ck_runtime,
+    )
     res = ext_api.ext_series(
-        _request(store), "flow", field="net", date="2026-11-05", days=10,
-        symbols=None, granularity="intraday",
+        _request(store),  # type: ignore[arg-type]
+        "flow",
+        field="net",
+        date="2026-11-05",
+        days=10,
+        symbols=None,
+        granularity="intraday",
     )
     assert res["granularity"] == "intraday"
     assert res["items"]["600000.SH"] == [["09:20:00", 1.0], ["09:25:00", 2.0]]
-    assert ExtConfigStore(store).get("flow").pull.granularity == "daily"
+    assert ExtConfigStore(store).get("flow").pull.granularity == "daily"  # type: ignore[union-attr]
 
 
 def test_series_intraday_override_requires_time_field(store):
@@ -283,8 +509,13 @@ def test_series_intraday_override_requires_time_field(store):
     ExtConfigStore(store).upsert(_config())
     with pytest.raises(HTTPException) as exc:
         ext_api.ext_series(
-            _request(store), "flow", field="net", date=None, days=10,
-            symbols=None, granularity="intraday",
+            _request(store),  # type: ignore[arg-type]
+            "flow",
+            field="net",
+            date=None,
+            days=10,
+            symbols=None,
+            granularity="intraday",
         )
     assert exc.value.status_code == 400
     assert "time_field" in exc.value.detail
@@ -295,33 +526,56 @@ async def test_series_query_validates_display_granularity(store):
     from httpx import ASGITransport, AsyncClient
 
     ExtConfigStore(store).upsert(_config(time_field="ts"))
-    _write_part(store, "flow", "2026-11-05", pl.DataFrame({
-        "symbol": ["600000.SH"] * 2, "net": [1.0, 2.0], "ts": ["09:20:00", "09:25:00"],
-    }))
+    _write_part(
+        store,
+        "flow",
+        "2026-11-05",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"] * 2,
+                "net": [1.0, 2.0],
+                "ts": ["09:20:00", "09:25:00"],
+            }
+        ),
+    )
     app = FastAPI()
     app.include_router(ext_api.router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/ext-data/flow/series", params={"field": "net", "granularity": "daily"})
+        response = await client.get(
+            "/api/ext-data/flow/series", params={"field": "net", "granularity": "daily"}
+        )
         assert response.status_code == 200
         assert response.json()["items"]["600000.SH"] == [["2026-11-05", 2.0]]
-        invalid = await client.get("/api/ext-data/flow/series", params={"field": "net", "granularity": "weekly"})
+        invalid = await client.get(
+            "/api/ext-data/flow/series", params={"field": "net", "granularity": "weekly"}
+        )
         assert invalid.status_code == 422
 
 
 # ---------- schema / list 透出 ----------
 
+
 def test_schema_all_exposes_granularity(store):
     ExtConfigStore(store).upsert(_config(time_field="ts"))
-    _write_part(store, "flow", "2026-10-23", pl.DataFrame({
-        "symbol": ["600000.SH"], "net": [1.0], "ts": ["09:25:00"],
-    }))
-    res = ext_api.discover_all_schemas(_request(store))
+    _write_part(
+        store,
+        "flow",
+        "2026-10-23",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"],
+                "net": [1.0],
+                "ts": ["09:25:00"],
+            }
+        ),
+    )
+    res = ext_api.discover_all_schemas(_request(store))  # type: ignore[arg-type]
     item = next(i for i in res["items"] if i["id"] == "flow")
     assert item["granularity"] == "intraday"
 
 
 def test_list_configs_exposes_granularity_effective(store):
     ExtConfigStore(store).upsert(_config())
-    res = ext_api.list_configs(_request(store))
+    res = ext_api.list_configs(_request(store))  # type: ignore[arg-type]
     item = next(i for i in res["items"] if i["id"] == "flow")
     assert item["granularity_effective"] == "daily"

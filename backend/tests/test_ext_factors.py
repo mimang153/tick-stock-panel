@@ -3,6 +3,7 @@
 覆盖: 命名与数值过滤 / 注册表惰性同步 / 时序按日 PIT 对齐 / 快照仅单日帧
 门控 / 自定义信号消费 / 评分引用 / 写入后缓存失效 / compute_signals 集成。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -54,8 +55,11 @@ def data_dir(tmp_path, monkeypatch):
 
 def _mk_config(data_dir, cid="tags", mode="timeseries", fields=None):
     cfg = ExtConfig(
-        id=cid, label="题材标签", mode=mode,
-        fields=fields or [
+        id=cid,
+        label="题材标签",
+        mode=mode,
+        fields=fields
+        or [
             ExtField(name="hot", dtype="float"),
             ExtField(name="cnt", dtype="int"),
             ExtField(name="name", dtype="string"),  # 非数值: 不应暴露
@@ -75,12 +79,15 @@ def _frame(rows) -> pl.DataFrame:
 
 # ── 命名与注册 ────────────────────────────────────────────
 
+
 def test_column_name_sanitization():
     assert ext_factors.ext_column_name("tags", "hot") == "ext_tags_hot"
     assert ext_factors.ext_column_name("tags", "a-b c") == "ext_tags_a_b_c"  # 非单词字符转下划线
     # 中文字段名保留 (预设表字段多为中文, 折叠会互相碰撞)
     assert ext_factors.ext_column_name("tags", "所属概念") == "ext_tags_所属概念"
-    assert ext_factors.ext_column_name("tags", "所属概念") != ext_factors.ext_column_name("tags", "股票简称")
+    assert ext_factors.ext_column_name("tags", "所属概念") != ext_factors.ext_column_name(
+        "tags", "股票简称"
+    )
 
 
 def test_numeric_only_specs(data_dir):
@@ -90,8 +97,7 @@ def test_numeric_only_specs(data_dir):
     assert "ext_tags_hot" in ids and "ext_tags_cnt" in ids
     assert "ext_tags_name" not in ids  # string 字段不进入数值口径
     # 中文名的数值字段: 列照常 join, 但不注册因子 (DSL 标识符 ASCII-only)
-    _mk_config(data_dir, cid="cn1", mode="snapshot",
-               fields=[ExtField(name="涨停数", dtype="int")])
+    _mk_config(data_dir, cid="cn1", mode="snapshot", fields=[ExtField(name="涨停数", dtype="int")])
     cn_specs = {s.id for s in ext_factors.ext_factor_specs(data_dir)}
     assert ext_factors.ext_column_name("cn1", "涨停数") == "ext_cn1_涨停数"
     assert "ext_cn1_涨停数" not in cn_specs
@@ -121,23 +127,30 @@ def test_all_factors_lazy_sync(data_dir):
 
 # ── 时序按日对齐 (PIT) ────────────────────────────────────
 
-def test_timeseries_exact_date_alignment(data_dir):
+
+def test_timeseries_exact_date_alignment(data_dir, ck_runtime):
     cfg = _mk_config(data_dir, mode="timeseries")
     write_ext_parquet(
         pl.DataFrame({"symbol": ["600000.SH"], "hot": [0.9]}),
-        cfg, data_dir, snapshot_date=date(2026, 1, 5),
+        cfg,
+        data_dir,
+        snapshot_date=date(2026, 1, 5),
     )
     write_ext_parquet(
         pl.DataFrame({"symbol": ["600000.SH", "000001.SZ"], "hot": [0.2, 0.7]}),
-        cfg, data_dir, snapshot_date=date(2026, 1, 6),
+        cfg,
+        data_dir,
+        snapshot_date=date(2026, 1, 6),
     )
-    frame = _frame([
-        ("600000.SH", "2026-01-05", 10.0),
-        ("600000.SH", "2026-01-06", 11.0),
-        ("600000.SH", "2026-01-07", 12.0),  # 无分区 → null
-        ("000001.SZ", "2026-01-06", 20.0),
-        ("000001.SZ", "2026-01-07", 21.0),  # 无分区 → null
-    ])
+    frame = _frame(
+        [
+            ("600000.SH", "2026-01-05", 10.0),
+            ("600000.SH", "2026-01-06", 11.0),
+            ("600000.SH", "2026-01-07", 12.0),  # 无分区 → null
+            ("000001.SZ", "2026-01-06", 20.0),
+            ("000001.SZ", "2026-01-07", 21.0),  # 无分区 → null
+        ]
+    )
     out = ext_factors.attach_ext_columns(frame, include_snapshot=False, data_dir=data_dir)
     assert COL in out.columns
     by_key = {(r[0], r[1]): r[2] for r in out.select("symbol", "date", COL).rows()}
@@ -148,37 +161,48 @@ def test_timeseries_exact_date_alignment(data_dir):
     assert by_key[("000001.SZ", "2026-01-07")] is None
 
 
-def test_timeseries_no_lookahead_across_dates(data_dir):
+def test_timeseries_no_lookahead_across_dates(data_dir, ck_runtime):
     """历史帧只能看到各日期自己的值: d2 的高值不得泄露到 d1 行。"""
     cfg = _mk_config(data_dir, mode="timeseries")
     write_ext_parquet(
         pl.DataFrame({"symbol": ["600000.SH"], "hot": [0.1]}),
-        cfg, data_dir, snapshot_date=date(2026, 1, 5),
+        cfg,
+        data_dir,
+        snapshot_date=date(2026, 1, 5),
     )
     write_ext_parquet(
         pl.DataFrame({"symbol": ["600000.SH"], "hot": [9.9]}),
-        cfg, data_dir, snapshot_date=date(2026, 1, 6),
+        cfg,
+        data_dir,
+        snapshot_date=date(2026, 1, 6),
     )
-    frame = _frame([
-        ("600000.SH", "2026-01-05", 10.0),
-        ("600000.SH", "2026-01-06", 11.0),
-    ])
+    frame = _frame(
+        [
+            ("600000.SH", "2026-01-05", 10.0),
+            ("600000.SH", "2026-01-06", 11.0),
+        ]
+    )
     out = ext_factors.attach_ext_columns(frame, include_snapshot=False, data_dir=data_dir)
     assert out[COL].to_list() == [0.1, 9.9]
 
 
 # ── 快照门控 ──────────────────────────────────────────────
 
+
 def test_snapshot_gated_off_history_frames(data_dir):
     cfg = _mk_config(data_dir, mode="snapshot")
     write_ext_parquet(
         pl.DataFrame({"symbol": ["600000.SH"], "hot": [1.5]}),
-        cfg, data_dir, snapshot_date=date(2026, 1, 6),
+        cfg,
+        data_dir,
+        snapshot_date=date(2026, 1, 6),
     )
-    hist = _frame([
-        ("600000.SH", "2026-01-05", 10.0),
-        ("600000.SH", "2026-01-06", 11.0),
-    ])
+    hist = _frame(
+        [
+            ("600000.SH", "2026-01-05", 10.0),
+            ("600000.SH", "2026-01-06", 11.0),
+        ]
+    )
     out = ext_factors.attach_ext_columns(hist, include_snapshot=False, data_dir=data_dir)
     assert COL not in out.columns  # 多日历史帧禁止注入快照 (未来函数)
 
@@ -189,14 +213,23 @@ def test_snapshot_gated_off_history_frames(data_dir):
 
 # ── 信号消费 / 评分引用 ───────────────────────────────────
 
+
 def _save_signal(data_dir, sid="ext_hot", left=COL):
-    custom_signals.save_one(data_dir, {
-        "id": sid, "name": "题材热度", "kind": "entry", "enabled": True,
-        "conditions": [{"left": left, "op": ">", "right": "0.5", "leftDays": 0, "rightDays": 0}],
-    })
+    custom_signals.save_one(
+        data_dir,
+        {
+            "id": sid,
+            "name": "题材热度",
+            "kind": "entry",
+            "enabled": True,
+            "conditions": [
+                {"left": left, "op": ">", "right": "0.5", "leftDays": 0, "rightDays": 0}
+            ],
+        },
+    )
 
 
-def test_signal_validate_and_inject_with_ext_field(data_dir):
+def test_signal_validate_and_inject_with_ext_field(data_dir, ck_runtime):
     _mk_config(data_dir, mode="timeseries")
     _save_signal(data_dir)
     sig = custom_signals.load_all(data_dir)[0]
@@ -204,12 +237,16 @@ def test_signal_validate_and_inject_with_ext_field(data_dir):
 
     write_ext_parquet(
         pl.DataFrame({"symbol": ["600000.SH", "000001.SZ"], "hot": [0.9, 0.2]}),
-        ExtConfigStore(data_dir).get("tags"), data_dir, snapshot_date=date(2026, 1, 5),
+        ExtConfigStore(data_dir).get("tags"),  # type: ignore[arg-type]
+        data_dir,
+        snapshot_date=date(2026, 1, 5),
     )
-    frame = _frame([
-        ("600000.SH", "2026-01-05", 10.0),
-        ("000001.SZ", "2026-01-05", 20.0),
-    ])
+    frame = _frame(
+        [
+            ("600000.SH", "2026-01-05", 10.0),
+            ("000001.SZ", "2026-01-05", 20.0),
+        ]
+    )
     # 与 compute_signals 相同顺序: 先 attach 扩展列, 再编译注入
     frame = ext_factors.attach_ext_columns(frame, include_snapshot=False, data_dir=data_dir)
     exprs = custom_signals.build_expressions([sig])
@@ -227,7 +264,8 @@ def test_scoring_value_expr_resolves_ext_column():
 
 # ── 失效链路 ──────────────────────────────────────────────
 
-def test_write_invalidates_frame_cache(data_dir):
+
+def test_write_invalidates_frame_cache(data_dir, ck_runtime):
     cfg = _mk_config(data_dir, mode="timeseries")
     frame = _frame([("600000.SH", "2026-01-05", 10.0)])
     out1 = ext_factors.attach_ext_columns(frame, include_snapshot=False, data_dir=data_dir)
@@ -235,13 +273,15 @@ def test_write_invalidates_frame_cache(data_dir):
     # write_ext_parquet 内部调用 _invalidate_ext_derived → 帧缓存失效
     write_ext_parquet(
         pl.DataFrame({"symbol": ["600000.SH"], "hot": [0.8]}),
-        cfg, data_dir, snapshot_date=date(2026, 1, 5),
+        cfg,
+        data_dir,
+        snapshot_date=date(2026, 1, 5),
     )
     out2 = ext_factors.attach_ext_columns(frame, include_snapshot=False, data_dir=data_dir)
     assert out2[COL].to_list() == [0.8]
 
 
-def test_routine_pull_keeps_strategy_cache_but_default_clears(data_dir):
+def test_routine_pull_keeps_strategy_cache_but_default_clears(data_dir, ck_runtime):
     """定时拉取 (keep_strategy_cache=True) 只失效扩展帧缓存, 不销毁策略结果。
 
     策略页依赖 strategy_cache 秒加载; 周期性拉取每轮全清会让页面在两次
@@ -251,13 +291,16 @@ def test_routine_pull_keeps_strategy_cache_but_default_clears(data_dir):
 
     cfg = _mk_config(data_dir, mode="timeseries")
     strategy_cache.write_cache(
-        data_dir, "2026-01-05",
+        data_dir,
+        "2026-01-05",
         {"s1": {"total": 1, "as_of": "2026-01-05", "rows": []}},
     )
 
     write_ext_parquet(
         pl.DataFrame({"symbol": ["600000.SH"], "hot": [0.8]}),
-        cfg, data_dir, snapshot_date=date(2026, 1, 5),
+        cfg,
+        data_dir,
+        snapshot_date=date(2026, 1, 5),
         keep_strategy_cache=True,
     )
     # 策略结果保留; 扩展帧缓存仍失效 → 新值立即可见
@@ -270,7 +313,9 @@ def test_routine_pull_keeps_strategy_cache_but_default_clears(data_dir):
     # 默认路径 (手动写入): 全清
     write_ext_parquet(
         pl.DataFrame({"symbol": ["600000.SH"], "hot": [0.9]}),
-        cfg, data_dir, snapshot_date=date(2026, 1, 5),
+        cfg,
+        data_dir,
+        snapshot_date=date(2026, 1, 5),
     )
     assert strategy_cache.read_cache(data_dir) is None
 
@@ -288,7 +333,8 @@ def test_scheduler_status_upsert_keeps_strategy_cache(data_dir):
     cfg = _mk_config(data_dir, mode="timeseries")
     store = ExtConfigStore(data_dir)
     strategy_cache.write_cache(
-        data_dir, "2026-01-05",
+        data_dir,
+        "2026-01-05",
         {"s1": {"total": 1, "as_of": "2026-01-05", "rows": []}},
     )
 
@@ -308,7 +354,9 @@ def test_config_field_change_invalidates_sync(data_dir):
     assert get_factor(COL) is not None
     # 改字段集 (去掉 hot): upsert 触发失效, 再同步后注销
     cfg2 = ExtConfig(
-        id="tags", label="题材标签", mode="timeseries",
+        id="tags",
+        label="题材标签",
+        mode="timeseries",
         fields=[ExtField(name="cnt", dtype="int")],
     )
     ExtConfigStore(data_dir).upsert(cfg2)
@@ -319,21 +367,26 @@ def test_config_field_change_invalidates_sync(data_dir):
 
 # ── compute_signals 集成 (历史路径) ───────────────────────
 
-def test_compute_signals_attaches_ext_columns(data_dir):
+
+def test_compute_signals_attaches_ext_columns(data_dir, ck_runtime):
     from app.indicators import pipeline
 
     pipeline.invalidate_custom_signals()
     _mk_config(data_dir, mode="timeseries")
     write_ext_parquet(
         pl.DataFrame({"symbol": ["600000.SH"], "hot": [0.9]}),
-        ExtConfigStore(data_dir).get("tags"), data_dir, snapshot_date=date(2026, 1, 5),
+        ExtConfigStore(data_dir).get("tags"),  # type: ignore[arg-type]
+        data_dir,
+        snapshot_date=date(2026, 1, 5),
     )
     _save_signal(data_dir)
     # 快照配置即使存在也不得进入历史帧
     snap = _mk_config(data_dir, cid="snap1", mode="snapshot")
     write_ext_parquet(
         pl.DataFrame({"symbol": ["600000.SH"], "hot": [1.5]}),
-        snap, data_dir, snapshot_date=date(2026, 1, 6),
+        snap,
+        data_dir,
+        snapshot_date=date(2026, 1, 6),
     )
 
     frame = _frame([("600000.SH", "2026-01-05", 10.0)])
@@ -352,10 +405,13 @@ STR_COL = "ext_tags_cat"  # config_id=tags, string 字段 cat
 
 
 def _mk_str_config(data_dir):
-    return _mk_config(data_dir, fields=[
-        ExtField(name="hot", dtype="float"),
-        ExtField(name="cat", dtype="string"),  # 归属字段, 分号拼接
-    ])
+    return _mk_config(
+        data_dir,
+        fields=[
+            ExtField(name="hot", dtype="float"),
+            ExtField(name="cat", dtype="string"),  # 归属字段, 分号拼接
+        ],
+    )
 
 
 def test_string_fields_exposed_for_signals_only(data_dir):
@@ -372,8 +428,12 @@ def test_string_fields_exposed_for_signals_only(data_dir):
 def test_string_validate_accepts_and_rejects(data_dir):
     _mk_str_config(data_dir)
     ok = {
-        "id": "t_cat", "name": "概念归属", "kind": "entry",
-        "conditions": [{"left": STR_COL, "op": "contains", "right": "AI", "leftDays": 0, "rightDays": 0}],
+        "id": "t_cat",
+        "name": "概念归属",
+        "kind": "entry",
+        "conditions": [
+            {"left": STR_COL, "op": "contains", "right": "AI", "leftDays": 0, "rightDays": 0}
+        ],
     }
     custom_signals.validate(ok)  # contains + 字符串字面量
 
@@ -389,48 +449,78 @@ def test_string_validate_accepts_and_rejects(data_dir):
     with pytest.raises(ValueError, match="不支持字段引用"):
         custom_signals.validate(_bad(right="field:close"))
     with pytest.raises(ValueError, match="contains 仅用于字符串"):
-        custom_signals.validate({  # 数值字段禁用 contains
-            "id": "t_bad2", "name": "x", "kind": "entry",
-            "conditions": [{"left": "close", "op": "contains", "right": "AI", "leftDays": 0, "rightDays": 0}],
-        })
+        custom_signals.validate(
+            {  # 数值字段禁用 contains
+                "id": "t_bad2",
+                "name": "x",
+                "kind": "entry",
+                "conditions": [
+                    {
+                        "left": "close",
+                        "op": "contains",
+                        "right": "AI",
+                        "leftDays": 0,
+                        "rightDays": 0,
+                    }
+                ],
+            }
+        )
 
 
-def test_string_contains_inject_semantics(data_dir):
+def test_string_contains_inject_semantics(data_dir, ck_runtime):
     _mk_str_config(data_dir)
     write_ext_parquet(
-        pl.DataFrame({
-            "symbol": ["600000.SH", "000001.SZ", "300750.SZ"],
-            "cat": ["AI;芯片", "半导体", None],  # null: 无归属
-        }),
-        ExtConfigStore(data_dir).get("tags"), data_dir, snapshot_date=date(2026, 1, 5),
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH", "000001.SZ", "300750.SZ"],
+                "cat": ["AI;芯片", "半导体", None],  # null: 无归属
+            }
+        ),
+        ExtConfigStore(data_dir).get("tags"),  # type: ignore[arg-type]
+        data_dir,
+        snapshot_date=date(2026, 1, 5),
     )
     sig = {
-        "id": "cat_ai", "name": "AI题材", "kind": "entry", "enabled": True,
-        "conditions": [{"left": STR_COL, "op": "contains", "right": "AI", "leftDays": 0, "rightDays": 0}],
+        "id": "cat_ai",
+        "name": "AI题材",
+        "kind": "entry",
+        "enabled": True,
+        "conditions": [
+            {"left": STR_COL, "op": "contains", "right": "AI", "leftDays": 0, "rightDays": 0}
+        ],
     }
-    frame = _frame([
-        ("300750.SZ", "2026-01-05", 10.0),  # null 归属 → 不命中
-        ("600000.SH", "2026-01-05", 11.0),
-        ("000001.SZ", "2026-01-05", 20.0),
-    ])
+    frame = _frame(
+        [
+            ("300750.SZ", "2026-01-05", 10.0),  # null 归属 → 不命中
+            ("600000.SH", "2026-01-05", 11.0),
+            ("000001.SZ", "2026-01-05", 20.0),
+        ]
+    )
     frame = ext_factors.attach_ext_columns(frame, include_snapshot=False, data_dir=data_dir)
     out = custom_signals.inject(frame, custom_signals.build_expressions([sig]))
     got = dict(zip(out["symbol"], out["csg_cat_ai"], strict=True))
-    assert got["600000.SH"] is True       # "AI;芯片" 包含 AI
-    assert not got["000001.SZ"]           # "半导体" 不含
-    assert not got["300750.SZ"]           # null → 不误报
+    assert got["600000.SH"] is True  # "AI;芯片" 包含 AI
+    assert not got["000001.SZ"]  # "半导体" 不含
+    assert not got["300750.SZ"]  # null → 不误报
 
 
-def test_string_contains_is_literal_not_regex(data_dir):
+def test_string_contains_is_literal_not_regex(data_dir, ck_runtime):
     """右值按字面量匹配: '.' 不当正则万能匹配。"""
     _mk_str_config(data_dir)
     write_ext_parquet(
         pl.DataFrame({"symbol": ["600000.SH"], "cat": ["AI;芯片"]}),
-        ExtConfigStore(data_dir).get("tags"), data_dir, snapshot_date=date(2026, 1, 5),
+        ExtConfigStore(data_dir).get("tags"),  # type: ignore[arg-type]
+        data_dir,
+        snapshot_date=date(2026, 1, 5),
     )
     sig_dot = {
-        "id": "cat_dot", "name": "x", "kind": "entry", "enabled": True,
-        "conditions": [{"left": STR_COL, "op": "contains", "right": ".", "leftDays": 0, "rightDays": 0}],
+        "id": "cat_dot",
+        "name": "x",
+        "kind": "entry",
+        "enabled": True,
+        "conditions": [
+            {"left": STR_COL, "op": "contains", "right": ".", "leftDays": 0, "rightDays": 0}
+        ],
     }
     frame = _frame([("600000.SH", "2026-01-05", 10.0)])
     frame = ext_factors.attach_ext_columns(frame, include_snapshot=False, data_dir=data_dir)
@@ -438,23 +528,38 @@ def test_string_contains_is_literal_not_regex(data_dir):
     assert out["csg_cat_dot"].to_list() == [False]  # 正则下 '.' 会匹配任意字符
 
 
-def test_string_equals_and_mixed_conditions(data_dir):
+def test_string_equals_and_mixed_conditions(data_dir, ck_runtime):
     _mk_str_config(data_dir)
     write_ext_parquet(
-        pl.DataFrame({"symbol": ["600000.SH", "000001.SZ"], "cat": ["半导体", "银行"], "hot": [0.9, 0.2]}),
-        ExtConfigStore(data_dir).get("tags"), data_dir, snapshot_date=date(2026, 1, 5),
+        pl.DataFrame(
+            {"symbol": ["600000.SH", "000001.SZ"], "cat": ["半导体", "银行"], "hot": [0.9, 0.2]}
+        ),
+        ExtConfigStore(data_dir).get("tags"),  # type: ignore[arg-type]
+        data_dir,
+        snapshot_date=date(2026, 1, 5),
     )
     sig = {
-        "id": "semi_strong", "name": "强势半导体", "kind": "entry", "enabled": True,
+        "id": "semi_strong",
+        "name": "强势半导体",
+        "kind": "entry",
+        "enabled": True,
         "conditions": [
             {"left": STR_COL, "op": "==", "right": "半导体", "leftDays": 0, "rightDays": 0},
-            {"left": COL, "op": ">", "right": "0.5", "leftDays": 0, "rightDays": 0},  # 混合: 归属且热度
+            {
+                "left": COL,
+                "op": ">",
+                "right": "0.5",
+                "leftDays": 0,
+                "rightDays": 0,
+            },  # 混合: 归属且热度
         ],
     }
-    frame = _frame([
-        ("600000.SH", "2026-01-05", 10.0),
-        ("000001.SZ", "2026-01-05", 20.0),
-    ])
+    frame = _frame(
+        [
+            ("600000.SH", "2026-01-05", 10.0),
+            ("000001.SZ", "2026-01-05", 20.0),
+        ]
+    )
     frame = ext_factors.attach_ext_columns(frame, include_snapshot=False, data_dir=data_dir)
     out = custom_signals.inject(frame, custom_signals.build_expressions([sig]))
     got = dict(zip(out["symbol"], out["csg_semi_strong"], strict=True))
@@ -464,19 +569,30 @@ def test_string_equals_and_mixed_conditions(data_dir):
 
 def test_cjk_string_field_end_to_end(data_dir):
     """预设表场景: 中文字段名 (所属概念) 列名保留中文, 信号全链路可用。"""
-    ExtConfigStore(data_dir).upsert(ExtConfig(
-        id="ths_concepts", label="扩展概念", mode="snapshot",
-        fields=[ExtField(name="所属概念", dtype="string")],
-    ))
+    ExtConfigStore(data_dir).upsert(
+        ExtConfig(
+            id="ths_concepts",
+            label="扩展概念",
+            mode="snapshot",
+            fields=[ExtField(name="所属概念", dtype="string")],
+        )
+    )
     write_ext_parquet(
         pl.DataFrame({"symbol": ["600000.SH"], "所属概念": ["AI芯片;机器人"]}),
-        ExtConfigStore(data_dir).get("ths_concepts"), data_dir, snapshot_date=date(2026, 1, 6),
+        ExtConfigStore(data_dir).get("ths_concepts"),  # type: ignore[arg-type]
+        data_dir,
+        snapshot_date=date(2026, 1, 6),
     )
     col = "ext_ths_concepts_所属概念"
     assert col in custom_signals.allowed_fields()
     sig = {
-        "id": "robot", "name": "机器人题材", "kind": "entry", "enabled": True,
-        "conditions": [{"left": col, "op": "contains", "right": "机器人", "leftDays": 0, "rightDays": 0}],
+        "id": "robot",
+        "name": "机器人题材",
+        "kind": "entry",
+        "enabled": True,
+        "conditions": [
+            {"left": col, "op": "contains", "right": "机器人", "leftDays": 0, "rightDays": 0}
+        ],
     }
     custom_signals.validate(sig)
     frame = _frame([("600000.SH", "2026-01-06", 10.0)])
@@ -487,6 +603,7 @@ def test_cjk_string_field_end_to_end(data_dir):
 
 
 # ── worker 子进程注册表同步 (线上回归) ────────────────────
+
 
 def test_mining_worker_registry_must_include_ext_factors(data_dir):
     """回归: 挖掘 worker 只 load_into_registry (uf_/cf_) 时注册表缺 ext 因子,
@@ -509,13 +626,13 @@ def test_mining_worker_registry_must_include_ext_factors(data_dir):
     assert col not in {item["id"] for item in factor_columns_view()}
     payload = {"run_id": "r1", "request": {"factor_names": [col]}}
     with pytest.raises(ValueError, match="unknown mining factors"):
-        _decode_runtime_request(payload, data_dir, strategy_engine=None)
+        _decode_runtime_request(payload, data_dir, strategy_engine=None)  # type: ignore[arg-type]
 
     # 修复后的 worker 行为: 同步 ext 因子 → 校验放行 (后续解码错误不算失败)
     ext_factors.ensure_synced(data_dir)
     assert col in {item["id"] for item in factor_columns_view()}
     try:
-        _decode_runtime_request(payload, data_dir, strategy_engine=None)
+        _decode_runtime_request(payload, data_dir, strategy_engine=None)  # type: ignore[arg-type]
     except ValueError as exc:
         assert "unknown mining factors" not in str(exc)
 
@@ -525,8 +642,10 @@ def test_cold_load_can_register_custom_factor_using_ext_field(data_dir):
     from app.factors.registry import isolated_registry
 
     _mk_config(data_dir)
-    store.save_one(data_dir, {"id": "uf_hot", "kind": "custom", "label": "热度", "formula": f"{COL} * 2"})
+    store.save_one(
+        data_dir, {"id": "uf_hot", "kind": "custom", "label": "热度", "formula": f"{COL} * 2"}
+    )
     with isolated_registry():
         assert get_factor(COL) is None
         assert store.load_runtime_registry(data_dir) == ["uf_hot"]
-        assert get_factor("uf_hot").inputs == {COL}
+        assert get_factor("uf_hot").inputs == {COL}  # type: ignore[union-attr]

@@ -19,10 +19,16 @@ def test_guide_and_validation_follow_current_signal_library(monkeypatch, tmp_pat
     from app.strategy import custom_signals
 
     monkeypatch.setattr(settings, "data_dir", tmp_path)
-    custom_signals.save_one(tmp_path, {
-        "id": "audit", "name": "测试信号", "kind": "entry", "enabled": True,
-        "conditions": [{"left": "close", "op": ">", "right": "10"}],
-    })
+    custom_signals.save_one(
+        tmp_path,
+        {
+            "id": "audit",
+            "name": "测试信号",
+            "kind": "entry",
+            "enabled": True,
+            "conditions": [{"left": "close", "op": ">", "right": "10"}],
+        },
+    )
     generator = AIStrategyGenerator()
     code = """import polars as pl
 META = {"id": "ai_signal", "scoring": {}}
@@ -38,6 +44,7 @@ def filter(df, params):
     assert not result["valid"] and "signal_entry_oversold_rebound" in result["error"]
 
     sig = custom_signals.load_one(tmp_path, "audit")
+    assert sig is not None
     sig["enabled"] = False
     custom_signals.save_one(tmp_path, sig)
     assert "`csg_audit`" not in generator._get_guide()
@@ -61,13 +68,20 @@ def filter_history(df, params):
 
     async def generate(self, prompt, guide):
         calls.append(prompt)
-        return code if len(calls) == 1 else code.replace(
-            '["entry_oversold_rebound"]', "[]",
-        ).replace('["exit_holding_period"]', "[]")
+        return (
+            code
+            if len(calls) == 1
+            else code.replace(
+                '["entry_oversold_rebound"]',
+                "[]",
+            ).replace('["exit_holding_period"]', "[]")
+        )
 
     monkeypatch.setattr(AIStrategyGenerator, "_call_llm", generate)
     invalid = AIStrategyGenerator().validate_code(code)
-    assert "entry_oversold_rebound" in invalid["error"] and "exit_holding_period" in invalid["error"]
+    assert (
+        "entry_oversold_rebound" in invalid["error"] and "exit_holding_period" in invalid["error"]
+    )
     result = await AIStrategyGenerator().generate("生成策略")
     assert result["valid"] and len(calls) == 2
     assert "entry_oversold_rebound" in calls[1] and "exit_holding_period" in calls[1]
@@ -109,9 +123,12 @@ def test_build_step1_without_basic_filter_keeps_prompt_unchanged_shape():
 def test_build_step1_injects_user_default_basic_filter():
     """basic_filter 传入: 提示词要求 META.basic_filter 严格采用用户默认值。"""
     bf = {
-        "price_min": 3, "price_max": 100,
-        "float_cap_min": 20e8, "float_cap_max": None,
-        "exclude_st": False, "boards": ["沪主板", "深主板"],
+        "price_min": 3,
+        "price_max": 100,
+        "float_cap_min": 20e8,
+        "float_cap_max": None,
+        "exclude_st": False,
+        "boards": ["沪主板", "深主板"],
     }
 
     prompt = build_step1("测试策略", "测试描述", "long", "1. 规则", "", basic_filter=bf)

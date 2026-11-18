@@ -4,13 +4,27 @@
 明细回填 (无因子变化) 不触发重算 / enriched 未构建时跳过 / 无能力时跳过。
 纯逻辑, 不触网。
 """
+
 from __future__ import annotations
 
 from datetime import date, datetime
 from types import SimpleNamespace
 
+import polars as pl
+import pytest
+
 from app.jobs import daily_pipeline
 from app.services import kline_sync
+
+_CK = {"store": None}
+
+
+@pytest.fixture(autouse=True)
+def _ck(ck_runtime):
+    """run_adj_factor_sync 从 CK list_daily_dates 判断 enriched 是否已构建。"""
+    _CK["store"] = ck_runtime
+    yield
+    _CK["store"] = None
 
 
 def _repo(tmp_path, earliest_daily=None):
@@ -25,16 +39,25 @@ def _capset(has_adj=True):
     return SimpleNamespace(has=lambda key: has_adj)
 
 
-def _patch_common(monkeypatch, tmp_path, *, written=2, affected=("600519.SH",),
-                  with_enriched=True, provider="tickflow"):
+def _patch_common(
+    monkeypatch,
+    tmp_path,
+    *,
+    written=2,
+    affected=("600519.SH",),
+    with_enriched=True,
+    provider="tickflow",
+):
     """公共桩: 标的池/失效/视图刷新/因子同步/enriched 重算全部可观测。"""
-    monkeypatch.setattr(daily_pipeline, "_resolve_universe",
-                        lambda capset, repo=None: ["600519.SH", "000001.SZ"])
+    monkeypatch.setattr(
+        daily_pipeline, "_resolve_universe", lambda capset, repo=None: ["600519.SH", "000001.SZ"]
+    )
     invalidated: list[str | None] = []
     monkeypatch.setattr(daily_pipeline, "_invalidate", invalidated.append)
     refreshed: list[str] = []
-    monkeypatch.setattr(daily_pipeline, "_refresh_single_view",
-                        lambda repo, name: refreshed.append(name))
+    monkeypatch.setattr(
+        daily_pipeline, "_refresh_single_view", lambda repo, name: refreshed.append(name)
+    )
 
     captured_sync: dict = {}
 
@@ -55,7 +78,18 @@ def _patch_common(monkeypatch, tmp_path, *, written=2, affected=("600519.SH",),
     monkeypatch.setattr(daily_pipeline._prefs, "get_adj_factor_provider", lambda: provider)
 
     if with_enriched:
-        (tmp_path / "kline_daily_enriched" / "date=2026-01-05").mkdir(parents=True)
+        (tmp_path / "kline_daily_enriched" / "date=2026-01-05").mkdir(parents=True, exist_ok=True)
+        if _CK["store"] is not None:
+            _CK["store"].write_daily(
+                "kline_daily_enriched",
+                pl.DataFrame(
+                    {
+                        "symbol": ["600519.SH"],
+                        "date": [date(2026, 1, 5)],
+                        "close": [1.0],
+                    }
+                ),
+            )
     return captured_sync, captured_recompute, invalidated, refreshed
 
 
@@ -74,7 +108,9 @@ def test_full_history_window_and_partial_recompute(monkeypatch, tmp_path):
     assert sync["symbols"] == ["600519.SH", "000001.SZ"]
     assert recompute["symbols"] == ["600519.SH"], "只重算因子变化个股 (与管道 adj 增量分支同语义)"
     assert invalidated == ["adj_factor", "enriched"]
-    assert refreshed == ["adj_factor", "kline_enriched"]
+    # 迁移后 _refresh_single_view 为兼容空壳（CK 为权威读源，无 DuckDB 视图可刷）；
+    # 缓存失效由上方 _invalidate 断言覆盖，故仅断言实际保留的 adj_factor 刷新调用。
+    assert refreshed == ["adj_factor"]
     assert result["adj_factor_symbols"] == 1
     assert result["enriched_days"] == 7
     assert result["skipped_stages"] == []
@@ -94,8 +130,7 @@ def test_window_clamped_to_local_daily_horizon(monkeypatch, tmp_path):
 
 def test_detail_backfill_does_not_recompute_enriched(monkeypatch, tmp_path):
     """扩表后重拉全历史但因子值全未变 (仅明细回填) → 不触发 enriched 重算。"""
-    _sync, recompute, invalidated, _ = _patch_common(
-        monkeypatch, tmp_path, written=0, affected=())
+    _sync, recompute, invalidated, _ = _patch_common(monkeypatch, tmp_path, written=0, affected=())
 
     result = daily_pipeline.run_adj_factor_sync(_repo(tmp_path), _capset())
 
@@ -107,8 +142,7 @@ def test_detail_backfill_does_not_recompute_enriched(monkeypatch, tmp_path):
 
 def test_skips_recompute_when_enriched_not_built(monkeypatch, tmp_path):
     """enriched 尚未构建 (首次使用前) → 跳过局部重算, 交由盘后管道全量计算。"""
-    _sync, recompute, invalidated, _ = _patch_common(
-        monkeypatch, tmp_path, with_enriched=False)
+    _sync, recompute, invalidated, _ = _patch_common(monkeypatch, tmp_path, with_enriched=False)
 
     result = daily_pipeline.run_adj_factor_sync(_repo(tmp_path), _capset())
 
@@ -119,14 +153,16 @@ def test_skips_recompute_when_enriched_not_built(monkeypatch, tmp_path):
 
 def test_no_capability_returns_skipped(monkeypatch, tmp_path):
     """TickFlow 无除权能力且未路由到其他源 → 跳过, 不发起任何同步。"""
+
     def boom(*a, **k):  # pragma: no cover - 触发即失败
         raise AssertionError("无能力时不得触网")
 
     monkeypatch.setattr(kline_sync, "sync_adj_factor", boom)
     monkeypatch.setattr(daily_pipeline._prefs, "get_adj_factor_provider", lambda: "tickflow")
     monkeypatch.setattr(daily_pipeline, "_invalidate", lambda table=None: None)
-    monkeypatch.setattr(daily_pipeline, "_resolve_universe",
-                        lambda capset, repo=None: ["600519.SH"])
+    monkeypatch.setattr(
+        daily_pipeline, "_resolve_universe", lambda capset, repo=None: ["600519.SH"]
+    )
 
     result = daily_pipeline.run_adj_factor_sync(_repo(tmp_path), _capset(has_adj=False))
 

@@ -12,7 +12,8 @@
   - 单个查询 = 内存优先,没有则读磁盘
   - 创建新 job 前检查文件数量,>= max_jobs 时删除最老的文件
 """
-from __future__ import annotations
+
+from __future__ import annotations  # noqa: I001 - I001: 延迟导入块无法排序到文件顶部
 
 import json
 import logging
@@ -23,6 +24,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, TypeVar
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +98,7 @@ def _register_cancel_flag(job_id: str) -> None:
 
 def _default_store_dir() -> Path:
     from app.config import settings
+
     return settings.data_dir / "job_store"
 
 
@@ -106,7 +109,7 @@ class JobStore:
     def __init__(self, max_jobs: int = 50, store_dir: Path = _STORE_DIR) -> None:
         self._max_jobs = max_jobs
         self._store_dir = store_dir
-        self._active_jobs: dict[str, dict[str, Any]] = {}   # running/pending
+        self._active_jobs: dict[str, dict[str, Any]] = {}  # running/pending
         self._active_id: str | None = None
         self._lock = threading.Lock()
         self._store_dir.mkdir(parents=True, exist_ok=True)
@@ -120,7 +123,7 @@ class JobStore:
         """Caller holds _lock. Publish status before potentially slow persistence."""
         _, previous = self._summary_snapshot
         summaries = [_summary(job), *(j for j in previous if j["id"] != job["id"])]
-        summaries = summaries[:self._max_jobs]
+        summaries = summaries[: self._max_jobs]
         summaries.sort(key=lambda j: j.get("started_at") or "", reverse=True)
         self._summary_snapshot = self._active_id, tuple(summaries)
 
@@ -141,12 +144,10 @@ class JobStore:
                 encoding="utf-8",
             )
             os.replace(tmp, path)
-        except Exception:
+        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.warning("failed to write job file %s", path)
-            try:
+            with contextlib.suppress(OSError):
                 tmp.unlink()
-            except OSError:
-                pass
 
     def _read_file(self, job_id: str) -> dict[str, Any] | None:
         """从磁盘读取单个 job 文件。"""
@@ -155,15 +156,32 @@ class JobStore:
             return None
         try:
             return json.loads(path.read_text("utf-8"))
-        except Exception:
+        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.warning("failed to read job file %s", path)
             return None
+
+    @staticmethod
+    def _job_file_order_key(path: Path) -> str:
+        """job 文件的内容级时间标记 (started_at 优先, 未开始则用 last_progress_at)。
+
+        文件 mtime 取自粗粒度时钟: 同一 tick 内写出的多个 job 文件 mtime 相同,
+        只按 mtime 排序会让「裁掉最旧」变成随机丢一条。内容里的时间戳能定出
+        稳定次序, 与读取侧 (按 started_at 倒序) 保持一致。
+        """
+        try:
+            job = json.loads(path.read_text("utf-8"))
+        except Exception:  # noqa: BLE001 - 损坏 job 文件跳过排序键, 视为空
+            return ""
+        return job.get("started_at") or job.get("last_progress_at") or ""
 
     def _delete_oldest(self, writing_id: str) -> None:
         """留出待写文件的位置，清理文件时同步移除历史摘要。"""
         try:
-            files = sorted(self._store_dir.glob("*.json"), key=lambda f: f.stat().st_mtime)
-        except Exception:
+            files = sorted(
+                self._store_dir.glob("*.json"),
+                key=lambda f: (f.stat().st_mtime_ns, self._job_file_order_key(f)),
+            )
+        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             return
         # 覆盖 pending/running 的已有文件时，不额外占用历史记录名额。
         keep = self._max_jobs - int(not any(f.stem == writing_id for f in files))
@@ -174,11 +192,14 @@ class JobStore:
                 oldest.unlink()
                 if oldest.stem != writing_id:
                     deleted.add(oldest.stem)
-            except Exception:
+            except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
                 logger.warning("failed to delete old job file %s", oldest)
         if deleted:
             active_id, summaries = self._summary_snapshot
-            self._summary_snapshot = active_id, tuple(j for j in summaries if j["id"] not in deleted)
+            self._summary_snapshot = (
+                active_id,
+                tuple(j for j in summaries if j["id"] not in deleted),
+            )
 
     def _job_files_sorted(self) -> list[dict[str, Any]]:
         """扫描磁盘上所有 job 文件,按 started_at 从新到旧排序。"""
@@ -188,7 +209,7 @@ class JobStore:
                 job = json.loads(f.read_text("utf-8"))
                 _summary(job)
                 jobs.append(job)
-            except Exception:
+            except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
                 continue
         jobs.sort(key=lambda j: j.get("started_at") or "", reverse=True)
         return jobs
@@ -205,7 +226,7 @@ class JobStore:
         for f in self._store_dir.glob("*.json"):
             try:
                 j = json.loads(f.read_text("utf-8"))
-            except Exception:
+            except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
                 continue
             if not isinstance(j, dict):
                 continue
@@ -217,7 +238,7 @@ class JobStore:
             try:
                 mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=UTC)
                 end = mtime.strftime("%Y-%m-%dT%H:%M:%SZ")
-            except Exception:
+            except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
                 end = datetime.utcnow().isoformat(timespec="seconds") + "Z"
             # mtime 早于 started_at(时钟回拨等)时夹住, 避免 duration 为负
             if j.get("started_at") and end < j["started_at"]:
@@ -254,6 +275,7 @@ class JobStore:
         """
         if timeout_s is None:
             from app.services import preferences
+
             if long_running:
                 timeout_s = preferences.get_data_source_long_job_timeout_s()
             else:
@@ -340,8 +362,15 @@ class JobStore:
 
     # ===== progress =====
 
-    def progress(self, job_id: str, stage: str, pct: int, msg: str,
-                 stage_pct: int | None = None, skip_log: bool = False) -> None:
+    def progress(
+        self,
+        job_id: str,
+        stage: str,
+        pct: int,
+        msg: str,
+        stage_pct: int | None = None,
+        skip_log: bool = False,
+    ) -> None:
         with self._lock:
             j = self._active_jobs.get(job_id)
             if not j:
@@ -365,8 +394,13 @@ class JobStore:
                 "msg": msg,
             }
             if skip_log:
-                entry["_skip"] = True
-            if skip_log and j["log"] and j["log"][-1].get("stage") == stage and j["log"][-1].get("_skip"):
+                entry["_skip"] = True  # type: ignore[assignment]
+            if (
+                skip_log
+                and j["log"]
+                and j["log"][-1].get("stage") == stage
+                and j["log"][-1].get("_skip")
+            ):
                 j["log"][-1] = entry
             else:
                 j["log"].append(entry)
@@ -400,7 +434,7 @@ class JobStore:
         active_id, summaries = self._summary_snapshot
         return {
             "active_id": active_id,
-            "jobs": [dict(j) for j in summaries[:max(1, limit)]],
+            "jobs": [dict(j) for j in summaries[: max(1, limit)]],
         }
 
     def active_id(self) -> str | None:
@@ -411,6 +445,44 @@ class JobStore:
         job_id = self._active_id
         active = self._active_jobs.get(job_id) if job_id else None
         return active.get("status") if active else None
+
+    def _reap_stale_decision(
+        self, jid: str, stalled_s: float, total_s: float, timeout_s: int, queued: bool
+    ) -> None:
+        """按停滞/硬超时/排队超时三类条件执行协作式终止。"""
+        if stalled_s > timeout_s:
+            if queued:
+                logger.warning(
+                    "reap_stale: 取消排队 job %s (等待重任务槽 %.0fs > 阈值 %ss)",
+                    jid,
+                    stalled_s,
+                    timeout_s,
+                )
+                self.terminate(
+                    jid,
+                    f"超时自动取消: 排队等待重任务执行槽 {int(stalled_s)}s 超过阈值 {timeout_s}s — "
+                    "槽位可能被长回测或未正常退出的残留任务占用, 请稍后重试; 若持续出现请重启后端",
+                )
+            else:
+                logger.warning(
+                    "reap_stale: 强制取消卡死 job %s (进度停滞 %.0fs > 阈值 %ss, 总运行 %.0fs)",
+                    jid,
+                    stalled_s,
+                    timeout_s,
+                    total_s,
+                )
+                self.terminate(
+                    jid,
+                    f"超时自动取消: 进度停滞 {int(stalled_s)}s 超过阈值 {timeout_s}s,已请求终止",
+                )
+        elif not queued and total_s > HARD_JOB_TIMEOUT_S:
+            logger.warning(
+                "reap_stale: 强制取消 job %s (总运行 %.0fs 超过硬上限 %ss)",
+                jid,
+                total_s,
+                HARD_JOB_TIMEOUT_S,
+            )
+            self.terminate(jid, f"超时自动取消: 总运行 {int(total_s)}s 超过硬上限,已请求终止")
 
     def reap_stale(self, timeout_s: int | None = None) -> None:
         """回收卡死的 running job, 以及排队超时的 pending job。判定:
@@ -445,12 +517,14 @@ class JobStore:
             status = j.get("status") if j else None
             if status not in ("pending", "running"):
                 return
-            started = j.get("started_at")
-            last_alive = j.get("last_progress_at") or started
+            started = j.get("started_at")  # type: ignore[union-attr]
+            last_alive = j.get("last_progress_at") or started  # type: ignore[union-attr]
             if not last_alive:
                 return
             # 优先用显式传入, 其次 job 自身阈值, 最后默认值
-            effective_timeout = timeout_s if timeout_s is not None else j.get("timeout_s", DEFAULT_JOB_TIMEOUT_S)
+            effective_timeout = (
+                timeout_s if timeout_s is not None else j.get("timeout_s", DEFAULT_JOB_TIMEOUT_S)  # type: ignore[union-attr]
+            )
             timeout_s = effective_timeout
             started_at = started
             last_alive_at = last_alive
@@ -464,27 +538,9 @@ class JobStore:
             now = datetime.now(alive_dt.tzinfo)
             stalled_s = (now - alive_dt).total_seconds()
             total_s = (now - start_dt).total_seconds() if start_dt else 0.0
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             return
-        if stalled_s > timeout_s:
-            if queued:
-                logger.warning(
-                    "reap_stale: 取消排队 job %s (等待重任务槽 %.0fs > 阈值 %ss)",
-                    jid, stalled_s, timeout_s)
-                self.terminate(
-                    jid,
-                    f"超时自动取消: 排队等待重任务执行槽 {int(stalled_s)}s 超过阈值 {timeout_s}s — "
-                    "槽位可能被长回测或未正常退出的残留任务占用, 请稍后重试; 若持续出现请重启后端")
-            else:
-                logger.warning(
-                    "reap_stale: 强制取消卡死 job %s (进度停滞 %.0fs > 阈值 %ss, 总运行 %.0fs)",
-                    jid, stalled_s, timeout_s, total_s)
-                self.terminate(jid, f"超时自动取消: 进度停滞 {int(stalled_s)}s 超过阈值 {timeout_s}s,已请求终止")
-        elif not queued and total_s > HARD_JOB_TIMEOUT_S:
-            logger.warning(
-                "reap_stale: 强制取消 job %s (总运行 %.0fs 超过硬上限 %ss)",
-                jid, total_s, HARD_JOB_TIMEOUT_S)
-            self.terminate(jid, f"超时自动取消: 总运行 {int(total_s)}s 超过硬上限,已请求终止")
+        self._reap_stale_decision(jid, stalled_s, total_s, timeout_s, queued)
 
     def terminate(self, job_id: str, message: str) -> None:
         """标记失败 + 请求协作式终止 + 强制释放执行槽(带所有权)。
@@ -507,10 +563,8 @@ class JobStore:
             self._active_id = None
             self._summary_snapshot = None, ()
             for f in self._store_dir.glob("*.json"):
-                try:
+                with contextlib.suppress(Exception):
                     f.unlink()
-                except Exception:
-                    pass
         with _CANCEL_FLAGS_LOCK:
             _CANCEL_FLAGS.clear()
 
@@ -537,7 +591,7 @@ def _duration_s(j: dict[str, Any]) -> float | None:
         s = datetime.fromisoformat(j["started_at"])
         e = datetime.fromisoformat(j["finished_at"])
         return round((e - s).total_seconds(), 2)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         return None
 
 
@@ -567,7 +621,7 @@ def run_with_capacity(job_id: str, fn: Callable[[], _Result]) -> _Result:
     job = job_store.get(job_id)
     if isinstance(job, dict):
         configured = job.get("timeout_s")
-        if isinstance(configured, (int, float)) and configured > 0:
+        if isinstance(configured, int | float) and configured > 0:
             wait_s = configured
     try:
         with shared_heavy_job_limiter.slot("exclusive", timeout=wait_s, cancel_event=cancel_event):
@@ -583,8 +637,9 @@ def run_with_capacity(job_id: str, fn: Callable[[], _Result]) -> _Result:
         job_store.fail(
             job_id,
             f"排队等待重任务执行槽超时({int(wait_s)}s): 槽位可能被长回测或未正常退出的"
-            "残留任务占用, 请稍后重试; 若持续出现请重启后端")
-        raise JobCancelledError(job_id)
+            "残留任务占用, 请稍后重试; 若持续出现请重启后端",
+        )
+        raise JobCancelledError(job_id)  # noqa: B904 - B904: 此处无需异常链, 上游已有上下文
 
 
 # ================================================================

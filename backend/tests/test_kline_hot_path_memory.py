@@ -2,6 +2,7 @@
 
 契约等值: 输出与旧的 DuckDB 扫描 / 逐配置读 parquet 路径一致。
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -19,33 +20,35 @@ class _FakeRepo:
     def __init__(self, instruments: pl.DataFrame, data_dir) -> None:
         self._instruments = instruments
         self.store = SimpleNamespace(data_dir=data_dir, db=None)
-        self.execute_one_calls = 0
 
     def get_instruments(self) -> pl.DataFrame:
         return self._instruments
 
-    def execute_one(self, *args, **kwargs):
-        self.execute_one_calls += 1
         raise AssertionError("热路径不得再走 DuckDB 扫 instruments parquet")
 
 
 def _instruments_df() -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": ["600000.SH", "000001.SZ", "510300.SH"],
-        "name": ["浦发银行", "平安银行", "沪深300ETF"],
-        "total_shares": [1.0e9, 2.0e9, None],
-        "float_shares": [5.0e8, 1.0e9, None],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["600000.SH", "000001.SZ", "510300.SH"],
+            "name": ["浦发银行", "平安银行", "沪深300ETF"],
+            "total_shares": [1.0e9, 2.0e9, None],
+            "float_shares": [5.0e8, 1.0e9, None],
+        }
+    )
 
 
 # ---------------------------------------------------------------- _get_stock_info
 
+
 def test_get_stock_info_reads_memory_cache():
     repo = _FakeRepo(_instruments_df(), None)
     assert _get_stock_info(repo, "600000.SH") == {
-        "name": "浦发银行", "total_shares": 1.0e9, "float_shares": 5.0e8,
+        "name": "浦发银行",
+        "total_shares": 1.0e9,
+        "float_shares": 5.0e8,
     }
-    assert repo.execute_one_calls == 0
+    # DuckDB 已移除 (B5.1)：热路径不再有 execute_one 概念
 
 
 def test_get_stock_info_null_shares_become_none():
@@ -75,6 +78,7 @@ def test_get_stock_info_repo_failure_returns_empty():
 
 # ---------------------------------------------------------------- _attach_ext
 
+
 def test_attach_ext_empty_columns_untouched():
     resp = {"symbol": "600000.SH", "stock_info": {"name": "x"}, "rows": []}
     repo = _FakeRepo(_instruments_df(), None)
@@ -98,7 +102,8 @@ def test_attach_ext_maps_values_from_loader(monkeypatch):
     original_info = resp["stock_info"]
     repo = _FakeRepo(_instruments_df(), None)
     monkeypatch.setattr(
-        screener, "_load_ext_value_maps",
+        screener,
+        "_load_ext_value_maps",
         lambda r, cols: {"cfg1__score": {"600000.SH": 88.5}, "cfg1__note": {}},
     )
     out = _attach_ext(resp, repo, "600000.SH", "cfg1.score,cfg1.note")
@@ -123,18 +128,25 @@ def test_attach_ext_loader_failure_yields_none_values(monkeypatch):
 
 # ------------------------------------------- _attach_ext 与真实 _load_ext_value_maps 集成
 
+
 def _setup_ext_snapshot(tmp_path):
     store = ExtConfigStore(tmp_path)
-    store.upsert(ExtConfig(
-        id="benchx", label="基准扩展", mode="snapshot",
-        fields=[ExtField(name="score", dtype="float")],
-    ))
+    store.upsert(
+        ExtConfig(
+            id="benchx",
+            label="基准扩展",
+            mode="snapshot",
+            fields=[ExtField(name="score", dtype="float")],
+        )
+    )
     cfg_dir = tmp_path / "ext_data" / "benchx"
     cfg_dir.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame({
-        "symbol": [f"{600000 + i}.SH" for i in range(50)],
-        "score": [float(i) for i in range(50)],
-    }).write_parquet(cfg_dir / "part.parquet")
+    pl.DataFrame(
+        {
+            "symbol": [f"{600000 + i}.SH" for i in range(50)],
+            "score": [float(i) for i in range(50)],
+        }
+    ).write_parquet(cfg_dir / "part.parquet")
     return store
 
 

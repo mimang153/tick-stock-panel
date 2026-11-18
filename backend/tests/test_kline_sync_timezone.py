@@ -3,6 +3,7 @@
 fetch_minute_single 构造的 naive datetime 会被 _datetime_to_ms 的 .timestamp()
 按服务器本地时区解释: UTC 容器 (Docker 默认) 上窗口偏移 8 小时, 补拉必为空。
 """
+
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
@@ -47,12 +48,28 @@ def test_fetch_minute_single_window_is_beijing_wall_clock(monkeypatch):
     assert (end.date(), end.hour, end.minute) == (date(2026, 8, 14), 15, 5)
 
 
-def _capture_minute_window(monkeypatch, tmp_path, local_dt: datetime, **kwargs) -> dict:
+def _capture_minute_window(monkeypatch, tmp_path, local_dt: datetime, ck_runtime, **kwargs) -> dict:
     """桩掉 sync_and_persist_minute 的外部依赖, 只截获传给取数层的时间窗口。
 
-    local_dt 模拟 kline_minute 里的极值 (落盘口径为北京墙钟 naive)。
+    local_dt 模拟 kline_minute 里的极值 (落盘口径为北京墙钟 naive)，写入 CK
+    供 _minute_bounds 读取（minute_bounds 是 store 方法，走全局 CK runtime）。
     """
     captured: dict = {}
+    ck_runtime.write_minute(
+        "kline_minute",
+        pl.DataFrame(
+            {
+                "symbol": ["600000.SH"],
+                "datetime": [local_dt],
+                "open": [1.0],
+                "high": [1.0],
+                "low": [1.0],
+                "close": [1.0],
+                "volume": [1.0],
+                "amount": [1.0],
+            }
+        ),
+    )
 
     def _fake_sync_minute_batch(symbols, **call_kwargs):
         captured.update(call_kwargs)
@@ -62,12 +79,13 @@ def _capture_minute_window(monkeypatch, tmp_path, local_dt: datetime, **kwargs) 
     monkeypatch.setattr(kline_sync.preferences, "get_minute_sync_segment_days", lambda: 20)
     monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda repo: None)
     monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda repo: None)
-    monkeypatch.setattr(kline_sync, "resolve_limit", lambda *a, **kw: SimpleNamespace(batch=100, rpm=30))
+    monkeypatch.setattr(
+        kline_sync, "resolve_limit", lambda *a, **kw: SimpleNamespace(batch=100, rpm=30)
+    )
     monkeypatch.setattr(kline_sync, "sync_minute_batch", _fake_sync_minute_batch)
 
     repo = MagicMock()
     repo.store.data_dir = tmp_path
-    repo.execute_one = lambda sql: (local_dt,)
     kline_sync.sync_and_persist_minute(
         ["600000.SH"],
         repo,
@@ -77,7 +95,9 @@ def _capture_minute_window(monkeypatch, tmp_path, local_dt: datetime, **kwargs) 
     return captured
 
 
-def test_sync_and_persist_minute_incremental_window_is_beijing_wall_clock(monkeypatch, tmp_path):
+def test_sync_and_persist_minute_incremental_window_is_beijing_wall_clock(
+    monkeypatch, tmp_path, ck_runtime
+):
     """增量分钟同步: 起点取自本地分钟 K 的北京墙钟, 终点必须同口径。
 
     终点用服务器本地墙钟时, _datetime_to_ms 会把两端按同一本地时区换算 →
@@ -86,7 +106,7 @@ def test_sync_and_persist_minute_incremental_window_is_beijing_wall_clock(monkey
     """
     local_latest = datetime(2026, 8, 14, 14, 30)  # 本地最新分钟 K: 北京墙钟 naive
 
-    captured = _capture_minute_window(monkeypatch, tmp_path, local_latest)
+    captured = _capture_minute_window(monkeypatch, tmp_path, local_latest, ck_runtime)
     start, end = captured["start_time"], captured["end_time"]
 
     assert start.utcoffset() == timedelta(hours=8)
@@ -97,12 +117,19 @@ def test_sync_and_persist_minute_incremental_window_is_beijing_wall_clock(monkey
     ) == local_latest.replace(tzinfo=CN_TZ)
 
 
-def test_sync_and_persist_minute_extend_backward_window_is_beijing_wall_clock(monkeypatch, tmp_path):
+def test_sync_and_persist_minute_extend_backward_window_is_beijing_wall_clock(
+    monkeypatch, tmp_path, ck_runtime
+):
     """向前扩展: 终点取自本地最早分钟 K 的北京墙钟, 同样不能被服务器时区重解释。"""
     local_earliest = datetime(2026, 8, 14, 9, 30)
 
     captured = _capture_minute_window(
-        monkeypatch, tmp_path, local_earliest, days=5, extend_backward=True,
+        monkeypatch,
+        tmp_path,
+        local_earliest,
+        ck_runtime,
+        days=5,
+        extend_backward=True,
     )
     start, end = captured["start_time"], captured["end_time"]
 
@@ -127,10 +154,12 @@ def _capture_tickflow_minute_batch(monkeypatch) -> tuple[list[tuple[datetime, da
     class _FakeKlines:
         @staticmethod
         def batch(symbols, period, start_time=None, end_time=None, **kwargs):
-            windows.append((
-                datetime.fromtimestamp(start_time / 1000, tz=CN_TZ),
-                datetime.fromtimestamp(end_time / 1000, tz=CN_TZ),
-            ))
+            windows.append(
+                (
+                    datetime.fromtimestamp(start_time / 1000, tz=CN_TZ),
+                    datetime.fromtimestamp(end_time / 1000, tz=CN_TZ),
+                )
+            )
             return []
 
     class _FakeClient:
@@ -159,10 +188,12 @@ def test_sync_minute_batch_naive_window_is_beijing_wall_clock(monkeypatch):
     )
 
     assert offsets and all(offset == timedelta(hours=8) for offset in offsets)
-    assert windows == [(
-        datetime(2026, 8, 14, 9, 25, tzinfo=CN_TZ),
-        datetime(2026, 8, 14, 15, 5, tzinfo=CN_TZ),
-    )]
+    assert windows == [
+        (
+            datetime(2026, 8, 14, 9, 25, tzinfo=CN_TZ),
+            datetime(2026, 8, 14, 15, 5, tzinfo=CN_TZ),
+        )
+    ]
 
 
 def _minute_batch_request(local: pl.DataFrame) -> MagicMock:
@@ -189,11 +220,13 @@ def test_minute_batch_endpoint_pull_windows_are_beijing_wall_clock(monkeypatch):
     windows, offsets = _capture_tickflow_minute_batch(monkeypatch)
     empty_symbol = "600000.SH"
     tail_symbol = "600519.SH"  # 本地有 09:31-09:33 连续三根 → 尾部落后, 从最后一根增量拉
-    local = pl.DataFrame({
-        "symbol": [tail_symbol] * 3,
-        "datetime": [datetime(2026, 8, 14, 9, 31) + timedelta(minutes=i) for i in range(3)],
-        "close": [10.0] * 3,
-    })
+    local = pl.DataFrame(
+        {
+            "symbol": [tail_symbol] * 3,
+            "datetime": [datetime(2026, 8, 14, 9, 31) + timedelta(minutes=i) for i in range(3)],
+            "close": [10.0] * 3,
+        }
+    )
 
     kline_api.get_minute_batch(
         _minute_batch_request(local),

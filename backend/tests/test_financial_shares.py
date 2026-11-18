@@ -12,24 +12,30 @@ from app.services import financial_sync
 from app.tickflow.capabilities import CapabilitySet
 
 
-def _write_instruments(data_dir, symbols: list[str]) -> None:
+def _write_instruments(data_dir, symbols: list[str], ck=None) -> None:
     path = data_dir / "instruments" / "instruments.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame({"symbol": symbols}).write_parquet(path)
+    df = pl.DataFrame({"symbol": symbols})
+    df.write_parquet(path)
+    # financial_sync 经 load_instruments 读 CK，需同步写 CK
+    if ck is not None:
+        ck.write_instruments("stock", df)
 
 
-def test_first_share_sync_fetches_complete_history(tmp_path, monkeypatch):
-    _write_instruments(tmp_path, ["600000.SH"])
+def test_first_share_sync_fetches_complete_history(tmp_path, monkeypatch, ck_runtime):
+    _write_instruments(tmp_path, ["600000.SH"], ck_runtime)
     calls: list[tuple[list[str], bool]] = []
 
     def fake_fetch(table, symbols, capset, latest_only=True):
         assert table == "shares"
         calls.append((symbols, latest_only))
-        return pl.DataFrame({
-            "symbol": ["600000.SH", "600000.SH"],
-            "period_end": ["2023-12-31", "2024-06-30"],
-            "float_shares": [10.0, 12.0],
-        })
+        return pl.DataFrame(
+            {
+                "symbol": ["600000.SH", "600000.SH"],
+                "period_end": ["2023-12-31", "2024-06-30"],
+                "float_shares": [10.0, 12.0],
+            }
+        )
 
     monkeypatch.setattr(financial_sync, "_fetch_table", fake_fetch)
 
@@ -41,31 +47,44 @@ def test_first_share_sync_fetches_complete_history(tmp_path, monkeypatch):
     assert stored["period_end"].to_list() == ["2023-12-31", "2024-06-30"]
 
 
-def test_incremental_share_sync_updates_existing_and_backfills_new_symbols(tmp_path, monkeypatch):
-    _write_instruments(tmp_path, ["600000.SH", "000001.SZ"])
+def test_incremental_share_sync_updates_existing_and_backfills_new_symbols(
+    tmp_path, monkeypatch, ck_runtime
+):
+    _write_instruments(tmp_path, ["600000.SH", "000001.SZ"], ck_runtime)
     path = tmp_path / "financials" / "shares" / "part.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame({
-        "symbol": ["600000.SH"],
-        "period_end": ["2024-06-30"],
-        "float_shares": [10.0],
-    }).write_parquet(path)
+    existing = pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "period_end": ["2024-06-30"],
+            "float_shares": [10.0],
+        }
+    )
+    existing.write_parquet(path)
+    # 增量合并从 CK 读旧数据，预置 shares 同步写 CK
+    ck_runtime.write_financials(
+        "financials_shares", existing.with_columns(pl.col("period_end").str.to_date())
+    )
     calls: list[tuple[list[str], bool]] = []
 
     def fake_fetch(table, symbols, capset, latest_only=True):
         assert table == "shares"
         calls.append((symbols, latest_only))
         if latest_only:
-            return pl.DataFrame({
-                "symbol": ["600000.SH"],
-                "period_end": ["2024-06-30"],
-                "float_shares": [11.0],
-            })
-        return pl.DataFrame({
-            "symbol": ["000001.SZ", "000001.SZ"],
-            "period_end": ["2023-12-31", "2024-06-30"],
-            "float_shares": [20.0, 21.0],
-        })
+            return pl.DataFrame(
+                {
+                    "symbol": ["600000.SH"],
+                    "period_end": ["2024-06-30"],
+                    "float_shares": [11.0],
+                }
+            )
+        return pl.DataFrame(
+            {
+                "symbol": ["000001.SZ", "000001.SZ"],
+                "period_end": ["2023-12-31", "2024-06-30"],
+                "float_shares": [20.0, 21.0],
+            }
+        )
 
     monkeypatch.setattr(financial_sync, "_fetch_table", fake_fetch)
 
@@ -84,11 +103,13 @@ def test_custom_financial_provider_receives_shares_contract(monkeypatch):
     class Provider:
         def get_financials(self, table, symbols, latest_only=True):
             received.append((table, symbols, latest_only))
-            return pl.DataFrame({
-                "symbol": symbols,
-                "period_end": ["2024-06-30"],
-                "float_shares": [10.0],
-            })
+            return pl.DataFrame(
+                {
+                    "symbol": symbols,
+                    "period_end": ["2024-06-30"],
+                    "float_shares": [10.0],
+                }
+            )
 
     from app.data_providers import custom as custom_sources
     from app.services import preferences
@@ -110,27 +131,33 @@ def test_custom_financial_provider_receives_shares_contract(monkeypatch):
 
 def test_historical_turnover_uses_only_available_share_capital(monkeypatch):
     monkeypatch.setattr(pipeline, "cn_today", lambda: date(2026, 7, 18))
-    bars = pl.DataFrame({
-        "symbol": ["600000.SH"] * 5,
-        "date": [
-            date(2024, 3, 31),
-            date(2024, 4, 14),
-            date(2024, 4, 15),
-            date(2024, 6, 30),
-            date(2026, 7, 18),
-        ],
-        "volume": [10_000.0] * 5,
-    })
-    instruments = pl.DataFrame({
-        "symbol": ["600000.SH"],
-        "float_shares": [200_000_000.0],
-    })
-    shares = pl.DataFrame({
-        "symbol": ["600000.SH", "600000.SH"],
-        "period_end": ["2023-12-31", "2024-06-30"],
-        "announce_date": ["2024-04-15", None],
-        "float_shares": [100_000_000.0, 50_000_000.0],
-    })
+    bars = pl.DataFrame(
+        {
+            "symbol": ["600000.SH"] * 5,
+            "date": [
+                date(2024, 3, 31),
+                date(2024, 4, 14),
+                date(2024, 4, 15),
+                date(2024, 6, 30),
+                date(2026, 7, 18),
+            ],
+            "volume": [10_000.0] * 5,
+        }
+    )
+    instruments = pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "float_shares": [200_000_000.0],
+        }
+    )
+    shares = pl.DataFrame(
+        {
+            "symbol": ["600000.SH", "600000.SH"],
+            "period_end": ["2023-12-31", "2024-06-30"],
+            "announce_date": ["2024-04-15", None],
+            "float_shares": [100_000_000.0, 50_000_000.0],
+        }
+    )
 
     result = pipeline.compute_limit_signals(
         bars,
@@ -144,15 +171,19 @@ def test_historical_turnover_uses_only_available_share_capital(monkeypatch):
 
 def test_turnover_without_share_history_keeps_existing_behavior(monkeypatch):
     monkeypatch.setattr(pipeline, "cn_today", lambda: date(2026, 7, 18))
-    bars = pl.DataFrame({
-        "symbol": ["600000.SH"],
-        "date": [date(2024, 4, 15)],
-        "volume": [10_000.0],
-    })
-    instruments = pl.DataFrame({
-        "symbol": ["600000.SH"],
-        "float_shares": [200_000_000.0],
-    })
+    bars = pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "date": [date(2024, 4, 15)],
+            "volume": [10_000.0],
+        }
+    )
+    instruments = pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "float_shares": [200_000_000.0],
+        }
+    )
 
     result = pipeline.compute_limit_signals(
         bars,
@@ -166,10 +197,12 @@ def test_turnover_without_share_history_keeps_existing_behavior(monkeypatch):
 def test_data_status_includes_share_history(tmp_path):
     path = tmp_path / "financials" / "shares" / "part.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame({
-        "symbol": ["600000.SH", "600000.SH", "000001.SZ"],
-        "period_end": ["2023-12-31", "2024-06-30", "2024-06-30"],
-    }).write_parquet(path)
+    pl.DataFrame(
+        {
+            "symbol": ["600000.SH", "600000.SH", "000001.SZ"],
+            "period_end": ["2023-12-31", "2024-06-30", "2024-06-30"],
+        }
+    ).write_parquet(path)
 
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     result = data_api._safe_aggregate_financials(repo)

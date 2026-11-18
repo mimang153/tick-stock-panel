@@ -9,48 +9,71 @@ from app.services.ext_data import ExtConfig, ExtField, PullConfig
 
 
 @pytest.fixture
-def query(tmp_path, monkeypatch):
+def query(tmp_path, monkeypatch, ck_runtime):
     cfg = ExtConfig(id="bench", label="测试", mode="timeseries", fields=[ExtField("symbol")])
     cfg.pull = PullConfig(time_field="time")
     for i, day in enumerate(["2026-10-28", "2026-10-29"]):
         path = tmp_path / "ext_data/bench/timeseries" / f"date={day}" / "part.parquet"
         path.parent.mkdir(parents=True)
-        frame = pl.DataFrame({
-            "symbol": ["600000.SH", "000001.SZ", "600519.SH"],
-            "score": [float("nan"), 1.0 + i, None],
-            "group": ["A", "B", "A"], "time": ["09:32", "09:31", "09:33"],
-            "unused": ["large payload"] * 3,
-            "date": [day] * 3,
-        })
+        frame = pl.DataFrame(
+            {
+                "symbol": ["600000.SH", "000001.SZ", "600519.SH"],
+                "score": [float("nan"), 1.0 + i, None],
+                "group": ["A", "B", "A"],
+                "time": ["09:32", "09:31", "09:33"],
+                "unused": ["large payload"] * 3,
+                "date": [day] * 3,
+            }
+        )
         if i:
             frame = frame.with_columns(pl.lit("added").alias("extra"))
         frame.write_parquet(path)
+        # _read_ext_dataframe timeseries 分支强制走 CK：写 ext_timeseries
+        ck_frame = frame.with_columns(
+            pl.lit("bench").alias("ext_id"),
+            pl.col("time").alias("time_value"),
+            pl.col("date").str.to_date().alias("date"),
+        )
+        ck_runtime.write_ext_timeseries(ck_frame)
     inst = tmp_path / "instruments/instruments.parquet"
     inst.parent.mkdir()
-    pl.DataFrame({"symbol": ["000001.SZ"], "name": ["平安银行"]}).write_parquet(inst)
+    inst_df = pl.DataFrame({"symbol": ["000001.SZ"], "name": ["平安银行"]})
+    inst_df.write_parquet(inst)
+    ck_runtime.write_instruments("stock", inst_df)
     monkeypatch.setattr(ext_data, "_store", lambda _: SimpleNamespace(get=lambda _: cfg))
     monkeypatch.setattr(ext_data, "_data_dir", lambda _: tmp_path)
 
     def run(**overrides):
-        args = dict(snapshot_date=None, columns="score", limit=3, offset=1, filter=None,
-                    sort=None, start_date="2026-10-28", end_date="2026-10-29")
+        args = dict(
+            snapshot_date=None,
+            columns="score",
+            limit=3,
+            offset=1,
+            filter=None,
+            sort=None,
+            start_date="2026-10-28",
+            end_date="2026-10-29",
+        )
         args.update(overrides)
-        return ext_data.list_rows(None, "bench", **args)
+        return ext_data.list_rows(None, "bench", **args)  # type: ignore[arg-type]
 
     return run, cfg, tmp_path
 
 
-@pytest.mark.parametrize("kwargs", [
-    {},
-    {"filter": ["group:A"], "sort": "time:desc"},
-    {"filter": ["name:平安银行"], "sort": "score:desc"},
-    {"columns": "extra,data_date,date,score,score", "limit": 10, "offset": 0},
-    {"columns": "unknown"},
-    {"columns": " , "},
-    {"snapshot_date": "2026-10-28"},
-    {"start_date": None, "end_date": None},
-    {"start_date": "2026-11-01", "end_date": "2026-11-02"},
-])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"filter": ["group:A"], "sort": "time:desc"},
+        {"filter": ["name:平安银行"], "sort": "score:desc"},
+        {"columns": "extra,data_date,date,score,score", "limit": 10, "offset": 0},
+        {"columns": "unknown"},
+        {"columns": " , "},
+        {"snapshot_date": "2026-10-28"},
+        {"start_date": None, "end_date": None},
+        {"start_date": "2026-11-01", "end_date": "2026-11-02"},
+    ],
+)
 def test_projected_response_matches_full_read(query, monkeypatch, kwargs):
     run, _, _ = query
     actual = run(**kwargs)
@@ -63,9 +86,14 @@ def test_projected_response_matches_full_read(query, monkeypatch, kwargs):
     assert actual == run(**kwargs)
 
 
-@pytest.mark.parametrize("kwargs", [
-    {"filter": ["absent:1"]}, {"filter": ["group"]}, {"sort": "absent:desc"},
-])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"filter": ["absent:1"]},
+        {"filter": ["group"]},
+        {"sort": "absent:desc"},
+    ],
+)
 def test_projection_preserves_error_details(query, monkeypatch, kwargs):
     run, _, _ = query
     with pytest.raises(HTTPException) as projected:
@@ -74,7 +102,10 @@ def test_projection_preserves_error_details(query, monkeypatch, kwargs):
     monkeypatch.setattr(ext_data, "_read_ext_dataframe", lambda *a, **kw: original(*a))
     with pytest.raises(HTTPException) as full:
         run(**kwargs)
-    assert (projected.value.status_code, projected.value.detail) == (full.value.status_code, full.value.detail)
+    assert (projected.value.status_code, projected.value.detail) == (
+        full.value.status_code,
+        full.value.detail,
+    )
 
 
 def test_unused_columns_are_not_materialized(query, monkeypatch):
@@ -93,9 +124,12 @@ def test_unused_columns_are_not_materialized(query, monkeypatch):
     assert list(result["rows"][0]) == ["symbol", "name", "score"]
 
 
-def test_snapshot_unknown_projection_keeps_full_row_fallback(query):
+def test_snapshot_unknown_projection_keeps_full_row_fallback(query, monkeypatch):
     run, cfg, root = query
     cfg.mode, cfg.pull = "snapshot", None
+    # snapshot 本地 full-row fallback：禁用 CK runtime，走本地 part.parquet
+    # （fixture 为 timeseries 用例写了 CK，snapshot 用例需隔离以验证本地路径）
+    monkeypatch.setattr("app.storage.runtime.get_storage", lambda: None)
     pl.DataFrame({"value": [1], "other": [2]}).write_parquet(root / "ext_data/bench/part.parquet")
     result = run(columns="missing", start_date=None, end_date=None, offset=0)
     assert result["rows"] == [{"value": 1, "other": 2}]

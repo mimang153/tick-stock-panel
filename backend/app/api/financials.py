@@ -1,4 +1,5 @@
 """财务数据 API — 独立路由, Cap.FINANCIAL 门控。"""
+
 from __future__ import annotations
 
 import logging
@@ -8,9 +9,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.services.financial_sync import FINANCIAL_TABLES, get_financial_df
-from app.services.financial_analyzer import analyze_financials_stream
 from app.services import ai_reports
+from app.services.financial_analyzer import analyze_financials_stream
+from app.services.financial_sync import FINANCIAL_TABLES, get_financial_df
 from app.services.ndjson_heartbeat import with_heartbeat
 from app.tickflow.capabilities import Cap
 
@@ -24,6 +25,7 @@ def _financial_allowed(capset) -> bool:
     if capset.has(Cap.FINANCIAL):
         return True
     from app.services.financial_sync import _financial_is_custom
+
     return _financial_is_custom()
 
 
@@ -31,6 +33,7 @@ def _require_financial(capset) -> None:
     """_require_financial(capset) 的 custom 感知版本。"""
     if not _financial_allowed(capset):
         from app.tickflow.capabilities import CapabilityDenied
+
         raise CapabilityDenied(Cap.FINANCIAL)
 
 
@@ -41,22 +44,21 @@ def financial_status(request: Request):
     if not _financial_allowed(capset):
         return {"available": False, "tables": {}}
 
-    data_dir = request.app.state.repo.store.data_dir
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
     tables = {}
 
     for table in FINANCIAL_TABLES:
-        path = data_dir / "financials" / table / "part.parquet"
-        if path.exists():
-            try:
-                df = pl.read_parquet(path, columns=["symbol"])
-                tables[table] = {
-                    "rows": len(df),
-                    "symbols": df["symbol"].n_unique() if not df.is_empty() else 0,
-                }
-            except Exception:
-                tables[table] = {"rows": 0, "symbols": 0}
-        else:
-            tables[table] = {"rows": 0, "symbols": 0}
+        try:
+            rows, syms = (
+                runtime.store.financials_stats(f"financials_{table}")
+                if runtime is not None
+                else (0, 0)
+            )
+        except Exception:  # noqa: BLE001 - 单表统计失败不影响整体状态
+            rows, syms = 0, 0
+        tables[table] = {"rows": rows, "symbols": syms}
 
     fs = getattr(request.app.state, "financial_scheduler", None)
     last_sync = fs.last_sync if fs else {}
@@ -168,6 +170,7 @@ def sync_table(request: Request, table: str):
 
 class AnalyzeRequest(BaseModel):
     """AI 财务分析请求。"""
+
     symbol: str
     focus: str = ""  # 可选:用户追加的分析关注点
 
@@ -189,7 +192,9 @@ async def analyze_financials(request: Request, req: AnalyzeRequest):
     data_dir = request.app.state.repo.store.data_dir
 
     async def stream_gen():
-        async for chunk in with_heartbeat(analyze_financials_stream(data_dir, req.symbol, req.focus)):
+        async for chunk in with_heartbeat(
+            analyze_financials_stream(data_dir, req.symbol, req.focus)
+        ):
             yield chunk + "\n"
 
     return StreamingResponse(
@@ -203,8 +208,10 @@ async def analyze_financials(request: Request, req: AnalyzeRequest):
 # AI 报告 CRUD(历史报告持久化)
 # ================================================================
 
+
 class SaveReportRequest(BaseModel):
     """保存一条 AI 财务分析报告。"""
+
     symbol: str
     name: str = ""
     focus: str = ""
@@ -227,14 +234,16 @@ def save_report(request: Request, req: SaveReportRequest):
     """保存一条报告。"""
     capset = request.app.state.capabilities
     _require_financial(capset)
-    report = ai_reports.save_report({
-        "symbol": req.symbol,
-        "name": req.name,
-        "focus": req.focus,
-        "content": req.content,
-        "periods": req.periods,
-        "summary": req.summary,
-    })
+    report = ai_reports.save_report(
+        {
+            "symbol": req.symbol,
+            "name": req.name,
+            "focus": req.focus,
+            "content": req.content,
+            "periods": req.periods,
+            "summary": req.summary,
+        }
+    )
     return {"ok": True, "report": report}
 
 

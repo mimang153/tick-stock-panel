@@ -8,13 +8,13 @@
   - repo 线程安全懒加载(首次调用才构建); DataStore() 默认 settings.data_dir, 与 main.py 同源。
   - 未知 symbol / 数据缺失 → 返回空 DataFrame(不抛), 与 repo 语义一致。
 """
+
 from __future__ import annotations
 
 import logging
 import re
 import threading
 from datetime import date
-from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -31,12 +31,13 @@ _repo = None
 _lock = threading.Lock()
 
 
-def _get_repo():
+def _get_repo() -> Any:
     global _repo
     if _repo is None:
         with _lock:
             if _repo is None:
                 from app.tickflow.repository import DataStore, KlineRepository
+
                 _repo = KlineRepository(DataStore())
     return _repo
 
@@ -56,7 +57,7 @@ def _reset_repo() -> None:
 
 
 # ── 参数规范化 ─────────────────────────────────────────
-def _norm_date(value, default: date) -> date:
+def _norm_date(value: str | date | None, default: date) -> date:
     if value is None:
         return default
     if isinstance(value, str):
@@ -69,7 +70,12 @@ def _validate_symbol(symbol: Any) -> bool:
 
 
 # ── 公开只读 API ───────────────────────────────────────
-def get_index_daily(symbol, start=None, end=None, columns=None):
+def get_index_daily(
+    symbol: str | None,
+    start: str | date | None = None,
+    end: str | date | None = None,
+    columns: list[str] | None = None,
+) -> pl.DataFrame:
     """读取指数日K(含技术指标)。未知 symbol / 无数据返回空 DataFrame。"""
     if not _validate_symbol(symbol):
         logger.warning("market_data: 非法指数 symbol %r", symbol)
@@ -81,12 +87,17 @@ def get_index_daily(symbol, start=None, end=None, columns=None):
     e = _norm_date(end, cn_today())
     try:
         return _get_repo().get_index_daily(symbol, s, e, columns)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("market_data get_index_daily failed %s: %s", symbol, exc)
         return pl.DataFrame()
 
 
-def get_etf_daily(symbol, start=None, end=None, columns=None):
+def get_etf_daily(
+    symbol: str,
+    start: str | date | None = None,
+    end: str | date | None = None,
+    columns: list[str] | None = None,
+) -> pl.DataFrame:
     """读取 ETF 日K(含技术指标)。同 get_index_daily 语义。"""
     if not _validate_symbol(symbol):
         logger.warning("market_data: 非法 ETF symbol %r", symbol)
@@ -95,12 +106,17 @@ def get_etf_daily(symbol, start=None, end=None, columns=None):
     e = _norm_date(end, cn_today())
     try:
         return _get_repo().get_etf_daily(symbol, s, e, columns)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("market_data get_etf_daily failed %s: %s", symbol, exc)
         return pl.DataFrame()
 
 
-def get_daily(symbol, start=None, end=None, columns=None):
+def get_daily(
+    symbol: str | None,
+    start: str | date | None = None,
+    end: str | date | None = None,
+    columns: list[str] | None = None,
+) -> pl.DataFrame:
     """按资产类型自动分派读取日K: 指数 → get_index_daily; ETF → get_etf_daily; 股票 → get_daily。"""
     if not _validate_symbol(symbol):
         logger.warning("market_data: 非法 symbol %r", symbol)
@@ -115,7 +131,7 @@ def get_daily(symbol, start=None, end=None, columns=None):
         if asset_type == "etf":
             return repo.get_etf_daily(symbol, s, e, columns)
         return repo.get_daily(symbol, s, e, columns)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("market_data get_daily failed %s: %s", symbol, exc)
         return pl.DataFrame()
 
@@ -124,7 +140,7 @@ def list_index_symbols() -> list[dict]:
     """列出已收录的指数符号(含名称)。无数据返回空列表。"""
     try:
         df = _get_repo().get_instruments_asset("index")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("market_data list_index_symbols failed: %s", exc)
         return []
     if df.is_empty() or "symbol" not in df.columns:
@@ -143,7 +159,12 @@ _EXT_CONFIG_ID_RE = re.compile(r"^[a-zA-Z0-9_]+$")
 _EXT_PARTITION_RE = re.compile(r"^date=(\d{4}-\d{2}-\d{2})$")
 
 
-def get_ext_timeseries(config_id, start=None, end=None, columns=None):
+def get_ext_timeseries(
+    config_id: str | None,
+    start: str | date | None = None,
+    end: str | date | None = None,
+    columns: list[str] | None = None,
+) -> pl.DataFrame:
     """读取扩展时序表 (timeseries 模式) 的原始行, 供策略计算日内序列特征。
 
     与 ext_factors 因子通道的口径区别: 因子通道把每个 (symbol, 交易日) 收敛为
@@ -163,52 +184,33 @@ def get_ext_timeseries(config_id, start=None, end=None, columns=None):
     if not isinstance(config_id, str) or not _EXT_CONFIG_ID_RE.match(config_id):
         logger.warning("market_data: 非法扩展表 config_id %r", config_id)
         return pl.DataFrame()
-    repo = _get_repo()
-    # 真仓是 KlineRepository (data_dir 挂在 .store 上); 测试 fake 直接挂 data_dir
-    base = getattr(repo, "data_dir", None) or getattr(
-        getattr(repo, "store", None), "data_dir", None
-    )
-    if base is None:
-        logger.warning("market_data: 仓库对象未暴露 data_dir, 无法读取扩展表")
-        return pl.DataFrame()
-    root = Path(base) / "ext_data" / config_id / "timeseries"
-    if not root.is_dir():
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is None:
+        logger.warning("market_data: 存储层未初始化, 无法读取扩展表 %s", config_id)
         return pl.DataFrame()
     s = _norm_date(start, _FULL_START)
     e = _norm_date(end, cn_today())
     want = (
         [c for c in dict.fromkeys(columns) if c not in ("symbol", "date")]
-        if columns is not None else None
+        if columns is not None
+        else None
     )
-    parts: list[pl.DataFrame] = []
-    for d in sorted(root.glob("date=*")):
-        m = _EXT_PARTITION_RE.match(d.name)
-        if not m or not d.is_dir():
-            continue
-        day = date.fromisoformat(m.group(1))
-        if not (s <= day <= e):
-            continue
-        part = d / "part.parquet"
-        if not part.exists():
-            continue
-        try:
-            frag = (
-                pl.read_parquet(part, columns=["symbol", *want])
-                if want is not None else pl.read_parquet(part)
-            )
-        except Exception as exc:  # noqa: BLE001 — 单分区损坏只跳过, 不炸整个调用
-            logger.warning(
-                "market_data: 扩展表 %s 分区 %s 读取失败, 跳过: %s",
-                config_id, d.name, exc,
-            )
-            continue
-        if frag.is_empty():
-            continue
-        if "date" in frag.columns:
-            frag = frag.drop("date")
-        parts.append(frag.with_columns(pl.lit(m.group(1)).alias("date")))
-    if not parts:
+    try:
+        frame = runtime.store.read_ext_timeseries(config_id, start=s, end=e)
+    except Exception as exc:  # noqa: BLE001 — 扩展表读取失败只影响该通道, 不炸策略
+        logger.warning("market_data: 扩展表 %s 读取失败: %s", config_id, exc)
         return pl.DataFrame()
-    frame = pl.concat(parts, how="diagonal")
+    if frame.is_empty():
+        return pl.DataFrame()
+    frame = frame.drop("ext_id")
+    if "time_value" in frame.columns and "ts" not in frame.columns:
+        frame = frame.rename({"time_value": "ts"})
+    if want is not None:
+        missing = [c for c in want if c not in frame.columns]
+        if missing:
+            logger.warning("market_data: 扩展表 %s 缺列 %s, 已忽略", config_id, missing)
+        frame = frame.select(["symbol", "date"] + [c for c in want if c in frame.columns])
     sort_keys = ["symbol", "date"] + (["ts"] if "ts" in frame.columns else [])
     return frame.sort(sort_keys)

@@ -3,6 +3,7 @@
 自检异常按资产、日期和股票精确修补, 复用数据源取数、仓库与正式指标计算。
 旧的手动日期范围回补保持调用盘后管道, 不改变其同步范围和行为。
 """
+
 from __future__ import annotations
 
 import logging
@@ -21,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class DailyRepairTarget:
+    """单个日K修复目标：资产类别 + 交易日 + 涉及的标的元组（None 表示整类回补）。"""
+
     asset_type: str
     day: date
     # None 表示无法定位股票, 仅回补这一日的整类日K。
@@ -28,9 +31,10 @@ class DailyRepairTarget:
 
 
 def plan_daily_repair(issues) -> list[DailyRepairTarget]:
+    """按表族/交易日把完整性问题聚合为可执行的日K修复目标列表。"""
     from app.services.data_integrity import TABLE_FAMILY
 
-    grouped = {}
+    grouped = {}  # type: ignore[var-annotated]
     for issue in issues:
         if issue.kind in {"unconfirmed", "recompute"}:
             continue
@@ -38,8 +42,166 @@ def plan_daily_repair(issues) -> list[DailyRepairTarget]:
         symbols = set(issue.symbols) if issue.symbols else None
         previous = grouped.get(key, set())
         grouped[key] = previous | symbols if previous is not None and symbols is not None else None
-    return [DailyRepairTarget(asset, day, tuple(sorted(symbols)) if symbols is not None else None)
-            for (asset, day), symbols in sorted(grouped.items())]
+    return [
+        DailyRepairTarget(asset, day, tuple(sorted(symbols)) if symbols is not None else None)
+        for (asset, day), symbols in sorted(grouped.items())
+    ]
+
+
+# ---- repair_integrity_issues 分段 helper (与原内联代码语义等价) ----
+
+
+def _repair_fetch_frame(repo, capset, target, emit, i, target_count):
+    import polars as pl
+
+    from app.services import daily_health, data_integrity, kline_sync
+
+    label = daily_health.ASSET_LABELS[target.asset_type]
+    repo.validate_daily_repair_target(target.asset_type, target.day)
+    if target.symbols is None:
+        symbols, required = repo.daily_repair_universe(target.asset_type, target.day)
+    else:
+        symbols, required = list(target.symbols), set(target.symbols)
+    emit(
+        "sync_daily",
+        int(45 * i / max(target_count, 1)),
+        f"获取 {target.day} {label}日K ({len(symbols)} 只)",
+    )
+
+    def progress(cur, total, *args, target_day=target.day, target_index=i):
+        emit(
+            "sync_daily",
+            int(45 * target_index / max(target_count, 1)),
+            f"获取 {target_day} 日K批次 {cur}/{total}",
+            stage_pct=int(100 * cur / total) if total else 0,
+        )
+
+    frames = []
+    for incoming in kline_sync.iter_daily_frames(
+        symbols,
+        capset,
+        start_time=datetime.combine(target.day, datetime.min.time(), tzinfo=CN_TZ),
+        end_time=datetime.combine(target.day, datetime.max.time(), tzinfo=CN_TZ),
+        asset_type=target.asset_type,
+        on_chunk_done=progress,
+    ):
+        if incoming.is_empty():
+            continue
+        if not {"symbol", "date"}.issubset(incoming.columns):
+            raise ValueError("数据源返回的日K缺少股票或日期字段")
+        incoming = incoming.with_columns(
+            pl.col("date").cast(pl.Date, strict=False), pl.col("symbol").cast(pl.String)
+        )
+        incoming = incoming.filter((pl.col("date") == target.day) & pl.col("symbol").is_in(symbols))
+        if not incoming.is_empty():
+            if not data_integrity.invalid_daily_rows(incoming, target.day).is_empty():
+                raise ValueError(f"数据源返回的 {target.day} 日K仍异常, 未写入正式数据")
+            frames.append(incoming)
+    frame = (
+        pl.concat(frames, how="diagonal_relaxed").unique(subset=["symbol", "date"], keep="last")
+        if frames
+        else pl.DataFrame(schema={"symbol": pl.String, "date": pl.Date})
+    )
+    missing = required - set(frame["symbol"].to_list())
+    confirmed = repo.daily_repair_nontrading_symbols(target.asset_type, target.day, sorted(missing))
+    unresolved = missing - confirmed
+    if unresolved or (frame.is_empty() and not confirmed):
+        codes = ", ".join(sorted(unresolved)[:10])
+        if not frames:
+            raise ValueError(
+                f"数据源未返回 {target.day} 的修补日K ({codes}), "
+                "且无法确认原记录为非交易记录。请核对日K数据源的历史覆盖和权限, 原数据保持不变"
+            )
+        raise ValueError(f"{target.day} 缺少修补股票: {codes}, 原数据保持不变")
+    return frame, confirmed
+
+
+def _repair_write_frames(repo, targets, staging, backup_dir, removals, emit):
+    import polars as pl
+
+    from app.services import daily_health, data_integrity
+    from app.tickflow.repository import daily_dirname
+
+    root = Path(repo.store.data_dir)
+    for i, target in enumerate(targets):
+        emit(
+            "sync_daily",
+            45 + int(10 * i / max(len(targets), 1)),
+            f"写入已校验的 {target.day} 修补日K",
+        )
+        table = daily_dirname(target.asset_type)
+        frame = pl.read_parquet(staging / table / f"date={target.day}/part.parquet")
+        repo.replace_daily_rows(
+            target.asset_type,
+            target.day,
+            frame,
+            symbols=list(target.symbols) if target.symbols is not None else None,
+            backup_dir=backup_dir / table / f"date={target.day}",
+            remove_symbols=removals[target],
+        )
+        if removals[target]:
+            emit(
+                "sync_daily",
+                55,
+                f"已备份并清理 {target.day} 的非交易遗留记录 ({len(removals[target])} 只)",
+            )
+        remaining = data_integrity.inspect_daily_partition(root, table, target.day)
+        if remaining is not None:
+            raise ValueError(f"{target.day} 日K仍未通过校验, 未进入指标计算")
+        daily_health.record_scan(
+            root, [], assets=[target.asset_type], start=target.day, end=target.day
+        )
+
+
+def _repair_recompute(repo, root, issues, emit):
+    from app.indicators.pipeline import recompute_daily_symbols
+    from app.services import daily_health, data_integrity
+
+    # 每只股票各自的最早异常日起点; 只有无法定位的整日异常才扩大到整类资产。
+    handled = {(data_integrity.TABLE_FAMILY[i.table], i.day.isoformat()) for i in issues}
+    entries = [
+        e for e in daily_health.snapshot(root)["entries"] if (e["asset_type"], e["day"]) in handled
+    ]
+    assets = {asset for asset, _ in handled}
+    handled_days = {
+        asset: {date.fromisoformat(day) for a, day in handled if a == asset} for asset in assets
+    }
+    scopes = {}  # type: ignore[var-annotated]
+    for entry in entries:
+        if entry["asset_type"] not in assets or not entry.get("needs_enriched", True):
+            continue
+        key = entry["asset_type"], entry["symbol"]
+        day = date.fromisoformat(entry["day"])
+        scopes[key] = min(scopes.get(key, day), day)
+    grouped = {}  # type: ignore[var-annotated]
+    for (asset, symbol), start in scopes.items():
+        full_start = scopes.get((asset, None))
+        if symbol is not None and full_start is not None and start >= full_start:
+            continue
+        grouped.setdefault((asset, start), []).append(symbol)
+    for (asset, start), symbols in sorted(grouped.items()):
+        selected = None if None in symbols else sorted(symbols)
+        emit(
+            "compute_enriched",
+            60,
+            f"重算{daily_health.ASSET_LABELS[asset]} {start} 起的受影响指标",
+        )
+        recompute_daily_symbols(
+            repo,
+            asset,
+            start=start,
+            symbols=selected,
+            on_batch_done=lambda cur, total: emit(
+                "compute_enriched",
+                60 + int(30 * cur / total),
+                f"受影响股票指标 {cur}/{total}",
+                stage_pct=int(100 * cur / total),
+            ),
+        )
+        daily_health.mark_enriched_ready(
+            root, asset, start=start, symbols=selected, days=handled_days[asset]
+        )
+    return entries, assets, handled_days
 
 
 def repair_integrity_issues(repo, capset, issues, *, backup_dir: Path, on_progress=None) -> dict:
@@ -48,10 +210,7 @@ def repair_integrity_issues(repo, capset, issues, *, backup_dir: Path, on_progre
     普通同步/旧的手动范围回补仍调用原有管道。本入口只处理已经确认的异常,
     直接组合正式取数、仓库和指标函数, 不启动无关维表/分钟/除权/模拟盘流程。
     """
-    import polars as pl
-
-    from app.indicators.pipeline import recompute_daily_symbols
-    from app.services import daily_health, data_integrity, kline_sync
+    from app.services import daily_health, data_integrity
     from app.tickflow.repository import daily_dirname
 
     root = Path(repo.store.data_dir)
@@ -66,98 +225,18 @@ def repair_integrity_issues(repo, capset, issues, *, backup_dir: Path, on_progre
     try:
         # 未完成全部取数和校验前, 正式日K/enriched 均保持原样。
         for i, target in enumerate(targets):
-            label = daily_health.ASSET_LABELS[target.asset_type]
-            repo.validate_daily_repair_target(target.asset_type, target.day)
-            if target.symbols is None:
-                symbols, required = repo.daily_repair_universe(target.asset_type, target.day)
-            else:
-                symbols, required = list(target.symbols), set(target.symbols)
-            emit("sync_daily", int(45 * i / max(len(targets), 1)),
-                 f"获取 {target.day} {label}日K ({len(symbols)} 只)")
-
-            def progress(cur, total, *args, target_day=target.day, target_index=i):
-                emit("sync_daily", int(45 * target_index / max(len(targets), 1)),
-                     f"获取 {target_day} 日K批次 {cur}/{total}", stage_pct=int(100 * cur / total) if total else 0)
-
-            frames = []
-            for incoming in kline_sync.iter_daily_frames(
-                symbols, capset, start_time=datetime.combine(target.day, datetime.min.time(), tzinfo=CN_TZ),
-                end_time=datetime.combine(target.day, datetime.max.time(), tzinfo=CN_TZ), asset_type=target.asset_type,
-                on_chunk_done=progress,
-            ):
-                if incoming.is_empty():
-                    continue
-                if not {"symbol", "date"}.issubset(incoming.columns):
-                    raise ValueError("数据源返回的日K缺少股票或日期字段")
-                incoming = incoming.with_columns(pl.col("date").cast(pl.Date, strict=False), pl.col("symbol").cast(pl.String))
-                incoming = incoming.filter((pl.col("date") == target.day) & pl.col("symbol").is_in(symbols))
-                if not incoming.is_empty():
-                    if not data_integrity.invalid_daily_rows(incoming, target.day).is_empty():
-                        raise ValueError(f"数据源返回的 {target.day} 日K仍异常, 未写入正式数据")
-                    frames.append(incoming)
-            frame = (pl.concat(frames, how="diagonal_relaxed").unique(subset=["symbol", "date"], keep="last")
-                     if frames else pl.DataFrame(schema={"symbol": pl.String, "date": pl.Date}))
-            missing = required - set(frame["symbol"].to_list())
-            confirmed = repo.daily_repair_nontrading_symbols(target.asset_type, target.day, sorted(missing))
-            unresolved = missing - confirmed
-            if unresolved or (frame.is_empty() and not confirmed):
-                codes = ", ".join(sorted(unresolved)[:10])
-                if not frames:
-                    raise ValueError(f"数据源未返回 {target.day} 的修补日K ({codes}), "
-                                     "且无法确认原记录为非交易记录。请核对日K数据源的历史覆盖和权限, 原数据保持不变")
-                raise ValueError(f"{target.day} 缺少修补股票: {codes}, 原数据保持不变")
+            frame, confirmed = _repair_fetch_frame(repo, capset, target, emit, i, len(targets))
             removals[target] = sorted(confirmed)
             part = staging / daily_dirname(target.asset_type) / f"date={target.day}"
             part.mkdir(parents=True, exist_ok=True)
             frame.write_parquet(part / "part.parquet")
-            if not frame.is_empty() and data_integrity.inspect_daily_partition(staging, daily_dirname(target.asset_type), target.day):
+            if not frame.is_empty() and data_integrity.inspect_daily_partition(
+                staging, daily_dirname(target.asset_type), target.day
+            ):
                 raise ValueError(f"数据源返回的 {target.day} 日K未通过复检, 未写入正式数据")
 
-        for i, target in enumerate(targets):
-            emit("sync_daily", 45 + int(10 * i / max(len(targets), 1)), f"写入已校验的 {target.day} 修补日K")
-            table = daily_dirname(target.asset_type)
-            frame = pl.read_parquet(staging / table / f"date={target.day}/part.parquet")
-            repo.replace_daily_rows(target.asset_type, target.day, frame,
-                                    symbols=list(target.symbols) if target.symbols is not None else None,
-                                    backup_dir=backup_dir / table / f"date={target.day}",
-                                    remove_symbols=removals[target])
-            if removals[target]:
-                emit("sync_daily", 55, f"已备份并清理 {target.day} 的非交易遗留记录 ({len(removals[target])} 只)")
-            remaining = data_integrity.inspect_daily_partition(root, table, target.day)
-            if remaining is not None:
-                raise ValueError(f"{target.day} 日K仍未通过校验, 未进入指标计算")
-            daily_health.record_scan(root, [], assets=[target.asset_type], start=target.day, end=target.day)
-            repo.refresh_view(table, str(root / table / "**/*.parquet"))
-
-        # 每只股票各自的最早异常日起点; 只有无法定位的整日异常才扩大到整类资产。
-        handled = {(data_integrity.TABLE_FAMILY[i.table], i.day.isoformat()) for i in issues}
-        entries = [e for e in daily_health.snapshot(root)["entries"]
-                   if (e["asset_type"], e["day"]) in handled]
-        assets = {asset for asset, _ in handled}
-        handled_days = {asset: {date.fromisoformat(day) for a, day in handled if a == asset}
-                        for asset in assets}
-        scopes = {}
-        for entry in entries:
-            if entry["asset_type"] not in assets or not entry.get("needs_enriched", True):
-                continue
-            key = entry["asset_type"], entry["symbol"]
-            day = date.fromisoformat(entry["day"])
-            scopes[key] = min(scopes.get(key, day), day)
-        grouped = {}
-        for (asset, symbol), start in scopes.items():
-            full_start = scopes.get((asset, None))
-            if symbol is not None and full_start is not None and start >= full_start:
-                continue
-            grouped.setdefault((asset, start), []).append(symbol)
-        for (asset, start), symbols in sorted(grouped.items()):
-            selected = None if None in symbols else sorted(symbols)
-            emit("compute_enriched", 60, f"重算{daily_health.ASSET_LABELS[asset]} {start} 起的受影响指标")
-            recompute_daily_symbols(repo, asset, start=start, symbols=selected,
-                                    on_batch_done=lambda cur, total: emit("compute_enriched", 60 + int(30 * cur / total),
-                                        f"受影响股票指标 {cur}/{total}", stage_pct=int(100 * cur / total)))
-            daily_health.mark_enriched_ready(root, asset, start=start, symbols=selected,
-                                             days=handled_days[asset])
-
+        _repair_write_frames(repo, targets, staging, backup_dir, removals, emit)
+        entries, assets, handled_days = _repair_recompute(repo, root, issues, emit)
         _refresh_repair_dependents(repo, entries, assets, emit)
         for asset in assets:
             day = min(date.fromisoformat(e["day"]) for e in entries if e["asset_type"] == asset)
@@ -182,7 +261,11 @@ def _refresh_repair_dependents(repo, entries: list[dict], assets: set[str], emit
         repo.invalidate_enriched_asset("etf")
         ScreenerService.clear_history_cache()
     if "stock" in assets:
-        _refresh_market_statistics(repo, min(date.fromisoformat(e["day"]) for e in entries if e["asset_type"] == "stock"), emit)
+        _refresh_market_statistics(
+            repo,
+            min(date.fromisoformat(e["day"]) for e in entries if e["asset_type"] == "stock"),
+            emit,
+        )
 
 
 def _refresh_market_statistics(repo, start: date, emit) -> None:
@@ -235,11 +318,16 @@ def run_repair_daily(
 
     logger.info(
         "repair_daily: run pipeline with override_start_date=%s symbols=%s",
-        start_date, f"{len(symbols)} targeted" if symbols else "universe",
+        start_date,
+        f"{len(symbols)} targeted" if symbols else "universe",
     )
 
     from app.jobs.daily_pipeline import run_now
+
     return run_now(
-        repo, capset, on_progress=on_progress,
-        override_start_date=start_date, override_symbols=symbols,
+        repo,
+        capset,
+        on_progress=on_progress,
+        override_start_date=start_date,
+        override_symbols=symbols,
     )

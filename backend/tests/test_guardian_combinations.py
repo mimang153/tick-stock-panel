@@ -1,4 +1,5 @@
 """P2d 组合扫描/创建 + P3 名额门槛与实验室战报测试。"""
+
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -91,8 +92,7 @@ def test_combination_scan_finds_low_corr_pair(tmp_path):
     )
 
     result = run_guardian_runtime(
-        {"mode": "combinations", "run_id": "r1", "strategy_ids": None,
-         "thresholds": {}},
+        {"mode": "combinations", "run_id": "r1", "strategy_ids": None, "thresholds": {}},
         data_dir=tmp_path,
         service=service,
         strategy_engine=_Engine({"mined_a", "mined_b", "mined_c"}),
@@ -101,10 +101,9 @@ def test_combination_scan_finds_low_corr_pair(tmp_path):
     assert result["mode"] == "combinations"
     assert result["healthy_count"] == 3
     assert result["pairs_evaluated"] == 3
-    suggestions = read_combinations(tmp_path)["suggestions"]
+    suggestions = read_combinations(tmp_path)["suggestions"]  # type: ignore[index]
     pairs = {frozenset((s["a"], s["b"])) for s in suggestions}
-    assert pairs == {frozenset(("mined_a", "mined_c")),
-                     frozenset(("mined_b", "mined_c"))}
+    assert pairs == {frozenset(("mined_a", "mined_c")), frozenset(("mined_b", "mined_c"))}
     for item in suggestions:
         assert item["corr"] <= 0.70
         assert item["common_days"] >= 30
@@ -117,9 +116,10 @@ def test_combination_scan_needs_two_healthy(tmp_path):
     _seed_healthy(store, "mined_a")
 
     result = run_guardian_runtime(
-        {"mode": "combinations", "run_id": "r1", "strategy_ids": None,
-         "thresholds": {}},
-        data_dir=tmp_path, service=_CurveService({}, []), strategy_engine=_Engine(set()),
+        {"mode": "combinations", "run_id": "r1", "strategy_ids": None, "thresholds": {}},
+        data_dir=tmp_path,
+        service=_CurveService({}, []),
+        strategy_engine=_Engine(set()),
     )
     assert result["pairs_evaluated"] == 0
     assert read_combinations(tmp_path) is None
@@ -129,20 +129,23 @@ def test_create_composite_requires_known_suggestion(tmp_path):
     from app.strategy.engine import StrategyEngine
 
     write_combinations(
-        tmp_path, window_start="2026-01-01", window_end="2026-06-01",
+        tmp_path,
+        window_start="2026-01-01",
+        window_end="2026-06-01",
         suggestions=[{"a": "x", "b": "y", "corr": 0.2, "common_days": 40}],
         pairs_evaluated=1,
     )
     engine = StrategyEngine(strategy_dirs=[tmp_path / "strategies" / "composite"])
     with pytest.raises(ValueError, match="不在最新组合建议中"):
         create_guardian_composite(
-            tmp_path, engine, left="x", right="z",
+            tmp_path,
+            engine,
+            left="x",
+            right="z",
             latest_enriched=date(2026, 6, 1),
         )
     with pytest.raises(ValueError):
-        create_guardian_composite(
-            tmp_path, engine, left="x", right="y", latest_enriched=None
-        )
+        create_guardian_composite(tmp_path, engine, left="x", right="y", latest_enriched=None)
 
 
 def test_create_composite_happy_path_and_idempotent(tmp_path):
@@ -150,19 +153,28 @@ def test_create_composite_happy_path_and_idempotent(tmp_path):
 
     builtin = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "strategies"
     engine = StrategyEngine(
-        strategy_dirs=[builtin, tmp_path / "strategies" / "custom",
-                       tmp_path / "strategies" / "composite"]
+        strategy_dirs=[
+            builtin,
+            tmp_path / "strategies" / "custom",
+            tmp_path / "strategies" / "composite",
+        ]
     )
     assert engine.has("ma_golden_cross") and engine.has("boll_breakout")
     write_combinations(
-        tmp_path, window_start="2026-01-01", window_end="2026-06-01",
-        suggestions=[{"a": "ma_golden_cross", "b": "boll_breakout",
-                      "corr": 0.15, "common_days": 60}],
+        tmp_path,
+        window_start="2026-01-01",
+        window_end="2026-06-01",
+        suggestions=[
+            {"a": "ma_golden_cross", "b": "boll_breakout", "corr": 0.15, "common_days": 60}
+        ],
         pairs_evaluated=1,
     )
 
     result = create_guardian_composite(
-        tmp_path, engine, left="ma_golden_cross", right="boll_breakout",
+        tmp_path,
+        engine,
+        left="ma_golden_cross",
+        right="boll_breakout",
         latest_enriched=date(2026, 6, 1),
     )
     assert result["created"] is True
@@ -170,8 +182,9 @@ def test_create_composite_happy_path_and_idempotent(tmp_path):
     assert combo_id.startswith("guardian_combo_")
     strategy = engine.get(combo_id)
     assert strategy.execution_backend == "composite"
-    assert {c.strategy_id for c in strategy.composite.children} == {
-        "ma_golden_cross", "boll_breakout"
+    assert {c.strategy_id for c in strategy.composite.children} == {  # type: ignore[union-attr]
+        "ma_golden_cross",
+        "boll_breakout",
     }
     # 自动入护: trailing_reference 基线
     profile = GuardianStore(tmp_path).get(combo_id)
@@ -183,11 +196,15 @@ def test_create_composite_happy_path_and_idempotent(tmp_path):
     profile["baseline"]["metrics"] = {"score": 9.9}
     GuardianStore(tmp_path)._write(profile)
     again = create_guardian_composite(
-        tmp_path, engine, left="boll_breakout", right="ma_golden_cross",
+        tmp_path,
+        engine,
+        left="boll_breakout",
+        right="ma_golden_cross",
         latest_enriched=date(2026, 6, 2),
     )
     assert again["created"] is False
     refreshed = GuardianStore(tmp_path).get(combo_id)
+    assert refreshed is not None
     assert refreshed["baseline"]["metrics"] == {"score": 9.9}
 
 
@@ -214,9 +231,7 @@ class _FakeEngine:
     def get(self, strategy_id):
         if strategy_id not in self.ids:
             raise ValueError(f"unknown strategy: {strategy_id}")
-        return SimpleNamespace(
-            meta={"asset_types": ["stock"], "name": strategy_id, "params": []}
-        )
+        return SimpleNamespace(meta={"asset_types": ["stock"], "name": strategy_id, "params": []})
 
     def has(self, strategy_id):
         return strategy_id in self.ids
@@ -234,23 +249,33 @@ def test_publish_slot_limit_blocks_when_full(tmp_path, monkeypatch):
     from app.services import preferences
 
     monkeypatch.setattr(
-        preferences, "get_guardian_schedule",
-        lambda: {"guardian_schedule_enabled": False, "guardian_watch_pct": 0.2,
-                 "guardian_retire_pct": 0.5, "guardian_k_max": 4,
-                 "lab_mined_slot_limit": 1},
+        preferences,
+        "get_guardian_schedule",
+        lambda: {
+            "guardian_schedule_enabled": False,
+            "guardian_watch_pct": 0.2,
+            "guardian_retire_pct": 0.5,
+            "guardian_k_max": 4,
+            "lab_mined_slot_limit": 1,
+        },
     )
     original_list = engine.list_strategies
     engine.list_strategies = (  # type: ignore[method-assign]
-        lambda: [*original_list(), {"id": "mined_factor_occupied"}]
+        lambda: [*original_list(), {"id": "mined_factor_occupied"}]  # type: ignore[assignment, misc]
     )
     with pytest.raises(ValueError, match="名额已满"):
         service.publish(run_id, signature)
 
     monkeypatch.setattr(
-        preferences, "get_guardian_schedule",
-        lambda: {"guardian_schedule_enabled": False, "guardian_watch_pct": 0.2,
-                 "guardian_retire_pct": 0.5, "guardian_k_max": 4,
-                 "lab_mined_slot_limit": 0},
+        preferences,
+        "get_guardian_schedule",
+        lambda: {
+            "guardian_schedule_enabled": False,
+            "guardian_watch_pct": 0.2,
+            "guardian_retire_pct": 0.5,
+            "guardian_k_max": 4,
+            "lab_mined_slot_limit": 0,
+        },
     )
     assert service.publish(run_id, signature)["ok"] is True
 
@@ -261,10 +286,15 @@ def test_lab_report_shape_and_slots(tmp_path, monkeypatch):
     from app.services.mining_jobs import MiningRunStore
 
     monkeypatch.setattr(
-        preferences, "get_guardian_schedule",
-        lambda: {"guardian_schedule_enabled": True, "guardian_watch_pct": 0.2,
-                 "guardian_retire_pct": 0.5, "guardian_k_max": 4,
-                 "lab_mined_slot_limit": 2},
+        preferences,
+        "get_guardian_schedule",
+        lambda: {
+            "guardian_schedule_enabled": True,
+            "guardian_watch_pct": 0.2,
+            "guardian_retire_pct": 0.5,
+            "guardian_k_max": 4,
+            "lab_mined_slot_limit": 2,
+        },
     )
     store = GuardianStore(tmp_path)
     _seed_healthy(store, "mined_factor_a")
@@ -274,12 +304,8 @@ def test_lab_report_shape_and_slots(tmp_path, monkeypatch):
     app = FastAPI()
     app.include_router(lab_router)
     app.state.repo = _Repo(tmp_path)
-    app.state.strategy_engine = _FakeEngine(
-        ["mined_factor_a", "mined_factor_b", "other"]
-    )
-    app.state.mining_manager = SimpleNamespace(
-        store=MiningRunStore(tmp_path, namespace="guardian")
-    )
+    app.state.strategy_engine = _FakeEngine(["mined_factor_a", "mined_factor_b", "other"])
+    app.state.mining_manager = SimpleNamespace(store=MiningRunStore(tmp_path, namespace="guardian"))
     app.state.guardian_manager = SimpleNamespace(
         store=MiningRunStore(tmp_path, namespace="guardian")
     )
@@ -288,7 +314,8 @@ def test_lab_report_shape_and_slots(tmp_path, monkeypatch):
     assert body["slots"] == {
         "active_mined": 2,
         "active_mined_ids": ["mined_factor_a", "mined_factor_b"],
-        "limit": 2, "full": True,
+        "limit": 2,
+        "full": True,
     }
     assert body["guardian"]["by_status"] == {"watch": 1}
     assert body["guardian"]["profiles"] == 1
@@ -302,19 +329,23 @@ def test_guardian_api_combination_endpoints(tmp_path, monkeypatch):
     from app.services.mining_jobs import MiningRunStore
 
     monkeypatch.setattr(
-        preferences, "get_guardian_schedule",
-        lambda: {"guardian_schedule_enabled": False, "guardian_watch_pct": 0.2,
-                 "guardian_retire_pct": 0.5, "guardian_k_max": 4,
-                 "lab_mined_slot_limit": 10},
+        preferences,
+        "get_guardian_schedule",
+        lambda: {
+            "guardian_schedule_enabled": False,
+            "guardian_watch_pct": 0.2,
+            "guardian_retire_pct": 0.5,
+            "guardian_k_max": 4,
+            "lab_mined_slot_limit": 10,
+        },
     )
 
     class _Manager:
         def __init__(self) -> None:
             self.store = MiningRunStore(tmp_path, namespace="guardian")
-            self.starts = []
+            self.starts = []  # type: ignore[var-annotated]
 
-        def start(self, request, fingerprint, force=False, source="manual",
-                  run_id=None):
+        def start(self, request, fingerprint, force=False, source="manual", run_id=None):
             self.starts.append(request)
             return self.store.create(request, fingerprint)
 
@@ -340,7 +371,9 @@ def test_guardian_api_combination_endpoints(tmp_path, monkeypatch):
 
     # overview 带组合建议
     write_combinations(
-        tmp_path, window_start="2026-01-01", window_end="2026-06-01",
+        tmp_path,
+        window_start="2026-01-01",
+        window_end="2026-06-01",
         suggestions=[{"a": "x", "b": "y", "corr": 0.1, "common_days": 40}],
         pairs_evaluated=1,
     )
@@ -359,19 +392,23 @@ def test_create_composite_accepts_symlinked_data_dir(tmp_path):
 
     builtin = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "strategies"
     engine = StrategyEngine(
-        strategy_dirs=[builtin, link / "strategies" / "custom",
-                       link / "strategies" / "composite"]
+        strategy_dirs=[builtin, link / "strategies" / "custom", link / "strategies" / "composite"]
     )
     write_combinations(
-        link, window_start="2026-01-01", window_end="2026-06-01",
-        suggestions=[{"a": "ma_golden_cross", "b": "boll_breakout",
-                      "corr": 0.15, "common_days": 60}],
+        link,
+        window_start="2026-01-01",
+        window_end="2026-06-01",
+        suggestions=[
+            {"a": "ma_golden_cross", "b": "boll_breakout", "corr": 0.15, "common_days": 60}
+        ],
         pairs_evaluated=1,
     )
     result = create_guardian_composite(
-        link, engine, left="ma_golden_cross", right="boll_breakout",
+        link,
+        engine,
+        left="ma_golden_cross",
+        right="boll_breakout",
         latest_enriched=date(2026, 6, 1),
     )
     assert result["created"] is True
-    assert (real / "strategies" / "composite"
-            / f"{result['strategy_id']}.py").is_file()
+    assert (real / "strategies" / "composite" / f"{result['strategy_id']}.py").is_file()

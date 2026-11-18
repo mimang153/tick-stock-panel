@@ -43,6 +43,7 @@ dependencies = [
     # Watchlist screenshot OCR (Tesseract)
     "pytesseract>=0.3.10",
     "Pillow>=10.0",
+    "clickhouse-connect>=0.9",
 ]
 
 [project.optional-dependencies]
@@ -96,7 +97,24 @@ target-version = "py311"
 #    未提交改动时做(会与在途改动冲突)。
 # ⚠️ 本仓 CI 目前**不跑 ruff**(ci.yml 只有 `uv run pytest tests -q`) ⇒ 本改动不会打断 CI;
 #    但正因如此, 这条门禁从来没人守——本改动让它**可执行**, 代价是 236 条既有沉默违规显形。
-select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF", "BLE"]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF", "C90", "BLE", "PERF"]
+# 仅在基础 select 之上追加的规则（不并入 select 以便独立追溯）。
+# TRY = flake8-try(异常最佳实践, 对标 P3C 异常规约)。这里刻意只选**不强行改写
+#   既有 try/except 结构**的子集:
+#   - TRY400: 不要 `print()` 报错, 应 `raise` 传播 (error-instead-of-exception)
+#   - TRY401: 用日志器而非裸 print 记录异常 (verbose-log-message)
+#   - TRY203: 删掉无用的空 try/except (useless-try-except)
+#   有意**不**加入 TRY300(try-consider-else)/TRY002/TRY003: 它们会强制重构现有
+#   try/else 包裹方式, 对本仓数据/调度密集的上层包装弊大于利。实测 app 全量报 1313
+#   条 TRY, 主要就是这类结构性条目撑起来的; pre-commit 增量下仍建议从轻量化子集开始。
+# 实测: 本项(TRY 子集)+ PERF 对 backend/app 的存量, 分别约 +3 类(<=16 条)与 +45 条。
+extend-select = ["TRY400", "TRY401", "TRY203", "PLR0915", "PLR0912"]
+# PLR0915 = too-many-statements (函数体语句数, 默认 50)
+# PLR0912 = too-many-branches   (函数内分支数,  默认 12)
+# 二者合起来约束「单个函数别过长」, 与 mccabe C901(复杂度)配合构成函数级行数/规模底线。
+# 增量(pre-commit)下只在改动文件触发; 数据/调度密集的大型既有函数若需放宽,
+# 用 per-file-ignores 或对具体函数 `# noqa: PLR0915` 显式承认, 不静默删规则。
+# 如需调整阈值, 见 `[tool.ruff.lint.pylint]` 的 max-statements / max-branches。
 ignore = [
     "E501",    # 长行交给 fmt
     # 本仓注释/文档字符串以中文书写, 全角标点(，。：（）×)是正常书写而非笔误。
@@ -107,5 +125,58 @@ ignore = [
     "RUF003",  # Comment contains ambiguous unicode character
 ]
 
+[tool.ruff.lint.mccabe]
+# 圈复杂度门禁：单函数/方法 ≤ 12（C901/McCabe，比默认 10 略宽松，
+# 与后端数据/调度密集代码折中）。超限会被 pre-commit 的 ruff 钩子拦下。
+# 若某个函数确实必须高复杂度，用 `# noqa: C901` 显式承认并说明。
+max-complexity = 12
+
+[tool.ruff.lint.pylint]
+# PLR0915/PLR0912 阈值(函数级规模底线)。
+# 注意 ruff 的 PLR0915 按「语句数」而非物理行数统计: 一个约 80 行的函数,
+# 扣除 def 行、docstring、空行与括号续行后, 实际语句约 60 个。
+# 故 max-statements=60 对应「函数体约 80 行为上限」(与 code-quality.mdc 一致)。
+# 如需更严/更宽, 下调/上调即可; 该阈值只作用于被本次改动触碰的文件(增量)。
+max-statements = 60
+max-branches = 20
+
+[tool.ruff.lint.per-file-ignores]
+# 存量巨型文件豁免（阶段 5 已收敛）。
+# matrix.py / engine.py 已在阶段 4 拆分达标，文件级豁免已移除；残留 7 处高复杂度函数
+# 改用「行内 # noqa: C901 - 理由」显式承认，可在 PR 中逐条复审。
+# 仅 strategy.py 仍为未拆分的存量巨型文件（3127 行，7 个 >80 行函数），保留文件级豁免，
+# 并登记为待重构技术债；一旦拆分即移除本条，恢复全量约束。
+"./app/backtest/strategy.py" = [
+    "PLR0915", "PLR0912", "C901",
+]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.mypy]
+# 类型检查门禁（渐进档，配合 pre-commit 增量钩子只查「本次改动文件」）。
+# 设计意图：把好新写/改动的代码类型正确性，又不让存量历史问题阻塞每次提交
+# （与 ruff 的增量思路一致，见 .pre-commit-config.yaml 与 CONTRIBUTING）。
+# 因是增量，不用 strict 全量档；严格度可随存量逐步收敛后再上调。
+
+python_version = "3.11"
+# 从仓库根运行时用于定位 backend/app（mypy_path 相对 pre-commit 的 cwd=repo 根）。
+mypy_path = ["backend"]
+# 显式允许包基址解析（backend/app 非 src-layout，避免 "Cannot find implementation"
+# 或 import 解析失败）。
+explicit_package_bases = true
+namespace_packages = true
+
+# --- 渐进严格项（新代码会受益，存量不报死） ---
+check_untyped_defs = true           # 对无注解函数也做内部类型推断
+no_implicit_optional = true         # 禁止隐式 Optional（形如 `def f(x: str | None = None)` 必须写清）
+warn_redundant_casts = true         # 冗余 cast 警告
+warn_unused_configs = true
+# 不启用 warn_unused_ignores：存量 `# type: ignore` 可能变为无效，会污染增量门禁。
+
+# --- 第三方无 stub 的 SDK/驱动，一律当作 Any，不误报 ---
+ignore_missing_imports = true
+
+# 增量检查时，import 到的其它 backend/app 模块不展开深度报错，
+# 只对被检查的改动文件自身做类型检查（避免连锁全量报错）。
+follow_imports = "silent"

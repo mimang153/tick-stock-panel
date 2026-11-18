@@ -7,6 +7,7 @@
 - write_cache 写入成功直填镜像: 写后读不触发重解析 (read-modify-write 也走镜像);
 - clear_cache / 文件消失 → 镜像条目一并清除。
 """
+
 from __future__ import annotations
 
 import json
@@ -44,6 +45,7 @@ def test_read_returns_shared_mirror_object_without_reparse(tmp_path, monkeypatch
     second = strategy_cache.read_cache(tmp_path)
 
     assert first is second  # 镜像命中: 同一对象
+    assert first is not None
     assert first["results"]["s1"]["rows"][0]["symbol"] == "000001.SZ"
     assert calls["n"] == 0  # write_cache 已直填镜像, 读零解析
 
@@ -55,13 +57,14 @@ def test_second_write_merges_via_mirror_then_reads_fresh(tmp_path, monkeypatch):
     strategy_cache.write_cache(tmp_path, "2026-10-19", {"s2": _result("600000.SH")})
     cached = strategy_cache.read_cache(tmp_path)
 
+    assert cached is not None
     assert set(cached["results"]) == {"s1", "s2"}
     assert calls["n"] == 0  # read-modify-write 的读与随后的读全走镜像
 
 
 def test_external_rewrite_invalidates_mirror(tmp_path):
     strategy_cache.write_cache(tmp_path, "2026-10-19", {"s1": _result("000001.SZ")})
-    assert set(strategy_cache.read_cache(tmp_path)["results"]) == {"s1"}
+    assert set(strategy_cache.read_cache(tmp_path)["results"]) == {"s1"}  # type: ignore[index]
 
     # 模拟外部进程改写缓存文件 (绕过 write_cache), 并显式改 mtime 规避
     # 文件系统时间戳分辨率导致的指纹碰撞
@@ -77,6 +80,7 @@ def test_external_rewrite_invalidates_mirror(tmp_path):
     os.utime(path, ns=(10**9, 10**9))
 
     cached = strategy_cache.read_cache(tmp_path)
+    assert cached is not None
     assert set(cached["results"]) == {"ext"}  # 读到磁盘新内容, 非陈旧镜像
 
 

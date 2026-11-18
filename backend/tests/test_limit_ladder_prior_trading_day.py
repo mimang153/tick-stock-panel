@@ -5,6 +5,7 @@ load_prior_consecutive 原本在 as_of 前 1~9 个自然日里找分区。春节
 窗口整段落空, prev_consec 全被填 0: 断板(晋级失败)一栏空掉, 炸板股的板数
 从「昨日 N 板 + 1」退回 1 板。
 """
+
 from __future__ import annotations
 
 import types
@@ -16,17 +17,34 @@ import pytest
 from app.services.screener import ScreenerService
 
 _CONSEC_COL = "consecutive_limit_ups"
+_CK = {"store": None}
+
+
+@pytest.fixture(autouse=True)
+def _ck(ck_runtime):
+    """昨日连板数读 CK enriched (store.read_daily + list_daily_dates)。"""
+    _CK["store"] = ck_runtime
+    yield
+    _CK["store"] = None
 
 
 def _write_partition(data_dir, day: date, rows: dict) -> None:
     part = data_dir / "kline_daily_enriched" / f"date={day.isoformat()}"
     part.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame(rows).write_parquet(part / "part.parquet")
+    df = pl.DataFrame(rows)
+    df.write_parquet(part / "part.parquet")
+    if _CK["store"] is not None and _CONSEC_COL in rows:
+        # CK 是定 schema, 本地「缺列分区」在 CK 里无法表达 (未指定列会变默认值);
+        # 该分区不写 CK, 等价于「没有该列的分区」, 保留「跳过继续找」的测试意图。
+        _CK["store"].write_daily(
+            "kline_daily_enriched",
+            df.with_columns(pl.lit(day).alias("date")),
+        )
 
 
 def _service(data_dir) -> ScreenerService:
     repo = types.SimpleNamespace(store=types.SimpleNamespace(data_dir=data_dir))
-    return ScreenerService(repo)
+    return ScreenerService(repo)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

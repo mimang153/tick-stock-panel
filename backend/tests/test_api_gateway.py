@@ -5,6 +5,7 @@
 429 限流 + Retry-After / 放行响应带 X-RateLimit 头 / UI 密码路径不受 Token 桶影响。
 网络门禁: 公网 IP 403 / 内网放行 / API_TOKEN_LOCAL_ONLY 开关 / 不消耗限流额度。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -27,7 +28,8 @@ def test_create_verify_revoke_roundtrip(tmp_path: Path):
     raw = (tmp_path / "user_data" / "api_tokens.json").read_text(encoding="utf-8")
     assert plaintext not in raw
     # 校验命中
-    assert api_tokens.verify_token(tmp_path, plaintext)["id"] == record["id"]
+    assert record is not None
+    assert api_tokens.verify_token(tmp_path, plaintext)["id"] == record["id"]  # type: ignore[index]
     # 吊销后失效
     assert api_tokens.revoke_token(tmp_path, record["id"]) is True
     assert api_tokens.verify_token(tmp_path, plaintext) is None
@@ -52,31 +54,33 @@ def test_required_scope_mapping():
     assert f("GET", "/api/kline/daily") == "read:market"
     assert f("GET", "/api/kline/daily/latest") == "read:market"
     assert f("GET", "/api/kline/minute-range") == "read:market"
-    assert f("POST", "/api/kline/daily-batch") is None          # 管理面
+    assert f("POST", "/api/kline/daily-batch") is None  # 管理面
     assert f("GET", "/api/ext-data/ext_fuyao_hot/rows") == "read:ext"
     assert f("GET", "/api/ext-data/ext_fuyao_hot/api-key") is None  # Key 状态不外露
     assert f("POST", "/api/ext-data/ext_fuyao_hot/ingest") == "write:ext"  # 程序化写入
-    assert f("POST", "/api/ext-data/ext_fuyao_hot/upload") is None   # 文件上传仍属管理面
+    assert f("POST", "/api/ext-data/ext_fuyao_hot/upload") is None  # 文件上传仍属管理面
     assert f("POST", "/api/ext-data/ext_fuyao_hot/pull/test") is None
-    assert f("POST", "/api/ext-data") is None                       # 建表不开放
-    assert f("PUT", "/api/ext-data/x/ingest") is None               # 仅 POST
-    assert f("GET", "/api/events/ticket") == "*"                    # 票据签发: 任意有效 Token
+    assert f("POST", "/api/ext-data") is None  # 建表不开放
+    assert f("PUT", "/api/ext-data/x/ingest") is None  # 仅 POST
+    assert f("GET", "/api/events/ticket") == "*"  # 票据签发: 任意有效 Token
     assert f("POST", "/api/events/ticket") == "*"
-    assert f("GET", "/api/events") == "*"                           # SSE 流本体 (票据认证)
+    assert f("GET", "/api/events") == "*"  # SSE 流本体 (票据认证)
     assert f("GET", "/api/backtest/candidates") == "read:analysis"
     assert f("POST", "/api/backtest/run") == "run:backtest"
     assert f("POST", "/api/backtest/strategy/run") == "run:backtest"
     assert f("GET", "/api/paper/overview") == "paper:trade"
     assert f("POST", "/api/paper/orders") == "paper:trade"
-    assert f("GET", "/api/settings/api-tokens") is None          # Token 管理本身不开放
-    assert f("GET", "/api/monitor-rules") is None                # V1 最小面外
+    assert f("GET", "/api/settings/api-tokens") is None  # Token 管理本身不开放
+    assert f("GET", "/api/monitor-rules") is None  # V1 最小面外
     # 前缀混淆不误伤: /api/paperback 不得命中 /api/paper
     assert f("GET", "/api/paperback") is None
 
 
 # ── 网关端到端 (真实中间件链) ──────────────────────────────
 @pytest.fixture
-def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def client(  # noqa: C901 - 测试副本需完整复刻网关鉴权分支, 拆分会偏离生产中间件代码
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> TestClient:
     """裸 FastAPI + main 的 auth_middleware 逻辑副本: 只验 Token 通道。
 
     直接 import app.main 的中间件需要完整 lifespan, 这里用同一段 Bearer
@@ -111,6 +115,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
         return {"ok": True}
 
     from app.config import Settings
+
     fake_settings = Settings(_env_file=None)  # type: ignore[call-arg]
     object.__setattr__(fake_settings, "data_dir", tmp_path)
 
@@ -128,14 +133,19 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
             gate = api_gateway.token_network_verdict(auth_api._client_ip(request))
             if gate is not None:
                 return JSONResponse(
-                    status_code=gate["status"], content={"detail": gate["detail"]},
+                    status_code=gate["status"],
+                    content={"detail": gate["detail"]},
                 )
             verdict = api_gateway.evaluate(
-                fake_settings.data_dir, request.method, path, authz[len("Bearer "):].strip(),
+                fake_settings.data_dir,
+                request.method,
+                path,
+                authz[len("Bearer ") :].strip(),
             )
             if verdict["status"] is not None:
                 return JSONResponse(
-                    status_code=verdict["status"], content={"detail": verdict["detail"]},
+                    status_code=verdict["status"],
+                    content={"detail": verdict["detail"]},
                     headers=verdict["headers"],
                 )
             resp = await call_next(request)
@@ -197,10 +207,15 @@ def test_gateway_ticket_any_token(client: TestClient, tmp_path: Path):
     r = client.post("/api/events/ticket", headers={"Authorization": f"Bearer {tok}"})
     assert r.status_code == 200
     # 无效 Token → 401
-    assert client.post("/api/events/ticket", headers={"Authorization": "Bearer tsp_bad"}).status_code == 401
+    assert (
+        client.post("/api/events/ticket", headers={"Authorization": "Bearer tsp_bad"}).status_code
+        == 401
+    )
 
 
-def test_gateway_rate_limit_429(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_gateway_rate_limit_429(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     monkeypatch.setattr(api_gateway, "rate_limit_per_min", lambda: 3)
     _, tok = api_tokens.create_token(tmp_path, "限流", ["read:market"])
     hdr = {"Authorization": f"Bearer {tok}"}
@@ -223,14 +238,22 @@ def test_revoked_token_rejected_immediately(client: TestClient, tmp_path: Path):
 
 # ── 网络门禁: Token 通道默认仅本机/内网 (API_TOKEN_LOCAL_ONLY) ──────
 
+
 def test_is_local_network_boundaries():
     f = api_gateway.is_local_network
-    for local in ("127.0.0.1", "::1", "localhost", "10.0.0.1", "10.255.1.2",
-                  "192.168.0.1", "172.16.0.1", "172.31.255.255"):
+    for local in (
+        "127.0.0.1",
+        "::1",
+        "localhost",
+        "10.0.0.1",
+        "10.255.1.2",
+        "192.168.0.1",
+        "172.16.0.1",
+        "172.31.255.255",
+    ):
         assert f(local) is True, local
     # 172.16-31 之外 / 公网 / 空值 / TestClient 伪 peer 均非内网
-    for public in ("172.32.0.1", "172.1.0.1", "8.8.8.8", "100.64.0.1",
-                   None, "", "testclient"):
+    for public in ("172.32.0.1", "172.1.0.1", "8.8.8.8", "100.64.0.1", None, "", "testclient"):
         assert f(public) is False, repr(public)
 
 
@@ -255,7 +278,9 @@ def test_token_network_verdict_env_disables_gate(monkeypatch: pytest.MonkeyPatch
 
 
 def test_token_gate_public_ip_403_before_token_check(
-    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """公网来源: 先于 evaluate 拦截 — 有效/无效 Token 一律同文案 403。
 
@@ -280,7 +305,9 @@ def test_token_gate_public_ip_403_before_token_check(
 
 
 def test_token_gate_env_off_allows_public(
-    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """显式放开 (API_TOKEN_LOCAL_ONLY=0): 公网 IP 走完整 evaluate 链路。"""
     monkeypatch.setenv("API_TOKEN_LOCAL_ONLY", "0")

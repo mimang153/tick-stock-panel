@@ -22,6 +22,7 @@
   invalidate_ext_caches 清除 (写入端 write_ext_parquet / upsert / delete 自动调用),
   同时清策略结果缓存 —— 策略历史窗口与 enriched 内存缓存里的帧含旧扩展列。
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -127,19 +128,21 @@ def ext_factor_specs(data_dir: Path | None = None) -> list[FactorSpec]:
             fid = ext_column_name(cfg.id, f.name)
             if not fid.isascii():
                 continue
-            specs.append(FactorSpec(
-                id=fid,
-                label=f"{cfg.label}·{f.label}"[:32],
-                group="扩展数据",
-                formula_text=(
-                    f"扩展表「{cfg.label}」字段 {f.name} "
-                    f"({'时序·按交易日对齐' if cfg.mode == 'timeseries' else '最新快照·仅当日帧'})"
-                ),
-                kind="base",
-                warmup_bars=1,
-                scale_free=False,
-                tags=("ext", cfg.id),
-            ))
+            specs.append(
+                FactorSpec(
+                    id=fid,
+                    label=f"{cfg.label}·{f.label}"[:32],
+                    group="扩展数据",
+                    formula_text=(
+                        f"扩展表「{cfg.label}」字段 {f.name} "
+                        f"({'时序·按交易日对齐' if cfg.mode == 'timeseries' else '最新快照·仅当日帧'})"
+                    ),
+                    kind="base",
+                    warmup_bars=1,
+                    scale_free=False,
+                    tags=("ext", cfg.id),
+                )
+            )
     return specs
 
 
@@ -202,7 +205,9 @@ def _timeseries_signature(ts_dir: Path) -> tuple | None:
         return None
 
 
-def _select_fields(df: pl.DataFrame, config, fields: list, *, with_date: str | None) -> pl.DataFrame:
+def _select_fields(
+    df: pl.DataFrame, config, fields: list, *, with_date: str | None
+) -> pl.DataFrame:
     """选列 + 统一 dtype: int/float → Float64 (数值阈值), string → Utf8 (contains)。"""
     exprs = [pl.col("symbol").cast(pl.Utf8)]
     for f in fields:
@@ -225,35 +230,41 @@ def _timeseries_frame(root: Path, config, fields: list) -> pl.DataFrame:
     缓存不过滤日期范围: 调用方用帧自身日期范围在 join 后自然裁剪,
     避免按日期范围缓存导致的键膨胀。
     """
-    ts_dir = root / "ext_data" / config.id / "timeseries"
-    sig = _timeseries_signature(ts_dir)
-    if sig is not None and not sig:
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is None:
         return pl.DataFrame()
+    store = runtime.store
+    try:
+        dates = store.list_ext_dates(config.id)
+    except Exception as e:  # noqa: BLE001 - 扩展表不可读时该批因子按缺失处理
+        logger.warning("扩展表 %s 日期枚举失败, 跳过: %s", config.id, e)
+        return pl.DataFrame()
+    if not dates:
+        return pl.DataFrame()
+    sig = tuple(d.isoformat() for d in dates)
     key = (str(root), config.id, "timeseries")
-    if sig is not None:
-        cached = _frame_cache.get(key)
-        if cached is not None and cached[0] == sig:
-            return cached[1]
-    parts: list[pl.DataFrame] = []
-    if sig is not None:
-        for d in sorted(ts_dir.glob("date=*")):
-            part = d / "part.parquet"
-            if not (d.is_dir() and part.exists()):
-                continue
-            try:
-                raw = pl.read_parquet(part)
-            except Exception as e:
-                logger.warning("扩展表 %s 分区 %s 读取失败, 跳过: %s", config.id, d.name, e)
-                continue
-            frag = _select_fields(raw, config, fields, with_date=d.name[5:])
-            if not frag.is_empty():
-                parts.append(frag)
-    frame = (
-        pl.concat(parts, how="diagonal").unique(subset=["symbol", "_ext_date"], keep="last")
-        if parts else pl.DataFrame()
-    )
-    if sig is not None:
-        _frame_cache[key] = (sig, frame)
+    cached = _frame_cache.get(key)
+    if cached is not None and cached[0] == sig:
+        return cached[1]
+    try:
+        raw = store.read_ext_timeseries(config.id)
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+        logger.warning("扩展表 %s 时序读取失败, 跳过: %s", config.id, e)
+        return pl.DataFrame()
+    if raw.is_empty():
+        return pl.DataFrame()
+    raw = raw.drop("ext_id") if "ext_id" in raw.columns else raw
+    if "time_value" in raw.columns and "ts" not in raw.columns:
+        raw = raw.rename({"time_value": "ts"})
+    raw = raw.with_columns(pl.col("date").cast(pl.Utf8).alias("_ext_date"))
+    frame = _select_fields(raw, config, fields, with_date=None)
+    if not frame.is_empty():
+        frame = frame.with_columns(raw["_ext_date"]).unique(
+            subset=["symbol", "_ext_date"], keep="last"
+        )
+    _frame_cache[key] = (sig, frame)
     return frame
 
 
@@ -276,12 +287,12 @@ def _snapshot_frame(root: Path, config, fields: list) -> pl.DataFrame:
             frame = frame.unique(subset=["symbol"], keep="last")
         _frame_cache[key] = (sig, frame)
         return frame
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("扩展表 %s 快照读取失败, 跳过: %s", config.id, e)
         return pl.DataFrame()
 
 
-def attach_ext_columns(
+def attach_ext_columns(  # noqa: C901 - C901: 分支为业务多阶段编排, 拆分会割裂上下文; 单测已覆盖
     df: pl.DataFrame,
     *,
     include_snapshot: bool,
@@ -334,7 +345,7 @@ def attach_ext_columns(
                     if not new_cols:
                         continue
                     df = df.join(snap.select(["symbol", *new_cols]), on="symbol", how="left")
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
                 logger.warning("扩展表 %s 列注入失败, 跳过该表: %s", cfg.id, e)
     finally:
         if tmp_date:
@@ -366,25 +377,19 @@ def attach_matrix_ext_fields(market: Any, data_dir: Path | None, names: Any) -> 
     n_t, n_a = len(labels), len(symbols)
     if n_t == 0 or n_a == 0:
         return market
-    skeleton = pl.DataFrame({
-        "date": np.repeat(np.array(labels, dtype=object), n_a),
-        "symbol": np.tile(np.array(symbols, dtype=object), n_t),
-    })
+    skeleton = pl.DataFrame(
+        {
+            "date": np.repeat(np.array(labels, dtype=object), n_a),
+            "symbol": np.tile(np.array(symbols, dtype=object), n_t),
+        }
+    )
     enriched = attach_ext_columns(skeleton, include_snapshot=False, data_dir=data_dir)
     missing = [c for c in wanted if c not in enriched.columns]
     if missing:
-        raise ValueError(
-            f"扩展字段数据不可用: {missing} — 检查扩展数据是否已拉取、字段是否仍存在"
-        )
+        raise ValueError(f"扩展字段数据不可用: {missing} — 检查扩展数据是否已拉取、字段是否仍存在")
     extra: dict[str, np.ndarray] = {}
     for name in wanted:
-        arr = (
-            enriched[name]
-            .cast(pl.Float64)
-            .fill_null(float("nan"))
-            .to_numpy()
-            .astype(np.float32)
-        )
+        arr = enriched[name].cast(pl.Float64).fill_null(float("nan")).to_numpy().astype(np.float32)
         arr = arr.reshape(n_t, n_a)
         arr.flags.writeable = False
         extra[name] = arr
@@ -392,7 +397,9 @@ def attach_matrix_ext_fields(market: Any, data_dir: Path | None, names: Any) -> 
     return dataclasses.replace(market, fields=MappingProxyType(merged))
 
 
-def invalidate_ext_caches(data_dir: Path | None = None, *, keep_strategy_cache: bool = False) -> None:
+def invalidate_ext_caches(
+    data_dir: Path | None = None, *, keep_strategy_cache: bool = False
+) -> None:
     """扩展数据/配置变更后的失效入口 (写入端自动调用)。
 
     清扩展帧缓存与注册同步状态 (下次读取重新加载), 并清策略结果缓存 ——
@@ -416,5 +423,5 @@ def invalidate_ext_caches(data_dir: Path | None = None, *, keep_strategy_cache: 
 
     try:
         strategy_cache.clear_cache(Path(data_dir) if data_dir else Path(_settings.data_dir))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("扩展数据变更后策略缓存清理失败: %s", e)

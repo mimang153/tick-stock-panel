@@ -5,6 +5,7 @@
 的卖出预检却一直读这个 0, 而 overview 按当前交易日现算显示可卖 100 ——
 持仓表写着可卖, 下单却被「可卖数量不足 (T+1): 可卖 0」拒绝。
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -60,6 +61,7 @@ def test_sell_next_day_without_rematerialize(tmp_path, monkeypatch):
     # 持仓表 (overview) 按当前交易日现算: 可卖 100
     assert paper.overview(tmp_path)["holdings"][0]["available_qty"] == 100
     sell, err = paper.create_order(tmp_path, SYM, "sell", qty=100)
+    assert sell is not None
     assert err is None and sell["status"] == "pending"
 
 
@@ -73,6 +75,7 @@ def test_sell_next_day_after_settle_fill(tmp_path, monkeypatch):
     assert paper.settle_day(tmp_path, DAY.isoformat())["filled"] == 1
     monkeypatch.setattr(paper, "cn_today", lambda: DAY + timedelta(days=1))
     sell, err = paper.create_order(tmp_path, SYM, "sell", qty=100)
+    assert sell is not None
     assert err is None and sell["status"] == "pending"
 
 
@@ -81,8 +84,10 @@ def test_pending_sell_quota_uses_current_day_availability(tmp_path, monkeypatch)
     _buy_intraday(tmp_path, monkeypatch, 200)
     monkeypatch.setattr(paper, "cn_today", lambda: DAY + timedelta(days=1))
     s1, err = paper.create_order(tmp_path, SYM, "sell", qty=100)
+    assert s1 is not None
     assert err is None and s1["status"] == "pending"
     s2, err = paper.create_order(tmp_path, SYM, "sell", qty=100)
+    assert s2 is not None
     assert err is None and s2["status"] == "pending"
     _, err = paper.create_order(tmp_path, SYM, "sell", qty=100)
     assert err is not None and "可卖 200" in err and "待成交卖出 200" in err

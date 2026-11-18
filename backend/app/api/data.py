@@ -1,4 +1,5 @@
 """数据画像 API —— 让前端知道"我们本地有什么数据"。"""
+
 from __future__ import annotations
 
 import contextlib
@@ -6,7 +7,7 @@ import logging
 import os
 import threading
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -45,7 +46,9 @@ def get_workload(request: Request) -> dict:
 
 class IntegrityScanIn(BaseModel):
     lookback_days: int = Field(default=30, ge=1, le=366)
-    asset_types: list[Literal["stock", "etf", "index"]] | None = Field(default=None, min_length=1, max_length=3)
+    asset_types: list[Literal["stock", "etf", "index"]] | None = Field(
+        default=None, min_length=1, max_length=3
+    )
 
 
 class IntegrityRepairIn(BaseModel):
@@ -62,7 +65,9 @@ def _start_integrity_job(request: Request, operation: Callable, *, repair: bool)
 
     job_id, is_new = job_store.create()
     if not is_new:
-        raise HTTPException(status_code=409, detail="已有数据任务正在运行, 请等待完成后再自检或修补")
+        raise HTTPException(
+            status_code=409, detail="已有数据任务正在运行, 请等待完成后再自检或修补"
+        )
 
     def progress(stage, pct, message, **kwargs):
         job_store.progress(job_id, stage, pct, message, **kwargs)
@@ -91,6 +96,7 @@ def _start_integrity_job(request: Request, operation: Callable, *, repair: bool)
             notify = getattr(qs, "notify_daily_integrity_updated", None)
             if callable(notify):
                 from app.services.integrity_check import latest_report
+
                 report = latest_report(request.app.state.repo.store.data_dir)
                 notify(report["asset_types"] if report else [], data_changed=repair)
 
@@ -108,11 +114,15 @@ def get_integrity_report(request: Request) -> dict:
     from app.services.integrity_check import latest_report
 
     root = request.app.state.repo.store.data_dir
-    return {"report": latest_report(root), "blocking_assets": sorted({
-        e["asset_type"] for e in daily_health.snapshot(root)["entries"]
-    }), "data_revisions": {
-        asset: daily_health.revision(root, asset) for asset in daily_health.ASSET_LABELS
-    }}
+    return {
+        "report": latest_report(root),
+        "blocking_assets": sorted(
+            {e["asset_type"] for e in daily_health.snapshot(root)["entries"]}
+        ),
+        "data_revisions": {
+            asset: daily_health.revision(root, asset) for asset in daily_health.ASSET_LABELS
+        },
+    }
 
 
 @router.post("/integrity/scan")
@@ -120,9 +130,16 @@ def scan_integrity(body: IntegrityScanIn, request: Request) -> dict:
     from app.services.integrity_check import run_check
 
     root = request.app.state.repo.store.data_dir
-    return _start_integrity_job(request, lambda progress: run_check(
-        root, lookback_days=body.lookback_days, asset_types=body.asset_types, on_progress=progress,
-    ), repair=False)
+    return _start_integrity_job(
+        request,
+        lambda progress: run_check(
+            root,
+            lookback_days=body.lookback_days,
+            asset_types=body.asset_types,  # type: ignore[arg-type]
+            on_progress=progress,
+        ),
+        repair=False,
+    )
 
 
 @router.post("/integrity/repair")
@@ -142,17 +159,34 @@ def repair_integrity(body: IntegrityRepairIn, request: Request) -> dict:
     custom_daily = provider != "tickflow" and custom.provider_has_dataset(provider, "daily")
     if not custom_daily and not state.capabilities.has(Cap.KLINE_DAILY_BATCH):
         raise HTTPException(status_code=403, detail="当前日K数据源不可用, 请先检查数据源配置")
-    return _start_integrity_job(request, lambda progress: run_repair(
-        state.repo, state.capabilities, body.report_id, on_progress=progress,
-    ), repair=True)
+    return _start_integrity_job(
+        request,
+        lambda progress: run_repair(
+            state.repo,
+            state.capabilities,
+            body.report_id,
+            on_progress=progress,
+        ),
+        repair=True,
+    )
+
 
 # 表统计仍沿用 TTL + 写入事件失效; 请求只返回快照, 重统计由单个后台线程执行。
 _TABLE_TTLS = {
     name: 120.0 if name == "minute" else 30.0
     for name in (
-        "daily", "enriched", "index_daily", "index_enriched", "index_instruments",
-        "etf_daily", "etf_enriched", "etf_instruments", "minute", "adj_factor",
-        "instruments", "financials",
+        "daily",
+        "enriched",
+        "index_daily",
+        "index_enriched",
+        "index_instruments",
+        "etf_daily",
+        "etf_enriched",
+        "etf_instruments",
+        "minute",
+        "adj_factor",
+        "instruments",
+        "financials",
     )
 }
 _status_cache = DataStatusCache({**_TABLE_TTLS, "storage": 60.0, "last_runs": float("inf")})
@@ -168,29 +202,51 @@ def invalidate_storage_cache() -> None:
     invalidate_data_cache(None)
 
 
+def _ck_store(repo):
+    """取 ClickHouse 门面（数据状态页统计的唯一读源）。
+
+    repo 由 lifespan 注入 storage；测试里的轻量 repo 回退进程级 runtime。
+    两者都无时返回 None，各聚合函数按空处理（与原 DuckDB 视图缺失同语义）。
+    """
+    store = getattr(repo, "storage", None)
+    if store is None:
+        try:
+            from app.storage.runtime import get_storage
+
+            runtime = get_storage()
+            store = runtime.store if runtime is not None else None
+        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+            store = None
+    return store
+
+
+# DuckDB 视图名 → CK 物理表名（数据状态统计口径）
+_VIEW_TO_CK_TABLE = {
+    "kline_daily": "kline_daily",
+    "kline_enriched": "kline_daily_enriched",
+    "kline_index_daily": "kline_index_daily",
+    "kline_index_enriched": "kline_index_enriched",
+    "kline_etf_daily": "kline_etf_daily",
+    "kline_etf_enriched": "kline_etf_enriched",
+    "kline_minute": "kline_minute",
+    "adj_factor": "adj_factor",
+}
+
+
 def _safe_aggregate(repo, view: str) -> dict | None:
-    """聚合视图基础统计;视图不存在或为空时返 None。"""
+    """聚合基础统计（CK 唯一读源）；表不存在或为空时返 None。"""
+    store = _ck_store(repo)
+    table = _VIEW_TO_CK_TABLE.get(view)
+    if store is None or table is None:
+        return None
     try:
-        row = repo.execute_one(
-            f"""SELECT count(*) AS rows,
-                       min(date) AS earliest,
-                       max(date) AS latest,
-                       count(DISTINCT symbol) AS symbols,
-                       count(DISTINCT date) AS trading_days
-                FROM {view}"""
+        stats = store.table_stats(
+            table, date_column="trade_date" if table == "adj_factor" else "date"
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.debug("aggregate %s failed: %s", view, e)
         return None
-    if not row or not row[0]:
-        return None
-    return {
-        "rows": int(row[0]),
-        "earliest_date": str(row[1]) if row[1] else None,
-        "latest_date": str(row[2]) if row[2] else None,
-        "symbols_covered": int(row[3] or 0),
-        "trading_days": int(row[4] or 0),
-    }
+    return stats or None
 
 
 def _safe_aggregate_daily(repo, view: str = "kline_daily") -> dict | None:
@@ -205,7 +261,7 @@ def _safe_aggregate_daily(repo, view: str = "kline_daily") -> dict | None:
     dates: list[str] = []
     for d in daily_dir.iterdir():
         if d.is_dir() and d.name.startswith("date="):
-            dates.append(d.name[5:])
+            dates.append(d.name[5:])  # noqa: PERF401 - PERF401: 循环内含多行处理/异常, 改写推导式损可读性
     if not dates:
         return None
     dates.sort()
@@ -228,13 +284,12 @@ def _safe_aggregate_enriched(repo) -> dict | None:
     日期范围从分区目录名获取（同 minute 策略），不读任何 parquet。
     标的数从 instruments 小表取。
     """
-    # 字段数：读 schema，不碰数据
+    # 字段数：读 CK schema，不碰数据
     fields = 0
-    try:
-        cols = repo.execute_all("DESCRIBE kline_enriched")
-        fields = len(cols)
-    except Exception:  # noqa: BLE001
-        pass
+    store = _ck_store(repo)
+    if store is not None:
+        with contextlib.suppress(Exception):
+            fields = len(store.table_columns("kline_daily_enriched"))
 
     # 日期范围：从分区目录名获取，不扫数据
     enriched_dir = repo.store.data_dir / "kline_daily_enriched"
@@ -243,7 +298,7 @@ def _safe_aggregate_enriched(repo) -> dict | None:
     dates: list[str] = []
     for d in enriched_dir.iterdir():
         if d.is_dir() and d.name.startswith("date="):
-            dates.append(d.name[5:])
+            dates.append(d.name[5:])  # noqa: PERF401 - PERF401: 循环内含多行处理/异常, 改写推导式损可读性
     if not dates:
         return None
     dates.sort()
@@ -261,39 +316,27 @@ def _safe_aggregate_enriched(repo) -> dict | None:
 
 
 def _count_instruments_symbols(repo) -> int:
-    """从 instruments 小表取标的数（~5000行，毫秒级）。"""
+    """从 CK instruments 维表取标的数（~5000行，毫秒级）。"""
+    store = _ck_store(repo)
+    if store is None:
+        return 0
     try:
-        sym_row = repo.execute_one(
-            "SELECT count(DISTINCT symbol) FROM instruments"
-        )
-        if sym_row and sym_row[0]:
-            return int(sym_row[0])
-    except Exception:  # noqa: BLE001
-        pass
-    return 0
+        return int(store.read_instruments("stock")["symbol"].n_unique())
+    except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+        return 0
 
 
 def _safe_aggregate_instruments(repo) -> dict | None:
-    """instruments 视图统计(无 date 列,用 as_of)。"""
+    """instruments 维表统计（CK 唯一读源，无 date 列用 as_of）。"""
+    store = _ck_store(repo)
+    if store is None:
+        return None
     try:
-        row = repo.execute_one(
-            """SELECT count(*) AS rows,
-                      count(DISTINCT symbol) AS symbols,
-                      max(as_of) AS latest_as_of,
-                      count_if(name IS NOT NULL AND name != '') AS named
-               FROM instruments"""
-        )
-    except Exception as e:  # noqa: BLE001
+        stats = store.instrument_stats("stock")
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.debug("aggregate instruments failed: %s", e)
         return None
-    if not row or not row[0]:
-        return None
-    return {
-        "rows": int(row[0]),
-        "symbols_covered": int(row[1] or 0),
-        "latest_as_of": str(row[2]) if row[2] else None,
-        "named": int(row[3] or 0),
-    }
+    return stats or None
 
 
 def _safe_aggregate_index_daily(repo) -> dict | None:
@@ -304,11 +347,10 @@ def _safe_aggregate_index_daily(repo) -> dict | None:
 def _safe_aggregate_index_enriched(repo) -> dict | None:
     """指数 enriched 统计。指数数据量较小，直接读取 parquet 元数据统计真实行数。"""
     fields = 0
-    try:
-        cols = repo.execute_all("DESCRIBE kline_index_enriched")
-        fields = len(cols)
-    except Exception:  # noqa: BLE001
-        pass
+    store = _ck_store(repo)
+    if store is not None:
+        with contextlib.suppress(Exception):
+            fields = len(store.table_columns("kline_index_enriched"))
     stats = _safe_aggregate(repo, "kline_index_enriched")
     if not stats:
         return None
@@ -316,64 +358,38 @@ def _safe_aggregate_index_enriched(repo) -> dict | None:
 
 
 def _safe_aggregate_index_instruments(repo) -> dict | None:
-    """指数 instruments 视图统计。"""
+    """指数 instruments 维表统计（CK 唯一读源）。"""
+    store = _ck_store(repo)
+    if store is None:
+        return None
     try:
-        row = repo.execute_one(
-            """SELECT count(*) AS rows,
-                      count(DISTINCT symbol) AS symbols,
-                      count_if(name IS NOT NULL AND name != '') AS named
-               FROM instruments_index"""
-        )
-    except Exception as e:  # noqa: BLE001
+        stats = store.instrument_stats("index")
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.debug("aggregate instruments_index failed: %s", e)
         return None
-    if not row or not row[0]:
-        return None
-    return {
-        "rows": int(row[0]),
-        "symbols_covered": int(row[1] or 0),
-        "latest_as_of": None,
-        "named": int(row[2] or 0),
-    }
+    return stats or None
 
 
 def _safe_aggregate_etf_instruments(repo) -> dict | None:
-    """ETF instruments 统计 — 优先独立 instruments_etf，兼容旧 instruments_index。"""
-    queries = [
-        """SELECT count(*) AS rows,
-                  count(DISTINCT symbol) AS symbols,
-                  count_if(name IS NOT NULL AND name != '') AS named
-           FROM instruments_etf""",
-        """SELECT count(*) AS rows,
-                  count(DISTINCT symbol) AS symbols,
-                  count_if(name IS NOT NULL AND name != '') AS named
-           FROM instruments_index
-           WHERE asset_type = 'etf'""",
-    ]
-    for sql in queries:
-        try:
-            row = repo.execute_one(sql)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("aggregate etf instruments fallback failed: %s", e)
-            continue
-        if row and row[0]:
-            return {
-                "rows": int(row[0]),
-                "symbols_covered": int(row[1] or 0),
-                "latest_as_of": None,
-                "named": int(row[2] or 0),
-            }
-    return None
+    """ETF instruments 维表统计（CK 唯一读源，权威表 instruments_etf）。"""
+    store = _ck_store(repo)
+    if store is None:
+        return None
+    try:
+        stats = store.instrument_stats("etf")
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+        logger.debug("aggregate etf instruments failed: %s", e)
+        return None
+    return stats or None
 
 
 def _safe_aggregate_etf_enriched(repo) -> dict | None:
     """ETF enriched 统计 — 独立 kline_etf_enriched。"""
     fields = 0
-    try:
-        cols = repo.execute_all("DESCRIBE kline_etf_enriched")
-        fields = len(cols)
-    except Exception:  # noqa: BLE001
-        pass
+    store = _ck_store(repo)
+    if store is not None:
+        with contextlib.suppress(Exception):
+            fields = len(store.table_columns("kline_etf_enriched"))
     stats = _safe_aggregate(repo, "kline_etf_enriched")
     if not stats:
         return None
@@ -381,122 +397,73 @@ def _safe_aggregate_etf_enriched(repo) -> dict | None:
 
 
 def _safe_aggregate_etf_daily(repo) -> dict | None:
-    """ETF 日K统计 — 优先独立 kline_etf_daily，兼容旧 index 存储。"""
-    queries = [
-        """SELECT count(*) AS rows,
-                  min(date) AS earliest,
-                  max(date) AS latest,
-                  count(DISTINCT symbol) AS symbols,
-                  count(DISTINCT date) AS trading_days
-           FROM kline_etf_daily""",
-        """SELECT count(*) AS rows,
-                  min(date) AS earliest,
-                  max(date) AS latest,
-                  count(DISTINCT symbol) AS symbols,
-                  count(DISTINCT date) AS trading_days
-           FROM kline_index_daily
-           WHERE symbol IN (
-               SELECT DISTINCT symbol FROM instruments_index WHERE asset_type = 'etf'
-           )""",
-    ]
-    for sql in queries:
-        try:
-            row = repo.execute_one(sql)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("aggregate etf daily fallback failed: %s", e)
-            continue
-        if row and row[0]:
-            return {
-                "rows": int(row[0]),
-                "earliest_date": str(row[1]) if row[1] else None,
-                "latest_date": str(row[2]) if row[2] else None,
-                "symbols_covered": int(row[3] or 0),
-                "trading_days": int(row[4] or 0),
-            }
-    return None
+    """ETF 日K统计（CK 唯一读源，权威表 kline_etf_daily）。"""
+    return _safe_aggregate(repo, "kline_etf_daily")
 
 
 def _safe_aggregate_adj_factor(repo) -> dict | None:
-    """adj_factor 视图统计,日期范围对齐日 K 覆盖区间。"""
-    try:
-        # 取日 K 的日期范围作为过滤条件
-        dr = repo.execute_one(
-            "SELECT min(date), max(date) FROM kline_daily"
-        )
-        if not dr or not dr[0]:
-            return None
-        d_min, d_max = dr[0], dr[1]
-        row = repo.execute_one(
-            """SELECT count(*) AS rows,
-                      count(DISTINCT symbol) AS symbols,
-                      count(DISTINCT trade_date) AS trading_days
-               FROM adj_factor
-               WHERE trade_date BETWEEN ? AND ?""",
-            [str(d_min), str(d_max)],
-        )
-        if not row or not row[0]:
-            return None
-        return {
-            "rows": int(row[0]),
-            "symbols_covered": int(row[1]) if isinstance(row[1], (int, float)) else 0,
-            "earliest_date": str(d_min),
-            "latest_date": str(d_max),
-            "trading_days": int(row[2] or 0),
-        }
-    except Exception as e:  # noqa: BLE001
-        logger.debug("aggregate adj_factor failed: %s", e)
-        return None
+    """adj_factor 统计（CK 唯一读源，日期轴 trade_date）。"""
+    return _safe_aggregate(repo, "adj_factor")
 
 
 def _safe_aggregate_minute(repo) -> dict | None:
-    """kline_minute 统计 — 从分区目录名获取交易日数，跳过全表扫描。
+    """kline_minute 统计 — 从 CK 取交易日集合（分钟读路径已切 CK）。
 
-    分钟 K 按 date=YYYY-MM-DD 分区存储，直接数目录即可，
-    无需 count(*) / count(DISTINCT ...) 等昂贵查询。
+    只枚举 DISTINCT 交易日，不做 count(*)，成本与分区数同量级。
     """
-    minute_dir = repo.store.data_dir / "kline_minute"
-    if not minute_dir.exists():
+    try:
+        dates = repo.list_minute_dates(date(1970, 1, 1), date(2999, 12, 31))
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+        logger.debug("aggregate minute failed: %s", e)
         return None
-
-    # 从 date=YYYY-MM-DD 目录名提取交易日
-    dates: list[str] = []
-    for d in minute_dir.iterdir():
-        if d.is_dir() and d.name.startswith("date="):
-            dates.append(d.name[5:])
-
     if not dates:
         return None
 
-    dates.sort()
     return {
         "rows": 0,  # 不再查询行数
-        "earliest_date": dates[0],
-        "latest_date": dates[-1],
+        "earliest_date": dates[0].isoformat(),
+        "latest_date": dates[-1].isoformat(),
         "symbols_covered": 0,  # 不再查询标的数
         "trading_days": len(dates),
     }
 
 
 def _safe_aggregate_financials(repo) -> dict | None:
-    """财务数据统计 — 检查各表文件是否存在及行数。"""
+    """财务数据统计 — 各表行数与标的数（CK 为唯一读源）。
+
+    存储未初始化（离线脚本/单测）时回退本地文件计数，保持可用。
+    """
+    import polars as pl
+
+    from app.storage.runtime import get_storage
+
     data_dir = repo.store.data_dir
     tables_info: dict[str, dict] = {}
     total_rows = 0
 
-    for table in ("metrics", "income", "balance_sheet", "cash_flow", "shares"):
-        path = data_dir / "financials" / table / "part.parquet"
-        if path.exists():
+    runtime = get_storage()
+    if runtime is not None:
+        for table in ("metrics", "income", "balance_sheet", "cash_flow", "shares"):
             try:
-                import polars as pl
-                df = pl.read_parquet(path, columns=["symbol"])
-                rows = len(df)
-                symbols = df["symbol"].n_unique() if not df.is_empty() else 0
-                tables_info[table] = {"rows": rows, "symbols": symbols}
-                total_rows += rows
-            except Exception:
+                rows, symbols = runtime.store.financials_stats(f"financials_{table}")
+            except Exception:  # noqa: BLE001 - 单表统计失败不阻断状态页
+                rows, symbols = 0, 0
+            tables_info[table] = {"rows": rows, "symbols": symbols}
+            total_rows += rows
+    else:
+        for table in ("metrics", "income", "balance_sheet", "cash_flow", "shares"):
+            path = data_dir / "financials" / table / "part.parquet"
+            if path.exists():
+                try:
+                    df = pl.read_parquet(path, columns=["symbol"])
+                    rows = len(df)
+                    symbols = df["symbol"].n_unique() if not df.is_empty() else 0
+                    tables_info[table] = {"rows": rows, "symbols": symbols}
+                    total_rows += rows
+                except Exception:  # noqa: BLE001 - 单表统计失败置 0, 不阻断其他表
+                    tables_info[table] = {"rows": 0, "symbols": 0}
+            else:
                 tables_info[table] = {"rows": 0, "symbols": 0}
-        else:
-            tables_info[table] = {"rows": 0, "symbols": 0}
 
     if total_rows == 0:
         return None
@@ -519,10 +486,8 @@ def _scan_dir_stats(dirpath: Path) -> tuple[int, float]:
             count += c
             total += s
         elif entry.is_file(follow_symlinks=False):
-            try:
+            with contextlib.suppress(OSError):
                 total += entry.stat().st_size
-            except OSError:
-                pass
             count += 1
     return count, round(total / 1048576, 2)
 
@@ -538,10 +503,8 @@ def _scan_dir_recursive(entry: os.DirEntry) -> tuple[int, int]:
                 count += c
                 total += s
             elif sub.is_file(follow_symlinks=False):
-                try:
+                with contextlib.suppress(OSError):
                     total += sub.stat().st_size
-                except OSError:
-                    pass
                 count += 1
     except PermissionError:
         pass
@@ -572,9 +535,9 @@ def _compute_storage(data_dir: Path) -> dict:
     total_size = 0
     for key, d in subdirs.items():
         fc, sz = _scan_dir_stats(d)
-        total_size += sz
+        total_size += sz  # type: ignore[assignment]
         stats[f"{key}_files"] = fc
-        stats[f"{key}_size_mb"] = sz
+        stats[f"{key}_size_mb"] = sz  # type: ignore[assignment]
 
     # total: 再加上其他零散目录 (financials 有下方专属明细统计, 不在此列)
     other_dirs = ["pools", "backtest_results", "screener_results", "ai_cache"]
@@ -582,22 +545,20 @@ def _compute_storage(data_dir: Path) -> dict:
         d = data_dir / name
         if d.exists():
             _, s = _scan_dir_stats(d)
-            total_size += s
+            total_size += s  # type: ignore[assignment]
 
     # financials 单独统计 (明细与 total 各计入一次, 不得与其他目录循环重复累加)
     fin_dir = data_dir / "financials"
     if fin_dir.exists():
         fc, sz = _scan_dir_stats(fin_dir)
         stats["financials_files"] = fc
-        stats["financials_size_mb"] = sz
-        total_size += sz
+        stats["financials_size_mb"] = sz  # type: ignore[assignment]
+        total_size += sz  # type: ignore[assignment]
     # 根目录散文件
     for entry in os.scandir(data_dir):
         if entry.is_file(follow_symlinks=False):
-            try:
-                total_size += entry.stat().st_size / 1048576
-            except OSError:
-                pass
+            with contextlib.suppress(OSError):
+                total_size += entry.stat().st_size / 1048576  # type: ignore[assignment]
     stats["total_size_mb"] = round(total_size, 2)
     return stats
 
@@ -610,7 +571,7 @@ def _next_cron_run(scheduler, job_id: str) -> str | None:
         job = scheduler.get_job(job_id)
         if job and job.next_run_time:
             return job.next_run_time.isoformat(timespec="seconds")
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         pass
     return None
 
@@ -655,11 +616,12 @@ async def status(request: Request) -> dict:
         "financials": _safe_aggregate_financials,
     }
     loaders = {name: lambda fetch=fetch: fetch(repo) for name, fetch in aggregates.items()}
-    loaders["storage"] = lambda: _compute_storage(repo.store.data_dir)
-    loaders["last_runs"] = _load_last_runs
-    snapshot = _status_cache.snapshot(loaders, is_busy=lambda: _data_pipeline_busy(request))
+    loaders["storage"] = lambda: _compute_storage(repo.store.data_dir)  # type: ignore
+    loaders["last_runs"] = _load_last_runs  # type: ignore[assignment]
+    snapshot = _status_cache.snapshot(loaders, is_busy=lambda: _data_pipeline_busy(request))  # type: ignore[arg-type]
     last_runs = snapshot.pop("last_runs") or {
-        "last_instruments_run": None, "last_pipeline_run": None,
+        "last_instruments_run": None,
+        "last_pipeline_run": None,
     }
     return {
         **snapshot,
@@ -708,26 +670,34 @@ def clear_data(request: Request):
         release_run_slot("data_clear")
 
 
-def _clear_data_impl(request: Request):
+def _delete_parquet_dirs(data_dir) -> int:
+    """删除各数据目录的 parquet 与子目录，保持 publication 保护顺序。"""
     import shutil
 
-    repo = request.app.state.repo
-    data_dir = repo.store.data_dir
-    from app.services.daily_health import clear_assets
     deleted = 0
-    # recover=True: 清空语义就是接管一切 — 外部进程(崩掉的脚本/中断的管道)
-    # 残留的 publishing 标记(owner pid 已死)不应永久阻塞清空; 活进程的发布
-    # 仍会被拦(another publication is active), 写盘竞态保护不受影响。
     publications = {
         "kline_daily_enriched": EnrichedPublication(data_dir, "stock", recover=True),
         "kline_etf_enriched": EnrichedPublication(data_dir, "etf", recover=True),
     }
-
     for sub in (
-        "kline_daily", "kline_daily_enriched", "kline_index_daily", "kline_index_enriched",
-        "kline_etf_daily", "kline_etf_enriched", "kline_etf_minute", "kline_minute",
-        "adj_factor", "adj_factor_etf", "instruments", "instruments_index", "instruments_etf", "pools", "financials",
-        "backtest_results", "screener_results", "ai_cache",
+        "kline_daily",
+        "kline_daily_enriched",
+        "kline_index_daily",
+        "kline_index_enriched",
+        "kline_etf_daily",
+        "kline_etf_enriched",
+        "kline_etf_minute",
+        "kline_minute",
+        "adj_factor",
+        "adj_factor_etf",
+        "instruments",
+        "instruments_index",
+        "instruments_etf",
+        "pools",
+        "financials",
+        "backtest_results",
+        "screener_results",
+        "ai_cache",
     ):
         d = data_dir / sub
         if not d.exists():
@@ -751,11 +721,20 @@ def _clear_data_impl(request: Request):
             if publication is not None:
                 publication.abandon()
             raise
+    return deleted
 
+
+def _clear_data_impl(request: Request):
+    repo = request.app.state.repo
+    data_dir = repo.store.data_dir
+    from app.services.daily_health import clear_assets
+
+    deleted = _delete_parquet_dirs(data_dir)
     clear_assets(data_dir, {"stock", "etf", "index"})
     (data_dir / "user_data" / "integrity_report.json").unlink(missing_ok=True)
     # 清除同步历史（内存 + 磁盘 job_store/ 文件夹）
     from app.services.pipeline_jobs import job_store
+
     job_store.clear()
 
     # 清除财务数据
@@ -769,6 +748,7 @@ def _clear_data_impl(request: Request):
     # 清除监控运行数据 (user_data 下仅清运行产物, 不动 monitor_rules/preferences/secrets 等用户配置)
     # - 触发记录 alerts.jsonl
     from app.services import alert_store
+
     alert_store.clear(data_dir)
     # - 待推送的实时通知队列 (进程内存)
     qs = getattr(request.app.state, "quote_service", None)
@@ -784,15 +764,16 @@ def _clear_data_impl(request: Request):
 
     # 清除 Screener 进程级 _history_cache (TTL 缓存)
     from app.services.screener import ScreenerService
+
     ScreenerService.clear_history_cache()
 
     # 清除 Overview 总览聚合结果缓存 (5s TTL)
     from app.api.overview import invalidate_overview_cache
+
     invalidate_overview_cache()
 
     # 刷新 DuckDB 视图（空 parquet 目录也需要重新挂载）——
     # 委托给 repository 的唯一权威实现, 覆盖全部视图 (此前这里内联的副本漏了几张)。
-    repo.rebuild_views()
 
     logger.info("数据已清除: 删除 %d 个 parquet 文件", deleted)
     invalidate_data_cache(None, discard_stale=True)
@@ -905,30 +886,32 @@ _SCHEMA_VIEWS: dict[str, str] = {
 def table_schema(request: Request, table: str) -> list[dict]:
     """返回指定表的字段名、类型和中文说明。
 
-    优先从 DuckDB DESCRIBE 读取(有数据时含精确类型)；
-    视图不存在(无数据)时回退到 _TABLE_FIELD_DESC 静态定义。
+    优先从 CK schema 读取精确类型；存储不可用或表不存在时回退
+    _TABLE_FIELD_DESC 静态定义。
     """
     view = _SCHEMA_VIEWS.get(table)
     if not view:
         return []
     desc_map = _TABLE_FIELD_DESC.get(view, {})
     repo = request.app.state.repo
+    ck_table = _VIEW_TO_CK_TABLE.get(view) or {
+        "instruments": "instruments",
+        "instruments_index": "instruments_index",
+        "instruments_etf": "instruments_etf",
+    }.get(view)
     fields: list[dict] = []
+    store = _ck_store(repo)
     try:
-        cols = repo.execute_all(f"DESCRIBE {view}")
-        for col in cols:
-            name = col[0]
-            dtype = col[1]
-            fields.append({
-                "name": name,
-                "type": dtype,
-                "desc": desc_map.get(name, ""),
-            })
-    except Exception:  # noqa: BLE001
-        # 视图不存在(本地无数据)，用静态字段定义兜底
-        if desc_map:
-            for name, desc in desc_map.items():
-                fields.append({"name": name, "type": "—", "desc": desc})
+        cols = store.table_columns_typed(ck_table) if (store is not None and ck_table) else None
+    except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+        cols = None
+    if cols:
+        for name, dtype in cols:
+            fields.append({"name": name, "type": dtype, "desc": desc_map.get(name, "")})
+    elif desc_map:
+        # CK 存储不可用或表无数据，用静态字段定义兜底
+        for name, desc in desc_map.items():
+            fields.append({"name": name, "type": "—", "desc": desc})
     return fields
 
 
@@ -948,6 +931,7 @@ def get_version(request: Request) -> dict:
 
     # 2. 回退到项目根 VERSION 文件
     from app.config import settings
+
     project_root = Path(settings.data_dir).parent
     version_file = project_root / "VERSION"
     if version_file.exists():
@@ -970,8 +954,10 @@ def refresh_cache(request: Request) -> dict:
     repo.refresh_cache()
     # 清除 Overview 总览聚合结果缓存 + Screener 历史 TTL 缓存
     from app.api.overview import invalidate_overview_cache
+
     invalidate_overview_cache()
     from app.services.screener import ScreenerService
+
     ScreenerService.clear_history_cache()
     logger.info("refresh-cache: Polars 缓存已重建")
     return {"ok": True}

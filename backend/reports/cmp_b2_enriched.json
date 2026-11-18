@@ -1,0 +1,24 @@
+{
+  "generated_at": "2026-11-16T10:34:27",
+  "url": "http://clickhouse:8123",
+  "database": "tsp",
+  "data_dir": "/app/data",
+  "filters": {
+    "symbols": null,
+    "start": "2026-06-01",
+    "end": "2026-06-30"
+  },
+  "datasets": {
+    "kline_daily_enriched": {
+      "parquet_rows": 115730,
+      "clickhouse_rows": 115730,
+      "only_in_parquet": 0,
+      "only_in_clickhouse": 0,
+      "column_diffs": {},
+      "samples": {},
+      "ok": true,
+      "status": "ok"
+    }
+  },
+  "ok": true
+}

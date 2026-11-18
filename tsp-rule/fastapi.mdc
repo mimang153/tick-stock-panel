@@ -1,0 +1,83 @@
+---
+description: "FastAPI best practices and patterns for building modern Python web APIs"
+globs: **/*.py, app/**/*.py, api/**/*.py
+alwaysApply: false
+---
+# FastAPI Best Practices
+
+## Project Structure
+- Use proper directory structure
+- Implement proper module organization
+- Use proper dependency injection
+- Keep routes organized by domain
+- Implement proper middleware
+- Use proper configuration management
+
+## API Design
+- Use proper HTTP methods
+- Implement proper status codes
+- Use proper request/response models
+- Implement proper validation
+- Use proper error handling
+- Document APIs with OpenAPI
+
+## Models
+- Use Pydantic models
+- Implement proper validation
+- Use proper type hints
+- Keep models organized
+- Use proper inheritance
+- Implement proper serialization
+
+## Storage / 数据访问
+- 业务代码不直接持连接或拼 SQL，统一走 `storage` 门面抽象
+- 数据主链用 Polars（见 polars.mdc）；存储用 ClickHouse 门面（见 clickhouse.mdc）；缓存走 `CacheBackend`（见 redis.mdc）
+- 如需引入 ORM（SQLAlchemy），仅当新增关系型存储需求，且经存储门面包裹，不影响上层
+
+## Authentication
+- Implement proper JWT authentication
+- Use proper password hashing
+- Implement proper role-based access
+- Use proper session management
+- Implement proper OAuth2
+- Handle authentication errors properly
+
+## Security
+- Implement proper CORS
+- Use proper rate limiting
+- Implement proper input validation
+- Use proper security headers
+- Handle security errors properly
+- Implement proper logging
+
+## Performance
+- Use proper caching
+- Implement proper async operations
+- Use proper background tasks
+- Implement proper connection pooling
+- Use proper query optimization
+- Monitor performance metrics
+
+## Testing
+- Write proper unit tests
+- Implement proper integration tests
+- Use proper test fixtures
+- Implement proper mocking
+- Test error scenarios
+- Use proper test coverage
+
+## Deployment
+- Use proper Docker configuration
+- Implement proper CI/CD
+- Use proper environment variables
+- Implement proper logging
+- Use proper monitoring
+- Handle deployment errors properly
+
+## Documentation
+- Use proper docstrings
+- Implement proper API documentation
+- Use proper type hints
+- Keep documentation updated
+- Document error scenarios
+- Use proper versioning

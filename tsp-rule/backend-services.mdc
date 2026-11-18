@@ -1,0 +1,31 @@
+---
+description: "APScheduler 定时任务 与 SSE 实时事件流规范（tsp 后台调度 + 前端实时推送）"
+globs: backend/app/**/*.py, backend/tests/**/*.py
+alwaysApply: false
+---
+# 后台调度与实时推送规范
+
+## APScheduler 定时任务
+- 调度周期必须可配置，避免硬编码魔法时间；批量/指标轮用配置项（如轮询间隔、能力判断阈值）驱动
+- 后台任务区分「稳态增量轮」与「自愈修复轮」：稳态保持幂等增量；覆盖滞后超阈值或连续空轮时自动触发修复轮
+- 任务要可停止/可恢复，异常不影响主服务；跨重启状态需持久化（如 `sync_state`），不得依赖进程内标记
+- 并发 job 之间避免竞态：写共享资源（文件/CK 表/缓存）需原子或加锁
+
+## SSE 实时事件流（两种形态，勿混用）
+
+**A. 标准事件流 `text/event-stream`（`/api/events`，给 EventSource 订阅）**
+- 采用 `sse-starlette` 的 `StreamingResponse` + `sse_format(event)` 输出
+- **订阅鉴权**：`EventSource` 无法带 Authorization 头，必须走「一次性票据」两步流程：
+  `POST /api/events/ticket`（Bearer → 60s 一次性票据）→ `GET /api/events?ticket=…`；票据失效立即 401
+- **心跳保活**：推送 `: ping` 注释帧（不产生事件）；按固定间隔（如 15s `_HEARTBEAT_S`）防连接被中间件断开
+- 事件流首帧发 `hello`（含 scope）；事件按 scope 过滤，避免串流到无关订阅者
+- 流在客户端断开/超时/业务结束时正确关闭生成器，避免连接泄漏
+
+**B. NDJSON 流式返回（`application/x-ndjson`，给前端 ReadableStream 逐行解析）**
+- 用于 AI 流式输出等「逐 chunk 推送、前端逐行读」场景（如财务分析）
+- 每个 chunk 独立一行 JSON，以 `\n` 分隔；设 `Cache-Control: no-cache` + `X-Accel-Buffering: no` 防缓冲
+- 不要把 NDJSON 写成 event-stream，也不要反过来；按消费端解析方式选择
+
+## 监控联动
+- 监控触发的告警既落盘（如 alerts.jsonl）也入 `pending_alerts` 队列推 SSE；两处需保持一致
+- 真实触发/测试端点应区分：测试端点不真正外发推送（飞书等），仅调试链路

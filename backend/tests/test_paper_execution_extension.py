@@ -45,10 +45,10 @@ def filter(df, params):
             return DAY
 
         def build_strategy_context(self, *_args, **_kwargs):
-            return StrategyDataContext("stock", "1d", DAY, current=self.frame)
+            return StrategyDataContext("stock", "1d", DAY, current=self.frame)  # type: ignore[attr-defined]
 
     screener = Screener()
-    screener.frame = frame
+    screener.frame = frame  # type: ignore[attr-defined]
     quotes = SimpleNamespace(status=lambda: {"final_sync_done": True, "final_sync_failed": None})
     monkeypatch.setattr(paper, "cn_today", lambda: DAY)
     monkeypatch.setattr(paper, "cn_now", lambda: NOW)
@@ -413,7 +413,7 @@ def test_signal_mask_and_effective_params_match_backtest(env):
     snapshot = preview["snapshot"]
     strategy = env.engine.get("demo")
     backtest = StrategyBacktestService.__new__(StrategyBacktestService)
-    backtest_params = backtest._normalize_params(source["config"]["params"], strategy)
+    backtest_params = backtest._normalize_params(source["config"]["params"], strategy)  # type: ignore[arg-type]
     assert snapshot["params"] == backtest_params
     frame = env.screener.frame.with_columns(
         pl.Series("signal_entry", [True, False, True, False, True, True]),
@@ -520,7 +520,8 @@ def test_dependency_fingerprint_uses_original_files_not_export_serialization(env
     env.service.tick(NOW)
     assert len(paper.load_orders(env.root)) == 6
     assert env.service.get("default")["enabled"] is True
-    definition["conditions"][0]["right"] = 100
+    assert definition is not None
+    definition["conditions"][0]["right"] = 100  # type: ignore[index]
     path.write_text(json.dumps(definition))
     env.service.tick(NOW)
     assert env.service.get("default")["status"] == "blocked"

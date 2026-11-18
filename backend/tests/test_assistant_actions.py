@@ -8,6 +8,7 @@
   user_data/custom_signals/*.json, 非法字段被拒且错误带常用字段提示。
 - add_to_watchlist 复用 watchlist 服务; 已在列表的标的不重复添加(不改动顺序)。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -25,6 +26,7 @@ from app.custom.assistant import tools as assistant_tools
 from app.extensions.loader import configure_backend_extensions
 
 # ── PendingRegistry 单元: 批准 / 拒绝 / 超时 / 未知 id ─────────────
+
 
 async def test_registry_approve_wakes_waiter() -> None:
     reg = assistant_actions.PendingRegistry(timeout_s=5.0)
@@ -61,12 +63,17 @@ async def test_registry_resolve_unknown_returns_none() -> None:
 
 # ── 闸门集成: chat_stream 事件序 + 执行/不执行 ────────────────────
 
+
 def _script_round(script: list[dict[str, Any]]):
     async def fake_round(messages, tool_schemas, *, temperature=0.3, timeout=240.0):
         step = script.pop(0)
         for piece in step.get("text_pieces", []):
             yield {"type": "text", "delta": piece}
-        yield {"type": "round_end", "tool_calls": step.get("tool_calls", []), "finish_reason": "stop"}
+        yield {
+            "type": "round_end",
+            "tool_calls": step.get("tool_calls", []),
+            "finish_reason": "stop",
+        }
 
     return fake_round
 
@@ -83,7 +90,7 @@ async def _run_chat(
     # 免确认会让动作跳过确认卡直接执行, 门控断言全军覆没 (CI 偏好默认关碰巧通过)
     monkeypatch.setattr(assistant_actions, "auto_approve_enabled", lambda: False)
     script = [{"tool_calls": tool_calls}, {"text_pieces": ["完成"]}]
-    monkeypatch.setattr(chat_service, "stream_openai_round", _script_round(script))
+    monkeypatch.setattr(chat_service, "stream_openai_round", _script_round(script))  # type: ignore[arg-type]
     monkeypatch.setattr(assistant_tools, "execute_assistant_tool", fake_execute)
 
     events: list[dict[str, Any]] = []
@@ -95,7 +102,9 @@ async def _run_chat(
     return events
 
 
-async def test_action_tool_gated_and_executes_after_approval(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_action_tool_gated_and_executes_after_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     executed: list[tuple[str, dict[str, Any]]] = []
 
     async def fake_execute(name: str, args: dict[str, Any], ctx: Any) -> dict[str, Any]:
@@ -104,7 +113,13 @@ async def test_action_tool_gated_and_executes_after_approval(monkeypatch: pytest
 
     events = await _run_chat(
         monkeypatch,
-        [{"id": "c1", "name": "add_to_watchlist", "arguments": '{"symbol": "600519.SH", "note": "白酒龙头"}'}],
+        [
+            {
+                "id": "c1",
+                "name": "add_to_watchlist",
+                "arguments": '{"symbol": "600519.SH", "note": "白酒龙头"}',
+            }
+        ],
         fake_execute,
         lambda ev: assistant_actions.registry.resolve(ev["call_id"], True),
     )
@@ -125,7 +140,9 @@ async def test_action_tool_gated_and_executes_after_approval(monkeypatch: pytest
     assert any(e["type"] == "delta" for e in events)
 
 
-async def test_action_tool_denied_returns_error_without_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_action_tool_denied_returns_error_without_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     executed: list[tuple[str, dict[str, Any]]] = []
 
     async def fake_execute(name: str, args: dict[str, Any], ctx: Any) -> dict[str, Any]:
@@ -168,6 +185,7 @@ async def test_query_tool_has_no_confirm_gate(monkeypatch: pytest.MonkeyPatch) -
 
 # ── 决策端点: 未知/过期 call_id 404 ───────────────────────────────
 
+
 def test_decision_endpoint_rejects_unknown_call() -> None:
     app = FastAPI()
     configure_backend_extensions(app)
@@ -180,6 +198,7 @@ def test_decision_endpoint_rejects_unknown_call() -> None:
 
 
 # ── 写工具往返 ────────────────────────────────────────────────────
+
 
 def test_create_signal_strategy_roundtrip(tmp_path: Path) -> None:
     ctx = assistant_tools.ToolContext.build(data_dir=tmp_path)
@@ -211,8 +230,11 @@ def test_create_signal_strategy_rejects_unknown_field(tmp_path: Path) -> None:
     ctx = assistant_tools.ToolContext.build(data_dir=tmp_path)
     with pytest.raises(ValueError, match="不在白名单"):
         assistant_tools._create_signal_strategy(
-            {"name": "坏信号", "kind": "entry",
-             "conditions": [{"left": "no_such_field", "op": ">", "right": "1"}]},
+            {
+                "name": "坏信号",
+                "kind": "entry",
+                "conditions": [{"left": "no_such_field", "op": ">", "right": "1"}],
+            },
             ctx,
         )
     # 校验失败不应落盘
@@ -223,7 +245,8 @@ def test_create_signal_strategy_requires_conditions(tmp_path: Path) -> None:
     ctx = assistant_tools.ToolContext.build(data_dir=tmp_path)
     with pytest.raises(ValueError, match="conditions"):
         assistant_tools._create_signal_strategy(
-            {"name": "空条件", "kind": "entry", "conditions": []}, ctx,
+            {"name": "空条件", "kind": "entry", "conditions": []},
+            ctx,
         )
 
 
@@ -233,13 +256,16 @@ async def test_add_to_watchlist_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_p
     added: list[tuple[str, str]] = []
     monkeypatch.setattr(watch_service, "list_symbols", lambda: [{"symbol": "000001.SZ"}])
     monkeypatch.setattr(
-        watch_service, "add",
-        lambda symbol, note="", group_id=None: added.append((symbol, note)) or [{"symbol": symbol}],
+        watch_service,
+        "add",
+        lambda symbol, note="", group_id=None: added.append((symbol, note)) or [{"symbol": symbol}],  # type: ignore[func-returns-value]
     )
     ctx = assistant_tools.ToolContext.build(data_dir=tmp_path)
 
     payload = await assistant_tools.execute_assistant_tool(
-        "add_to_watchlist", {"symbol": "600519.SH", "note": "白酒龙头"}, ctx,
+        "add_to_watchlist",
+        {"symbol": "600519.SH", "note": "白酒龙头"},
+        ctx,
     )
     assert payload["ok"] is True
     assert payload["result"]["added"] is True
@@ -247,7 +273,9 @@ async def test_add_to_watchlist_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_p
 
     # 已在列表: 不重复添加, 也不改动既有条目
     payload2 = await assistant_tools.execute_assistant_tool(
-        "add_to_watchlist", {"symbol": "000001.SZ", "note": "覆盖备注"}, ctx,
+        "add_to_watchlist",
+        {"symbol": "000001.SZ", "note": "覆盖备注"},
+        ctx,
     )
     assert payload2["ok"] is True
     assert payload2["result"]["added"] is False
@@ -259,13 +287,17 @@ async def test_action_tool_error_contract_via_execute(tmp_path: Path) -> None:
     """非法参数经统一执行入口仍回 ok=False 契约(不抛异常打断对话流)。"""
     ctx = assistant_tools.ToolContext.build(data_dir=tmp_path)
     payload = await assistant_tools.execute_assistant_tool(
-        "add_to_watchlist", {"symbol": "不是代码"}, ctx,
+        "add_to_watchlist",
+        {"symbol": "不是代码"},
+        ctx,
     )
     assert payload["ok"] is False
     assert "无效的证券代码" in payload["error"]
 
 
-async def test_action_tool_timeout_is_not_reported_as_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_action_tool_timeout_is_not_reported_as_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """确认卡超时未作答: 不执行, 回填给模型的是「确认超时」而不是「用户已拒绝, 不要重复尝试」。"""
     executed: list[str] = []
     fed_back: list[dict[str, Any]] = []
@@ -300,18 +332,21 @@ async def test_action_tool_timeout_is_not_reported_as_refusal(monkeypatch: pytes
 
 # ── 摘要: 拒绝/超时的足迹卡一行文案 ──────────────────────────────
 
+
 def test_summarize_action_results() -> None:
     assert "创建信号" in assistant_tools.summarize_tool_result(
         "create_signal_strategy",
         {"ok": True, "result": {"signal": {"id": "csg_a1", "name": "金叉"}}},
     )
     denied = assistant_tools.summarize_tool_result(
-        "add_to_watchlist", {"ok": False, "error": "用户已拒绝该操作, 未执行。"},
+        "add_to_watchlist",
+        {"ok": False, "error": "用户已拒绝该操作, 未执行。"},
     )
     assert "拒绝" in denied
 
 
 # ── 数据完整性检查 + 数据补全 ─────────────────────────────────────
+
 
 def _make_partitions(data_dir: Path, subdir: str, dates: list[str]) -> None:
     for d in dates:
@@ -338,7 +373,9 @@ def test_check_data_coverage_reports_gaps(tmp_path: Path) -> None:
     assert "财务" in issues_text
 
 
-def test_check_data_coverage_fresh_data_has_few_issues(tmp_path: Path) -> None:
+def test_check_data_coverage_fresh_data_has_few_issues(tmp_path: Path, ck_runtime) -> None:
+    from datetime import date as date_cls
+
     import polars as pl
 
     today_str = assistant_tools.cn_today().isoformat()
@@ -347,7 +384,49 @@ def test_check_data_coverage_fresh_data_has_few_issues(tmp_path: Path) -> None:
     _make_partitions(tmp_path, "kline_minute", [today_str])
     fin = tmp_path / "financials" / "metrics" / "part.parquet"
     fin.parent.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame({"symbol": ["600519.SH"], "period_end": ["2026-06-30"]}).write_parquet(fin)
+    fin_df = pl.DataFrame({"symbol": ["600519.SH"], "period_end": ["2026-06-30"]})
+    fin_df.write_parquet(fin)
+    # _check_data_coverage 读 CK：写各表当日数据 + 财务 period_end
+    today = date_cls.fromisoformat(today_str)
+    bars = pl.DataFrame(
+        {
+            "symbol": ["600519.SH"],
+            "date": [today],
+            "open": [1.0],
+            "high": [1.0],
+            "low": [1.0],
+            "close": [1.0],
+            "volume": [1.0],
+            "amount": [1.0],
+        }
+    )
+    ck_runtime.write_daily("kline_daily", bars)
+    ck_runtime.write_daily(
+        "kline_daily_enriched", bars.with_columns(pl.col("close").alias("raw_close"))
+    )
+    ck_runtime.write_minute(
+        "kline_minute",
+        pl.DataFrame(
+            {
+                "symbol": ["600519.SH"],
+                "datetime": [
+                    __import__("datetime").datetime.combine(
+                        today, __import__("datetime").time(9, 30)
+                    )
+                ],
+                "open": [1.0],
+                "high": [1.0],
+                "low": [1.0],
+                "close": [1.0],
+                "volume": [1.0],
+                "amount": [1.0],
+            }
+        ),
+    )
+    ck_runtime.write_financials(
+        "financials_metrics",
+        fin_df.with_columns(pl.col("period_end").str.to_date().alias("period_end")),
+    )
     ctx = assistant_tools.ToolContext.build(data_dir=tmp_path)
 
     result = assistant_tools._check_data_coverage({}, ctx)
@@ -368,7 +447,8 @@ def test_biz_days_behind_counts_workdays_after_latest_up_to_today() -> None:
 
 
 def test_check_data_coverage_weekend_with_friday_data_has_no_lag_issue(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     from datetime import date as date_cls
 
@@ -391,7 +471,9 @@ class _StubRepo:
     def get_daily_asset(self, asset_type: str, symbol: str, start, end):
         import polars as pl
 
-        return pl.DataFrame({"symbol": [symbol] * 3, "date": ["2026-09-22", "2026-09-23", "2026-09-24"]})
+        return pl.DataFrame(
+            {"symbol": [symbol] * 3, "date": ["2026-09-22", "2026-09-23", "2026-09-24"]}
+        )
 
 
 def test_check_data_coverage_symbol_lagging(tmp_path: Path) -> None:
@@ -407,7 +489,9 @@ def test_check_data_coverage_symbol_lagging(tmp_path: Path) -> None:
     assert any("600519.SH 本地日线缺失" in issue for issue in result["issues"])
 
 
-async def test_sync_data_pipeline_reuses_shared_trigger(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_sync_data_pipeline_reuses_shared_trigger(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """sync_data 必须走数据页同一条触发路径(单飞语义由该路径保证)。"""
     from app.api import kline as kline_module
     from app.api import pipeline as pipeline_module
@@ -425,7 +509,9 @@ async def test_sync_data_pipeline_reuses_shared_trigger(monkeypatch: pytest.Monk
     monkeypatch.setattr(pipeline_module, "trigger_pipeline_job", fake_pipeline)
     monkeypatch.setattr(kline_module, "trigger_minute_sync", fake_minute)
     ctx = assistant_tools.ToolContext.build(
-        data_dir=tmp_path, repo=object(), capabilities=object(),
+        data_dir=tmp_path,
+        repo=object(),
+        capabilities=object(),
     )
 
     payload = await assistant_tools._sync_data({"kind": "pipeline"}, ctx)
@@ -462,7 +548,8 @@ async def test_sync_data_financials_and_validation(tmp_path: Path) -> None:
     assert bad["ok"] is False and "kind" in bad["error"]
 
     bad_table = await assistant_tools.execute_assistant_tool(
-        "sync_data", {"kind": "financials", "table": "nope"}, ctx)
+        "sync_data", {"kind": "financials", "table": "nope"}, ctx
+    )
     assert bad_table["ok"] is False and "table" in bad_table["error"]
 
 
@@ -496,20 +583,26 @@ async def test_sync_data_gated_as_action(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
 
 def test_sync_status_and_summaries(tmp_path: Path) -> None:
-    ctx = assistant_tools.ToolContext.build(data_dir=tmp_path, financial_scheduler=_StubFinScheduler())
+    ctx = assistant_tools.ToolContext.build(
+        data_dir=tmp_path, financial_scheduler=_StubFinScheduler()
+    )
     status = assistant_tools._get_sync_status({}, ctx)
     assert status["financial_syncing"] is True
     assert isinstance(status["recent_jobs"], list)
 
     assert "数据缺口" in assistant_tools.summarize_tool_result(
-        "check_data_coverage", {"ok": True, "result": {"issues": ["x"]}})
+        "check_data_coverage", {"ok": True, "result": {"issues": ["x"]}}
+    )
     assert "无缺口" in assistant_tools.summarize_tool_result(
-        "check_data_coverage", {"ok": True, "result": {"issues": []}})
+        "check_data_coverage", {"ok": True, "result": {"issues": []}}
+    )
     assert "已启动" in assistant_tools.summarize_tool_result(
-        "sync_data", {"ok": True, "result": {"kind": "pipeline", "job_id": "j1", "reused": False}})
+        "sync_data", {"ok": True, "result": {"kind": "pipeline", "job_id": "j1", "reused": False}}
+    )
 
 
 # ── 轮次检查点: 到达 _TOOL_ROUND_CHECKPOINT 时询问「继续/停止」 ─────
+
 
 async def _run_rounds_chat(
     monkeypatch: pytest.MonkeyPatch,
@@ -525,7 +618,7 @@ async def _run_rounds_chat(
         {"tool_calls": [{"id": f"c{i}", "name": "get_indices", "arguments": "{}"}]}
         for i in range(n_rounds)
     ]
-    script.append({"text_pieces": ["完成"]})
+    script.append({"text_pieces": ["完成"]})  # type: ignore[list-item]
     monkeypatch.setattr(chat_service, "stream_openai_round", _script_round(script))
 
     async def fake_execute(name: str, args: dict[str, Any], ctx: Any) -> dict[str, Any]:
@@ -541,9 +634,12 @@ async def _run_rounds_chat(
     return events
 
 
-async def test_rounds_checkpoint_continue_resets_and_finishes(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_rounds_checkpoint_continue_resets_and_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events = await _run_rounds_chat(
-        monkeypatch, 2,
+        monkeypatch,
+        2,
         lambda ev: assistant_actions.registry.resolve(ev["call_id"], True),
     )
     confirms = [e for e in events if e["type"] == "rounds_confirm"]
@@ -557,7 +653,8 @@ async def test_rounds_checkpoint_continue_resets_and_finishes(monkeypatch: pytes
 
 async def test_rounds_checkpoint_stop_ends_with_notice(monkeypatch: pytest.MonkeyPatch) -> None:
     events = await _run_rounds_chat(
-        monkeypatch, 2,
+        monkeypatch,
+        2,
         lambda ev: assistant_actions.registry.resolve(ev["call_id"], False),
     )
     assert [e for e in events if e["type"] == "rounds_confirm"]
@@ -572,7 +669,9 @@ async def test_rounds_checkpoint_stop_ends_with_notice(monkeypatch: pytest.Monke
 
 async def test_rounds_checkpoint_timeout_stops(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        assistant_actions, "registry", assistant_actions.PendingRegistry(timeout_s=0.05),
+        assistant_actions,
+        "registry",
+        assistant_actions.PendingRegistry(timeout_s=0.05),
     )
 
     async def no_decision(event: dict[str, Any]) -> None:
@@ -586,6 +685,7 @@ async def test_rounds_checkpoint_timeout_stops(monkeypatch: pytest.MonkeyPatch) 
 
 async def test_rounds_checkpoint_zero_disables_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
     """检查点设为 0 (设置页「不检查」): 任意轮次都不弹卡、不中断。"""
+
     async def fail_on_confirm(event: dict[str, Any]) -> None:
         raise AssertionError("checkpoint=0 不应弹 rounds_confirm")
 

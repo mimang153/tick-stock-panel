@@ -6,6 +6,7 @@ ext_{config_id} DuckDB 视图对 timeseries 模式覆盖 timeseries/**/*.parquet
 再按 symbol 去重, 梯队这边直接查视图, 于是同一只涨停股在梯队里出现 N 次、
 档位 count 被放大 N 倍。
 """
+
 from __future__ import annotations
 
 import json
@@ -50,23 +51,39 @@ class _NoDepth:
         return None
 
 
-def _write_timeseries_ext(data_dir, partitions: dict[str, pl.DataFrame]) -> pl.DataFrame:
-    """写 timeseries 扩展表; 返回视图口径 (全部分区拼接) 的 DataFrame。"""
+def _write_timeseries_ext(data_dir, partitions: dict[str, pl.DataFrame], ck=None) -> pl.DataFrame:
+    """写 timeseries 扩展表; 返回视图口径 (全部分区拼接) 的 DataFrame。
+
+    ``ck`` 传入时同步写 CK ``ext_timeseries``：扩展列读路径已切 CK，
+    每次拉取的分区按 (ext_id, symbol, date) 落一行, time_value 无日内
+    时刻列时置空串。
+    """
     cfg_dir = data_dir / "ext_data" / "concept_ts"
     cfg_dir.mkdir(parents=True, exist_ok=True)
     cfg_dir.joinpath("config.json").write_text(
-        json.dumps({
-            "id": "concept_ts",
-            "label": "概念时序",
-            "mode": "timeseries",
-            "fields": [{"name": "concept", "dtype": "string", "label": "概念"}],
-        }, ensure_ascii=False),
+        json.dumps(
+            {
+                "id": "concept_ts",
+                "label": "概念时序",
+                "mode": "timeseries",
+                "fields": [{"name": "concept", "dtype": "string", "label": "概念"}],
+            },
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
     for day, frame in partitions.items():
         part = cfg_dir / "timeseries" / f"date={day}"
         part.mkdir(parents=True, exist_ok=True)
         frame.write_parquet(part / "part.parquet")
+        if ck is not None:
+            ck.write_ext_timeseries(
+                frame.with_columns(
+                    pl.lit("concept_ts").alias("ext_id"),
+                    pl.lit(date.fromisoformat(day)).alias("date"),
+                    pl.lit("").alias("time_value"),
+                )
+            )
     return pl.concat([partitions[d] for d in sorted(partitions)])
 
 
@@ -81,31 +98,35 @@ def _request(data_dir, view_df: pl.DataFrame):
 @pytest.fixture
 def _stub_enriched(monkeypatch):
     """单只涨停股的 enriched 快照 + 空的昨日连板表。"""
-    snapshot = pl.DataFrame({
-        "symbol": ["600000.SH"],
-        "name": ["示例"],
-        "close": [11.0],
-        "change_pct": [0.1],
-        "signal_limit_up": [True],
-        "signal_limit_down": [False],
-        "signal_broken_limit_up": [False],
-        "consecutive_limit_ups": [2],
-    })
-    monkeypatch.setattr(
-        ScreenerService, "_load_enriched_for_date", lambda self, d: snapshot
+    snapshot = pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "name": ["示例"],
+            "close": [11.0],
+            "change_pct": [0.1],
+            "signal_limit_up": [True],
+            "signal_limit_down": [False],
+            "signal_broken_limit_up": [False],
+            "consecutive_limit_ups": [2],
+        }
     )
+    monkeypatch.setattr(ScreenerService, "_load_enriched_for_date", lambda self, d: snapshot)
     monkeypatch.setattr(
         ScreenerService, "load_prior_consecutive", lambda self, d, c: pl.DataFrame()
     )
     return snapshot
 
 
-def test_timeseries_ext_column_does_not_duplicate_ladder_rows(tmp_path, _stub_enriched):
-    view_df = _write_timeseries_ext(tmp_path, {
-        "2026-09-08": pl.DataFrame({"symbol": ["600000.SH"], "concept": ["旧概念"]}),
-        "2026-09-09": pl.DataFrame({"symbol": ["600000.SH"], "concept": ["次新概念"]}),
-        "2026-09-10": pl.DataFrame({"symbol": ["600000.SH"], "concept": ["最新概念"]}),
-    })
+def test_timeseries_ext_column_does_not_duplicate_ladder_rows(tmp_path, _stub_enriched, ck_runtime):
+    view_df = _write_timeseries_ext(
+        tmp_path,
+        {
+            "2026-09-08": pl.DataFrame({"symbol": ["600000.SH"], "concept": ["旧概念"]}),
+            "2026-09-09": pl.DataFrame({"symbol": ["600000.SH"], "concept": ["次新概念"]}),
+            "2026-09-10": pl.DataFrame({"symbol": ["600000.SH"], "concept": ["最新概念"]}),
+        },
+        ck=ck_runtime,
+    )
 
     payload = screener_api.limit_ladder(
         _request(tmp_path, view_df),
@@ -128,12 +149,15 @@ def test_snapshot_ext_column_still_joins(tmp_path, _stub_enriched):
     cfg_dir = tmp_path / "ext_data" / "concept_snap"
     cfg_dir.mkdir(parents=True, exist_ok=True)
     cfg_dir.joinpath("config.json").write_text(
-        json.dumps({
-            "id": "concept_snap",
-            "label": "概念快照",
-            "mode": "snapshot",
-            "fields": [{"name": "concept", "dtype": "string", "label": "概念"}],
-        }, ensure_ascii=False),
+        json.dumps(
+            {
+                "id": "concept_snap",
+                "label": "概念快照",
+                "mode": "snapshot",
+                "fields": [{"name": "concept", "dtype": "string", "label": "概念"}],
+            },
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
     snap = pl.DataFrame({"symbol": ["600000.SH"], "concept": ["人工智能"]})

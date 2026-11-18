@@ -10,7 +10,7 @@ from app.services import preferences
 
 
 @pytest.fixture
-def sample(tmp_path, monkeypatch):
+def sample(tmp_path, monkeypatch, ck_runtime):
     monkeypatch.setattr(preferences, "get_enriched_batch_size", lambda: 2)
     monkeypatch.setattr(pipeline, "_custom_signal_exprs", {})
     monkeypatch.setattr(pipeline, "_adaptive_sym_batch", lambda default, rows: 2)
@@ -19,41 +19,76 @@ def sample(tmp_path, monkeypatch):
     for day in range(12):
         for i, symbol in enumerate(symbols):
             close = 10.0 + i + day * 0.1
-            rows.append({
-                "symbol": symbol, "date": date(2026, 8, 1) + timedelta(days=day),
-                "open": close, "high": close + 0.1, "low": close - 0.1,
-                "close": close, "volume": 0.0 if i == 4 else 1000.0 + day,
-                "amount": 0.0 if i == 4 else 10000.0, "quote_ts": 0,
-            })
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "date": date(2026, 8, 1) + timedelta(days=day),
+                    "open": close,
+                    "high": close + 0.1,
+                    "low": close - 0.1,
+                    "close": close,
+                    "volume": 0.0 if i == 4 else 1000.0 + day,
+                    "amount": 0.0 if i == 4 else 10000.0,
+                    "quote_ts": 0,
+                }
+            )
     raw = pl.DataFrame(rows)
     for frame in raw.partition_by("date"):
         out = tmp_path / "kline_daily" / f"date={frame['date'][0]}" / "part.parquet"
         out.parent.mkdir(parents=True)
         frame.write_parquet(out)
-    instruments = pl.DataFrame({
-        "symbol": symbols, "name": ["stock"] * 5, "float_shares": [1000000.0] * 5,
-    })
-    factors = pl.DataFrame({
-        "symbol": symbols[:3], "trade_date": [date(2026, 8, 8)] * 3, "ex_factor": [1.1] * 3,
-    })
-    shares = pl.DataFrame({
-        "symbol": symbols[:2], "period_end": [date(2026, 6, 30)] * 2,
-        "announce_date": [date(2026, 8, 5)] * 2, "float_shares": [800000.0] * 2,
-    })
-    for name, frame in (("instruments/all.parquet", instruments), ("adj_factor/all.parquet", factors),
-                        ("financials/shares/part.parquet", shares)):
+    instruments = pl.DataFrame(
+        {
+            "symbol": symbols,
+            "name": ["stock"] * 5,
+            "float_shares": [1000000.0] * 5,
+        }
+    )
+    factors = pl.DataFrame(
+        {
+            "symbol": symbols[:3],
+            "trade_date": [date(2026, 8, 8)] * 3,
+            "ex_factor": [1.1] * 3,
+        }
+    )
+    shares = pl.DataFrame(
+        {
+            "symbol": symbols[:2],
+            "period_end": [date(2026, 6, 30)] * 2,
+            "announce_date": [date(2026, 8, 5)] * 2,
+            "float_shares": [800000.0] * 2,
+        }
+    )
+    for name, frame in (
+        ("instruments/all.parquet", instruments),
+        ("adj_factor/all.parquet", factors),
+        ("financials/shares/part.parquet", shares),
+    ):
         out = tmp_path / name
         out.parent.mkdir(parents=True, exist_ok=True)
         frame.write_parquet(out)
+    # 管道读源已切 CK: 日K/维表/除权因子/历史股本都要同步入库
+    for frame in raw.partition_by("date"):
+        ck_runtime.write_daily("kline_daily", frame)
+    ck_runtime.write_instruments("stock", instruments)
+    ck_runtime.write_adj_factor(factors)
+    ck_runtime.write_financials("financials_shares", shares)
     return raw, instruments, factors, shares
 
 
 @pytest.mark.parametrize("adjustment_only", [False, True])
-def test_incremental_batches_preserve_values_and_generation(sample, tmp_path, monkeypatch, adjustment_only):
+def test_incremental_batches_preserve_values_and_generation(
+    sample, tmp_path, monkeypatch, adjustment_only
+):
     raw, instruments, factors, shares = sample
-    expected = pipeline._select_storage_cols(pipeline.compute_enriched(
-        raw, instruments=instruments, factors=factors, historical_shares=shares,
-    )).sort("symbol", "date")
+    expected = pipeline._select_storage_cols(
+        pipeline.compute_enriched(
+            raw,
+            instruments=instruments,
+            factors=factors,
+            historical_shares=shares,
+        )
+    ).sort("symbol", "date")
     if adjustment_only:
         for frame in raw.partition_by("date"):
             out = tmp_path / "kline_daily_enriched" / f"date={frame['date'][0]}" / "part.parquet"

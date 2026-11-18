@@ -7,18 +7,20 @@
 
 from __future__ import annotations
 
-import logging
+import json
 import math
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import polars as pl
 import pytest
 
 from app.plugins.tdxquant import client as tc
 from app.plugins.tdxquant import provider as tp
 from app.plugins.tdxquant.provider import TdxQuantProvider
+from app.services import kline_sync
 
 _BEIJING = ZoneInfo("Asia/Shanghai")
 
@@ -72,17 +74,24 @@ class _FakeClient:
 
 def _provider(fake: _FakeClient) -> TdxQuantProvider:
     p = TdxQuantProvider()
-    p._client = fake
+    p._client = fake  # type: ignore[assignment]
     return p
 
 
 def _snap_row(**over) -> dict:
     row = {
-        "Now": "1263.00", "LastClose": "1255.79", "Open": "1255.42",
-        "Max": "1282.00", "Min": "1255.42", "Volume": "35110",
-        "Amount": "445322.34", "RefreshTime": "153017",
-        "Buyp": ["1263.00", "1262.99"], "Buyv": ["73", "2"],
-        "Sellp": ["1263.06", "1263.11"], "Sellv": ["1", "3"],
+        "Now": "1263.00",
+        "LastClose": "1255.79",
+        "Open": "1255.42",
+        "Max": "1282.00",
+        "Min": "1255.42",
+        "Volume": "35110",
+        "Amount": "445322.34",
+        "RefreshTime": "153017",
+        "Buyp": ["1263.00", "1262.99"],
+        "Buyv": ["73", "2"],
+        "Sellp": ["1263.06", "1263.11"],
+        "Sellv": ["1", "3"],
     }
     row.update(over)
     return row
@@ -186,11 +195,9 @@ def test_raw_gives_up_on_persistent_none(monkeypatch):
 
 @pytest.mark.parametrize("encoded", [False, True])
 def test_explicit_auth_error_is_preserved_without_retry_or_key_leak(monkeypatch, encoded):
-    import json
-
     secret = "TDX-private-test-key"
     response = {"ErrorId": -1, "Error": f"TokenKey Insufficient Or Key Error {secret}"}
-    sleeps = []
+    sleeps = []  # type: ignore[var-annotated]
     c = _client_with_raw(monkeypatch, [json.dumps(response) if encoded else response], sleeps)
     c.api_key = secret
     clean = c._tqs._clean
@@ -202,8 +209,10 @@ def test_explicit_auth_error_is_preserved_without_retry_or_key_leak(monkeypatch,
 
 
 def test_server_error_retains_reason_and_can_retry(monkeypatch):
-    sleeps = []
-    c = _client_with_raw(monkeypatch, [{"error": "server busy", "error_code": 503}, {"Date": ["20260101"]}], sleeps)
+    sleeps = []  # type: ignore[var-annotated]
+    c = _client_with_raw(
+        monkeypatch, [{"error": "server busy", "error_code": 503}, {"Date": ["20260101"]}], sleeps
+    )
     assert c.his_dats("600519.SH", date(2026, 1, 10), 1)["Date"] == ["20260101"]
     assert sleeps
 
@@ -229,9 +238,13 @@ def test_minute_dataset_probe_reports_explicit_auth_failure(dataset):
 @pytest.mark.parametrize("zone", [ZoneInfo("Asia/Shanghai"), ZoneInfo("UTC")])
 def test_minute_aware_request_window_matches_beijing_wallclock(zone):
     fake = _FakeClient()
-    fake.his = {"600519.SH": _minute_raw([
-        ("20261009", 93100, 10.0, 10.1, 9.9, 10.0, 1000.0, 100.0),
-    ])}
+    fake.his = {
+        "600519.SH": _minute_raw(
+            [
+                ("20261009", 93100, 10.0, 10.1, 9.9, 10.0, 1000.0, 100.0),
+            ]
+        )
+    }
     start = datetime(2026, 10, 9, 9, 30, tzinfo=_BEIJING).astimezone(zone)
     end = datetime(2026, 10, 9, 9, 32, tzinfo=_BEIJING).astimezone(zone)
     frame = _provider(fake).get_minute(["600519.SH"], start, end)
@@ -241,22 +254,27 @@ def test_minute_aware_request_window_matches_beijing_wallclock(zone):
 
 
 def test_tdx_minute_window_flows_through_service_to_parquet(monkeypatch, tmp_path):
-    import polars as pl
-
-    from app.services import kline_sync
-
     fake = _FakeClient()
-    fake.his = {"600519.SH": {"Value": _minute_raw([
-        ("20261009", 93100, 10.0, 10.1, 9.9, 10.0, 1000.0, 100.0),
-    ])}}
+    fake.his = {
+        "600519.SH": {
+            "Value": _minute_raw(
+                [
+                    ("20261009", 93100, 10.0, 10.1, 9.9, 10.0, 1000.0, 100.0),
+                ]
+            )
+        }
+    }
     provider = _provider(fake)
     monkeypatch.setattr(kline_sync, "_selected_minute_provider_name", lambda: "tdxquant")
-    monkeypatch.setattr(kline_sync, "_resolve_minute_provider", lambda name: (provider, False, None))
+    monkeypatch.setattr(
+        kline_sync, "_resolve_minute_provider", lambda name: (provider, False, None)
+    )
     monkeypatch.setattr(kline_sync, "get_client", lambda: pytest.fail("不得跨源请求"))
     kline_sync.sync_minute_batch(
-        ["600519.SH"], datetime(2026, 10, 9, 9, 30, tzinfo=_BEIJING),
+        ["600519.SH"],
+        datetime(2026, 10, 9, 9, 30, tzinfo=_BEIJING),
         datetime(2026, 10, 9, 9, 32, tzinfo=_BEIJING),
-        on_segment=lambda frame: kline_sync._write_minute_partition(frame, tmp_path),
+        on_segment=lambda frame: kline_sync._write_minute_partition(frame, tmp_path),  # type: ignore[arg-type]
     )
     stored = pl.read_parquet(tmp_path / "date=2026-10-09/part.parquet")
     assert stored.height == 1
@@ -311,9 +329,7 @@ def test_client_his_dats_end_time_format(monkeypatch):
 def test_client_his_dats_unwraps_value_envelope(monkeypatch):
     """#509: 部分环境原生返回整体包在 "Value" 键里, 客户端层统一解包。"""
     sleeps: list[float] = []
-    c = _client_with_raw(
-        monkeypatch, [{"Value": {"Date": ["20260101"]}, "ErrorId": 0}], sleeps
-    )
+    c = _client_with_raw(monkeypatch, [{"Value": {"Date": ["20260101"]}, "ErrorId": 0}], sleeps)
     assert c.his_dats("600519.SH", date(2026, 1, 10), 5) == {"Date": ["20260101"]}
 
 
@@ -326,7 +342,7 @@ class _FixedDT(datetime):
 
 def _map_row(monkeypatch, **over) -> dict:
     monkeypatch.setattr(tp, "datetime", _FixedDT)
-    return tp._map_snapshot_row("600519.SH", _snap_row(**over), 999)
+    return tp._map_snapshot_row("600519.SH", _snap_row(**over), 999)  # type: ignore[return-value]
 
 
 def test_snapshot_row_units(monkeypatch):
@@ -349,6 +365,7 @@ def test_snapshot_row_units(monkeypatch):
 def test_snapshot_row_bad_refresh_time_falls_back(monkeypatch):
     monkeypatch.setattr(tp, "datetime", _FixedDT)
     rec = tp._map_snapshot_row("600519.SH", _snap_row(RefreshTime="99:99"), 123456)
+    assert rec is not None
     assert rec["timestamp"] == 123456
 
 
@@ -417,7 +434,9 @@ def test_realtime_symbols_can_supplement_etf_without_rounding_price():
     fake.snapshot_results = [{"159558.SZ": _snap_row(Now="0.827", LastClose="0.826")}]
     records = _provider(fake).get_realtime_symbols(["159558.SZ"], asset_type="etf")
     assert fake.snapshot_calls == [["159558.SZ"]]
-    assert records[0]["last_price"] == .827
+    assert records is not None
+    assert records[0]["last_price"] == 0.827
+    assert records is not None
     assert records[0]["symbol"] == "159558.SZ"
 
 
@@ -430,10 +449,14 @@ def test_realtime_symbols_failure_does_not_fake_empty_success():
 # ---------------------------------------------------------------- provider: daily
 def _his_raw(*, dates=("20260102", "20260105"), volume="3123935.00", amount="386731.09") -> dict:
     return {
-        "Date": list(dates), "Time": ["0"] * len(dates),
-        "Open": ["10.0"] * len(dates), "High": ["11.0"] * len(dates),
-        "Low": ["9.5"] * len(dates), "Close": ["10.5"] * len(dates),
-        "Volume": [volume] * len(dates), "Amount": [amount] * len(dates),
+        "Date": list(dates),
+        "Time": ["0"] * len(dates),
+        "Open": ["10.0"] * len(dates),
+        "High": ["11.0"] * len(dates),
+        "Low": ["9.5"] * len(dates),
+        "Close": ["10.5"] * len(dates),
+        "Volume": [volume] * len(dates),
+        "Amount": [amount] * len(dates),
     }
 
 
@@ -442,7 +465,8 @@ def test_daily_units_and_window_filter():
     fake.his["600519.SH"] = _his_raw(dates=("20251231", "20260102", "20260105", "20260106"))
     df = _provider(fake).get_daily(
         ["600519.SH"],
-        datetime(2026, 1, 1), datetime(2026, 1, 5),
+        datetime(2026, 1, 1),
+        datetime(2026, 1, 5),
     )
     assert df["date"].to_list() == [date(2026, 1, 2), date(2026, 1, 5)]  # 窗口过滤
     row = df.row(0, named=True)
@@ -470,7 +494,9 @@ def test_daily_symbol_error_isolated_but_iteration_continues():
     fake.his["600001.SH"] = _his_raw()
     done: list[tuple[int, int]] = []
     df = _provider(fake).get_daily(
-        ["600000.SH", "600001.SH"], datetime(2025, 12, 1), datetime(2026, 1, 31),
+        ["600000.SH", "600001.SH"],
+        datetime(2025, 12, 1),
+        datetime(2026, 1, 31),
         on_chunk_done=lambda cur, total: done.append((cur, total)),
     )
     assert df.height == 2  # 只有 600001 的两根
@@ -480,9 +506,13 @@ def test_daily_symbol_error_isolated_but_iteration_continues():
 # ---------------------------------------------------------------- provider: adj_factor
 def _closes_raw(pairs: list[tuple[str, float]]) -> dict:
     return {
-        "Date": [d for d, _ in pairs], "Close": [str(c) for _, c in pairs],
-        "Open": ["1"] * len(pairs), "High": ["1"] * len(pairs), "Low": ["1"] * len(pairs),
-        "Volume": ["100"] * len(pairs), "Amount": ["1"] * len(pairs),
+        "Date": [d for d, _ in pairs],
+        "Close": [str(c) for _, c in pairs],
+        "Open": ["1"] * len(pairs),
+        "High": ["1"] * len(pairs),
+        "Low": ["1"] * len(pairs),
+        "Volume": ["100"] * len(pairs),
+        "Amount": ["1"] * len(pairs),
     }
 
 
@@ -490,10 +520,18 @@ def test_adj_factor_per10_to_per_share_and_formula():
     # 10派30.876元 → 每股 D=3.0876; P=30.876 → ref=(30.876-3.0876)/1=27.7884 → 27.79
     fake = _FakeClient()
     fake.events["600519.SH"] = [
-        {"Date": "20240619", "Type": "1", "Bonus": 30.876, "AllotPrice": 0.0,
-         "ShareBonus": 0.0, "Allotment": 0.0},
+        {
+            "Date": "20240619",
+            "Type": "1",
+            "Bonus": 30.876,
+            "AllotPrice": 0.0,
+            "ShareBonus": 0.0,
+            "Allotment": 0.0,
+        },
     ]
-    fake.his["600519.SH"] = _closes_raw([("20240618", 30.876), ("20240619", 28.0), ("20240620", 28.5)])
+    fake.his["600519.SH"] = _closes_raw(
+        [("20240618", 30.876), ("20240619", 28.0), ("20240620", 28.5)]
+    )
     df = _provider(fake).get_adj_factors(
         ["600519.SH"], datetime(2024, 1, 1), datetime(2024, 12, 31)
     )
@@ -504,6 +542,7 @@ def test_adj_factor_per10_to_per_share_and_formula():
     assert row["prev_close"] == 30.876
     ref = math.floor((30.876 - 3.0876) * 100 + 0.5) / 100  # half-up 两位
     assert row["ex_factor"] == pytest.approx(30.876 / ref)
+
     # 涨跌停自检: 复权后除权日涨跌 28.0/(30.876/factor)-1 ≈ 0.1% 在板限内 → 保留
 
 
@@ -511,8 +550,14 @@ def test_adj_factor_limit_check_drops_bad_factor():
     # 异常事件: 分红与价格严重不匹配 → 复权后除权日涨跌幅超板限 → 自检剔除
     fake = _FakeClient()
     fake.events["600519.SH"] = [
-        {"Date": "20240619", "Type": "1", "Bonus": 200.0, "AllotPrice": 0.0,
-         "ShareBonus": 0.0, "Allotment": 0.0},
+        {
+            "Date": "20240619",
+            "Type": "1",
+            "Bonus": 200.0,
+            "AllotPrice": 0.0,
+            "ShareBonus": 0.0,
+            "Allotment": 0.0,
+        },
     ]
     fake.his["600519.SH"] = _closes_raw([("20240618", 30.876), ("20240619", 28.0)])
     df = _provider(fake).get_adj_factors(
@@ -524,8 +569,14 @@ def test_adj_factor_limit_check_drops_bad_factor():
 def test_adj_factor_future_event_without_prev_close_skipped():
     fake = _FakeClient()
     fake.events["600519.SH"] = [
-        {"Date": "20991231", "Type": "1", "Bonus": 30.876, "AllotPrice": 0.0,
-         "ShareBonus": 0.0, "Allotment": 0.0},
+        {
+            "Date": "20991231",
+            "Type": "1",
+            "Bonus": 30.876,
+            "AllotPrice": 0.0,
+            "ShareBonus": 0.0,
+            "Allotment": 0.0,
+        },
     ]
     fake.his["600519.SH"] = _closes_raw([("20240618", 30.876)])
     df = _provider(fake).get_adj_factors(
@@ -538,8 +589,14 @@ def test_adj_factor_schema_columns():
     # 真实量级事件: P=10, 10派2 + 10送1 + 10配2(配股价5) → 参考价 8.31, 除权日收盘 8.35
     fake = _FakeClient()
     fake.events["600000.SH"] = [
-        {"Date": "20240619", "Type": "1", "Bonus": 2.0, "AllotPrice": 5.0,
-         "ShareBonus": 1.0, "Allotment": 2.0},
+        {
+            "Date": "20240619",
+            "Type": "1",
+            "Bonus": 2.0,
+            "AllotPrice": 5.0,
+            "ShareBonus": 1.0,
+            "Allotment": 2.0,
+        },
     ]
     fake.his["600000.SH"] = _closes_raw([("20240618", 10.0), ("20240619", 8.35)])
     df = _provider(fake).get_adj_factors(
@@ -557,10 +614,12 @@ def test_adj_factor_schema_columns():
 def test_depth_batch_maps_five_levels(monkeypatch):
     monkeypatch.setattr(tp, "datetime", _FixedDT)
     fake = _FakeClient()
-    fake.snapshot_results = [{
-        "600519.SH": _snap_row(),
-        "600000.SH": _snap_row(Buyp=None, Sellp=None),  # 无五档 → 整标的省略
-    }]
+    fake.snapshot_results = [
+        {
+            "600519.SH": _snap_row(),
+            "600000.SH": _snap_row(Buyp=None, Sellp=None),  # 无五档 → 整标的省略
+        }
+    ]
     out = _provider(fake).get_depth_batch(["600519.SH", "600000.SH"])
     assert set(out) == {"600519.SH"}
     entry = out["600519.SH"]
@@ -594,20 +653,33 @@ def test_availability_ok(monkeypatch):
 
 def test_datasets_declaration():
     p = TdxQuantProvider()
-    assert set(p.config.datasets) == {"realtime", "depth5", "daily", "adj_factor", "minute", "full_minute"}
+    assert set(p.config.datasets) == {
+        "realtime",
+        "depth5",
+        "daily",
+        "adj_factor",
+        "minute",
+        "full_minute",
+    }
     assert p.name == "tdxquant" and p.config.builtin is True
     for absent in ("financial",):
-        assert absent not in p.config.datasets  # 未声明 → provider_has_dataset False → 回退 tickflow
+        assert (
+            absent not in p.config.datasets
+        )  # 未声明 → provider_has_dataset False → 回退 tickflow
 
 
 # ---------------------------------------------------------------- minute / full_minute
 def _minute_raw(rows: list[tuple[str, object, float, float, float, float, float, float]]) -> dict:
     """(Date, Time[串或数值], O, H, L, C, Volume股, Amount万元) → 原生 1m 列式 dict。"""
     return {
-        "Date": [r[0] for r in rows], "Time": [r[1] for r in rows],
-        "Open": [r[2] for r in rows], "High": [r[3] for r in rows],
-        "Low": [r[4] for r in rows], "Close": [r[5] for r in rows],
-        "Volume": [r[6] for r in rows], "Amount": [r[7] for r in rows],
+        "Date": [r[0] for r in rows],
+        "Time": [r[1] for r in rows],
+        "Open": [r[2] for r in rows],
+        "High": [r[3] for r in rows],
+        "Low": [r[4] for r in rows],
+        "Close": [r[5] for r in rows],
+        "Volume": [r[6] for r in rows],
+        "Amount": [r[7] for r in rows],
     }
 
 
@@ -616,7 +688,9 @@ def test_minute_stream_groups_small_frames_without_changing_request_policy(monke
     fake.his_default = _minute_raw([("20261106", "093100", 10, 11, 9, 10.5, 10000, 10.5)])
     monkeypatch.setattr(tp, "_MINUTE_INTERVAL_S", 0)
     source = _provider(fake)
-    stream = source.iter_minute([f"{i:06d}.SZ" for i in range(120)], None, datetime(2026, 11, 6, 15))
+    stream = source.iter_minute(
+        [f"{i:06d}.SZ" for i in range(120)], None, datetime(2026, 11, 6, 15)
+    )
     first = next(stream)
     assert first.height == 50 and len(fake.his_calls) == 50
     assert [part.height for part in stream] == [50, 20]
@@ -625,30 +699,57 @@ def test_minute_stream_groups_small_frames_without_changing_request_policy(monke
 
 def test_minute_units_and_wallclock_datetime():
     fake = _FakeClient()
-    fake.his = {"600519.SH": _minute_raw([
-        ("20261009", "093100", 1255.0, 1256.0, 1254.9, 1255.5, 123_400.0, 15_500.0),
-        ("20261009", "150000", 1263.0, 1263.0, 1263.0, 1263.0, 38_600.00, 4869.62),
-    ])}
+    fake.his = {
+        "600519.SH": _minute_raw(
+            [
+                ("20261009", "093100", 1255.0, 1256.0, 1254.9, 1255.5, 123_400.0, 15_500.0),
+                ("20261009", "150000", 1263.0, 1263.0, 1263.0, 1263.0, 38_600.00, 4869.62),
+            ]
+        )
+    }
     df = _provider(fake).get_minute(
         ["600519.SH"], datetime(2026, 10, 8), datetime(2026, 10, 9, 23, 59)
     )
     assert fake.his_calls[0]["period"] == "1m"
     assert df.height == 2
     rows = df.sort("datetime").to_dicts()
-    assert rows[0]["datetime"] == datetime(2026, 10, 9, 9, 31, 0)   # 北京墙钟 naive
+    assert rows[0]["datetime"] == datetime(2026, 10, 9, 9, 31, 0)  # 北京墙钟 naive
     assert rows[1]["datetime"] == datetime(2026, 10, 9, 15, 0, 0)
-    assert rows[0]["volume"] == 1234.0        # 股 → floor(/100) 手
+    assert rows[0]["volume"] == 1234.0  # 股 → floor(/100) 手
     assert rows[1]["volume"] == 386.0
     assert rows[1]["amount"] == pytest.approx(48_696_200.0)  # 万元 → 元
 
 
 def test_minute_window_filter_and_gap_skip():
     fake = _FakeClient()
-    fake.his = {"600519.SH": _minute_raw([
-        ("20261008", "150000", 1250.0, 1250.0, 1250.0, 1250.0, 100_000.0, 12_500.0),  # 窗口外
-        ("20261009", "093100", 1255.0, 1256.0, 1254.9, 1255.5, 123_400.0, 15_500.0),
-        ("20261009", "093200", None, None, None, None, None, None),                    # 停牌缺口
-    ])}
+    fake.his = {
+        "600519.SH": _minute_raw(
+            [
+                (
+                    "20261008",
+                    "150000",
+                    1250.0,
+                    1250.0,
+                    1250.0,
+                    1250.0,
+                    100_000.0,
+                    12_500.0,
+                ),  # 窗口外
+                ("20261009", "093100", 1255.0, 1256.0, 1254.9, 1255.5, 123_400.0, 15_500.0),
+                # 停牌缺口: 显式构造缺 OHLC 行的容错输入
+                (  # type: ignore[list-item]
+                    "20261009",
+                    "093200",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            ]
+        )
+    }
     df = _provider(fake).get_minute(
         ["600519.SH"], datetime(2026, 10, 9), datetime(2026, 10, 9, 23, 59)
     )
@@ -675,35 +776,59 @@ def test_minute_transport_error_is_not_successful_empty_result():
 def test_minute_integer_and_short_time_shapes():
     """#509: Time 列可为 int/float 裸值或缺前导零串, 不得整批静默丢弃。"""
     fake = _FakeClient()
-    fake.his = {"600519.SH": _minute_raw([
-        ("20261009", 93100, 1255.0, 1256.0, 1254.9, 1255.5, 123_400.0, 15_500.0),
-        ("20261009", 93100.0, 1255.5, 1256.0, 1255.0, 1256.0, 88_800.0, 11_160.0),
-        ("20261009", "93100", 1256.0, 1257.0, 1256.0, 1257.0, 100_000.0, 12_500.0),
-        ("20261009", 130000, 1257.0, 1258.0, 1257.0, 1258.0, 100_000.0, 12_500.0),
-        ("20261009", "0931", 1258.0, 1259.0, 1258.0, 1259.0, 100_000.0, 12_500.0),
-        ("20261009", "0", 1259.0, 1260.0, 1259.0, 1260.0, 100_000.0, 12_500.0),  # 无时间 → 丢弃
-    ])}
+    fake.his = {
+        "600519.SH": _minute_raw(
+            [
+                ("20261009", 93100, 1255.0, 1256.0, 1254.9, 1255.5, 123_400.0, 15_500.0),
+                ("20261009", 93100.0, 1255.5, 1256.0, 1255.0, 1256.0, 88_800.0, 11_160.0),
+                ("20261009", "93100", 1256.0, 1257.0, 1256.0, 1257.0, 100_000.0, 12_500.0),
+                ("20261009", 130000, 1257.0, 1258.0, 1257.0, 1258.0, 100_000.0, 12_500.0),
+                ("20261009", "0931", 1258.0, 1259.0, 1258.0, 1259.0, 100_000.0, 12_500.0),
+                (
+                    "20261009",
+                    "0",
+                    1259.0,
+                    1260.0,
+                    1259.0,
+                    1260.0,
+                    100_000.0,
+                    12_500.0,
+                ),  # 无时间 → 丢弃
+            ]
+        )
+    }
     df = _provider(fake).get_minute(
         ["600519.SH"], datetime(2026, 10, 8), datetime(2026, 10, 9, 23, 59)
     )
     assert df.height == 5
     assert set(df["datetime"].to_list()) == {
-        datetime(2026, 10, 9, 9, 31, 0), datetime(2026, 10, 9, 13, 0, 0),
+        datetime(2026, 10, 9, 9, 31, 0),
+        datetime(2026, 10, 9, 13, 0, 0),
     }
 
 
 def test_minute_full_trading_day_integer_times_all_parse():
     """#509 复现: 全天 240 根全为 int 时间 → 修复前 0 行、任务"成功"扣积分; 修复后全量落库。"""
-    stamps = []
     # A 股 240 根/日: 09:31-11:30 (120) + 13:01-15:00 (120), 全部整型 HHMMSS
-    for h, m0, m1 in ((9, 31, 60), (10, 0, 60), (11, 0, 31), (13, 1, 60), (14, 0, 60), (15, 0, 1)):
-        for m in range(m0, m1):
-            stamps.append(int(f"{h:02d}{m:02d}00"))
+    stamps = [
+        int(f"{h:02d}{m:02d}00")
+        for h, m0, m1 in (
+            (9, 31, 60),
+            (10, 0, 60),
+            (11, 0, 31),
+            (13, 1, 60),
+            (14, 0, 60),
+            (15, 0, 1),
+        )
+        for m in range(m0, m1)
+    ]
     assert len(stamps) == 240
     fake = _FakeClient()
-    fake.his = {"600519.SH": _minute_raw([
-        ("20261009", t, 10.0, 10.1, 9.9, 10.0, 12_300.0, 1_500.0) for t in stamps
-    ])}
+    fake.his = {
+        "600519.SH": _minute_raw(
+            [("20261009", t, 10.0, 10.1, 9.9, 10.0, 12_300.0, 1_500.0) for t in stamps]
+        )
+    }
     df = _provider(fake).get_minute(
         ["600519.SH"], datetime(2026, 10, 8), datetime(2026, 10, 9, 23, 59)
     )
@@ -711,159 +836,3 @@ def test_minute_full_trading_day_integer_times_all_parse():
     dts = df["datetime"].to_list()
     assert dts[0] == datetime(2026, 10, 9, 9, 31, 0)
     assert dts[-1] == datetime(2026, 10, 9, 15, 0, 0)
-
-
-def test_minute_and_daily_unwrap_value_envelope():
-    """#509: 数据整体包在 "Value" 键的返回不得解析为 0 行 (FakeClient 绕过
-    client 层, 这里验证 provider 解析层的双保险)。"""
-    fake = _FakeClient()
-    fake.his = {"600519.SH": {"Value": _minute_raw([
-        ("20261009", 93100, 1255.0, 1256.0, 1254.9, 1255.5, 123_400.0, 15_500.0),
-    ])}}
-    df = _provider(fake).get_minute(
-        ["600519.SH"], datetime(2026, 10, 8), datetime(2026, 10, 9, 23, 59)
-    )
-    assert df.height == 1
-    assert df.to_dicts()[0]["datetime"] == datetime(2026, 10, 9, 9, 31, 0)
-
-    fake2 = _FakeClient()
-    fake2.his = {"600519.SH": {"Value": _his_raw()}}
-    assert _provider(fake2).get_daily(
-        ["600519.SH"], datetime(2025, 12, 1), datetime(2026, 1, 31)
-    ).height == 2
-
-
-def test_minute_request_end_keeps_intraday_time():
-    """#509: 分钟请求 end 不得截到 00:00:00, 必须传完整时刻。"""
-    fake = _FakeClient()
-    fake.his["600519.SH"] = _minute_raw([
-        ("20261009", 93100, 1255.0, 1256.0, 1254.9, 1255.5, 123_400.0, 15_500.0),
-    ])
-    _provider(fake).get_minute(["600519.SH"], None, datetime(2026, 10, 9, 14, 30))
-    end = fake.his_calls[0]["end"]
-    assert isinstance(end, datetime) and (end.hour, end.minute, end.second) == (14, 30, 0)
-    _provider(fake).get_intraday_batch(["600519.SH"])
-    assert isinstance(fake.his_calls[1]["end"], datetime)
-    _provider(fake).get_intraday_latest(["600519.SH"], count=2)
-    assert isinstance(fake.his_calls[2]["end"], datetime)
-
-
-def test_minute_zero_parse_diagnostic_warns_with_sample(caplog):
-    """#509: 返回非空但解析 0 行必须留下带样本的 WARNING, 不再静默成功。"""
-    tp._UNPARSED_MINUTE_SAMPLES = 0  # 模块级限流计数, 测试前复位
-    fake = _FakeClient()
-    fake.his = {"600519.SH": _minute_raw([
-        ("20261009", "not-a-time", 10.0, 10.1, 9.9, 10.0, 12_300.0, 1_500.0),
-    ])}
-    with caplog.at_level(logging.WARNING, logger="app.plugins.tdxquant.provider"):
-        df = _provider(fake).get_minute(
-            ["600519.SH"], datetime(2026, 10, 8), datetime(2026, 10, 9, 23, 59)
-        )
-    assert df.is_empty()
-    assert "解析为 0 行" in caplog.text
-    assert "600519.SH" in caplog.text and "not-a-time" in caplog.text  # 带样本可定位
-
-
-def test_minute_zero_parse_diagnostic_rate_limited(caplog):
-    tp._UNPARSED_MINUTE_SAMPLES = 0
-    fake = _FakeClient()
-    bad = _minute_raw([("20261009", "bad", 10.0, 10.1, 9.9, 10.0, 12_300.0, 1_500.0)])
-    symbols = [f"60000{i}.SH" for i in range(5)]
-    for sym in symbols:
-        fake.his[sym] = bad
-    with caplog.at_level(logging.WARNING, logger="app.plugins.tdxquant.provider"):
-        _provider(fake).get_minute(symbols, None, datetime(2026, 10, 9, 23, 59))
-    assert caplog.text.count("解析为 0 行") == 3  # 全市场轮不刷屏
-
-
-def test_get_intraday_batch_today_only():
-    fake = _FakeClient()
-    today = date.today().strftime("%Y%m%d")
-    yday = (date.today() - timedelta(days=1)).strftime("%Y%m%d")
-    fake.his = {"600519.SH": _minute_raw([
-        (yday, "150000", 1250.0, 1250.0, 1250.0, 1250.0, 100_000.0, 12_500.0),  # 前日余量 → 过滤
-        (today, "093100", 1255.0, 1256.0, 1254.9, 1255.5, 123_400.0, 15_500.0),
-        (today, "093200", 1255.5, 1257.0, 1255.0, 1256.0, 88_800.0, 11_160.0),
-    ])}
-    df = _provider(fake).get_intraday_batch(["600519.SH"])
-    assert df.height == 2  # 只保留今日行
-    assert fake.his_calls[0]["period"] == "1m"
-
-
-def test_get_intraday_latest_universe_default():
-    fake = _FakeClient()
-    fake.universe = ["600000.SH", "000001.SZ"]
-    today = date.today().strftime("%Y%m%d")
-    for sym in fake.universe:
-        fake.his[sym] = _minute_raw([
-            (today, "093100", 10.0, 10.1, 9.9, 10.0, 50_000.0, 500.0),
-            (today, "093200", 10.0, 10.1, 9.9, 10.0, 50_000.0, 500.0),
-        ])
-    df = _provider(fake).get_intraday_latest(count=3)
-    assert df.height == 4  # 每只 2 根
-    assert set(df["symbol"].to_list()) == {"600000.SH", "000001.SZ"}
-    assert all(c["count"] <= 30 for c in fake.his_calls)
-
-
-def test_test_dataset_minute(monkeypatch):
-    # 试拉窗口 [now-3d, now] 依赖真实时钟, 冻结到 _FixedDT 保证任意时区/时刻可复现
-    monkeypatch.setattr(tp, "datetime", _FixedDT)
-    fake = _FakeClient()
-    fake.his = {"600519.SH": _minute_raw([
-        ("20261011", "093100", 1255.0, 1256.0, 1254.9, 1255.5, 123_400.0, 15_500.0),
-    ])}
-    out = _provider(fake).test_dataset("minute", ["600519.SH"])
-    assert out["rows"] == 1
-    assert "datetime" in out["columns"]
-
-
-# ---------------------------------------------------------------- provider: 试拉
-def test_test_dataset_realtime(monkeypatch):
-    monkeypatch.setattr(tp, "datetime", _FixedDT)
-    fake = _FakeClient()
-    fake.snapshot_results = [{"600519.SH": _snap_row()}]
-    out = _provider(fake).test_dataset("realtime")
-    assert out["rows"] == 1 and out["preview"][0]["symbol"] == "600519.SH"
-
-
-def test_test_dataset_unsupported_dataset():
-    out = _provider(_FakeClient()).test_dataset("financial")
-    assert "error" in out and "回退" in out["error"]
-
-
-# ---------------------------------------------------------------- loader 集成
-def test_loader_manifest_parses_and_entry_importable():
-    from importlib import import_module
-
-    from app.data_providers.custom import loader
-
-    manifest = loader.plugin_manifest("tdxquant")
-    assert manifest is not None
-    assert manifest["name"] == "tdxquant"
-    assert manifest["display_name"] == "TdxQuant (TdxAiData)"
-    assert set(manifest["datasets"]) == {"realtime", "depth5", "daily", "adj_factor", "minute", "full_minute"}
-    # 计费标识与 Key/积分管理页 (设置页积分角标 + 商城入口的契约来源)
-    assert manifest["billing"] == "points"
-    assert manifest["key_manage_url"].startswith("https://vip.tdx.com.cn/")
-    # 计费提示与使用要点 (设置页警示框 + 详情列表的契约来源)
-    assert "积分" in manifest["billing_note"] and "间隔" in manifest["billing_note"]
-    assert len(manifest["usage_notes"]) >= 4
-    assert any("快照" in n for n in manifest["usage_notes"])
-    module_path, _, class_name = manifest["entry"].partition(":")
-    provider_cls = getattr(import_module(module_path), class_name)
-    assert provider_cls.name == "tdxquant"
-
-
-def test_loader_probe_plugin_key_dispatch(monkeypatch):
-    from app.data_providers.custom import loader
-
-    monkeypatch.setattr(tp, "probe_api_key", lambda key: (key == "good", "ok" if key == "good" else "bad"))
-    assert loader.probe_plugin_key("tdxquant", "good") == (True, "ok")
-    assert loader.probe_plugin_key("tdxquant", "bad") == (False, "bad")
-
-
-def test_close_resets_client():
-    fake = _FakeClient()
-    p = _provider(fake)
-    p.close()
-    assert p._client is None

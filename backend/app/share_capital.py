@@ -2,6 +2,7 @@
 
 财务股本按公告日可用，历史缺失时回退 instruments 最新流通股本。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -11,17 +12,19 @@ import polars as pl
 
 
 def load_share_history(data_dir: Path) -> pl.DataFrame:
-    """读取本地财务股本表；未同步或损坏时返回空表。"""
-    path = data_dir / "financials" / "shares" / "part.parquet"
-    if not path.exists():
-        return pl.DataFrame()
+    """读取财务股本表（CK 唯一读源）；未同步或损坏时返回空表。
+
+    ``data_dir`` 仅为兼容既有调用方签名保留。
+    """
     try:
-        shares = pl.read_parquet(path)
-        if not {"symbol", "period_end", "float_shares"} <= set(shares.columns):
-            return pl.DataFrame()
-        return shares
-    except Exception:
+        from app.services.financial_sync import get_financial_df
+
+        shares = get_financial_df(data_dir, "shares")
+    except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         return pl.DataFrame()
+    if shares.is_empty() or not {"symbol", "period_end", "float_shares"} <= set(shares.columns):
+        return pl.DataFrame()
+    return shares
 
 
 def apply_historical_float_shares(
@@ -56,8 +59,7 @@ def apply_historical_float_shares(
         available_date = as_date_expr("announce_date").fill_null(available_date)
 
     history = (
-        shares
-        .select(
+        shares.select(
             pl.col("symbol").cast(pl.Utf8),
             available_date.alias("_share_available_date"),
             pl.col("period_end").cast(pl.Utf8).alias("_share_period_end"),
@@ -76,8 +78,7 @@ def apply_historical_float_shares(
         return rows
 
     resolved = (
-        rows
-        .with_row_index("_share_row_order")
+        rows.with_row_index("_share_row_order")
         .with_columns(
             pl.col("symbol").cast(pl.Utf8),
             pl.col("date").cast(pl.Date, strict=False).alias("_share_trade_date"),
@@ -94,9 +95,7 @@ def apply_historical_float_shares(
         .with_columns(
             pl.when(pl.col("_share_trade_date") == pl.lit(today))
             .then(pl.col("float_shares"))
-            .otherwise(
-                pl.coalesce("_historical_float_shares", "float_shares")
-            )
+            .otherwise(pl.coalesce("_historical_float_shares", "float_shares"))
             .alias("float_shares")
         )
         .sort("_share_row_order")

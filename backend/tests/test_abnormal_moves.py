@@ -1,10 +1,13 @@
 """异动边缘统计测试 — 偏离列附着 + 规则口径 + 快照接近度。"""
+
 from __future__ import annotations
 
 from datetime import date, timedelta
 
 import polars as pl
+import pytest
 
+from app.indicators import pipeline as _pipeline
 from app.indicators.pipeline import (
     attach_deviation_columns,
     attach_deviation_columns_today,
@@ -22,6 +25,18 @@ from app.services.abnormal_moves import (
     rule_for,
 )
 
+_CK = {"store": None}
+
+
+@pytest.fixture(autouse=True)
+def _ck(ck_runtime):
+    """基准指数偏离列读 CK kline_index_daily; 清进程内 TTL 缓存避免串用例。"""
+    _CK["store"] = ck_runtime
+    _pipeline._benchmark_cache.clear()
+    yield
+    _CK["store"] = None
+    _pipeline._benchmark_cache.clear()
+
 
 def _write_index_daily(tmp_path, rows: list[tuple[str, date, float]]) -> None:
     df = pl.DataFrame(
@@ -34,7 +49,10 @@ def _write_index_daily(tmp_path, rows: list[tuple[str, date, float]]) -> None:
     for dt in sorted({r[1] for r in rows}):
         target = tmp_path / "kline_index_daily" / f"date={dt.isoformat()}"
         target.mkdir(parents=True, exist_ok=True)
-        df.filter(pl.col("date") == dt).write_parquet(target / "part.parquet")
+        day_df = df.filter(pl.col("date") == dt)
+        day_df.write_parquet(target / "part.parquet")
+        if _CK["store"] is not None:
+            _CK["store"].write_daily("kline_index_daily", day_df)
 
 
 def test_attach_deviation_columns_math(tmp_path) -> None:
@@ -78,8 +96,14 @@ def test_attach_deviation_columns_missing_benchmark(tmp_path) -> None:
 
 # ── 盘中路径: 今日基准动量外推 + 单日帧偏离附着 ──────────────────
 
-_BENCH_DAYS = [date(2026, 8, 11), date(2026, 8, 12), date(2026, 8, 13),
-               date(2026, 8, 14), date(2026, 8, 15), date(2026, 8, 18)]
+_BENCH_DAYS = [
+    date(2026, 8, 11),
+    date(2026, 8, 12),
+    date(2026, 8, 13),
+    date(2026, 8, 14),
+    date(2026, 8, 15),
+    date(2026, 8, 18),
+]
 
 
 def _write_sh_bench(tmp_path) -> None:
@@ -94,7 +118,7 @@ def test_benchmark_momentum_today_math(tmp_path) -> None:
     quotes = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [10.0]})
 
     out = benchmark_momentum_today(tmp_path, quotes)
-    row = out.row(0, named=True)
+    row = out.row(0, named=True)  # type: ignore[union-attr]
     # 今收 = 15 x 1.10 = 16.5; 3 个交易日前的收盘 = 13 (与全量路径 shift(3) 同口径)
     # mom3d = 16.5/13 - 1
     assert abs(row["bench_mom3d"] - (16.5 / 13 - 1)) < 1e-9
@@ -104,7 +128,7 @@ def test_benchmark_momentum_today_math(tmp_path) -> None:
 
     # 无实时行情 → rt 按 0 处理: mom3d = 15/13 - 1
     out0 = benchmark_momentum_today(tmp_path, None)
-    assert abs(out0.row(0, named=True)["bench_mom3d"] - (15.0 / 13 - 1)) < 1e-9
+    assert abs(out0.row(0, named=True)["bench_mom3d"] - (15.0 / 13 - 1)) < 1e-9  # type: ignore[union-attr]
 
 
 def test_benchmark_momentum_today_percent_not_treated_as_decimal(tmp_path) -> None:
@@ -114,7 +138,7 @@ def test_benchmark_momentum_today_percent_not_treated_as_decimal(tmp_path) -> No
     quotes = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [-1.88]})
 
     out = benchmark_momentum_today(tmp_path, quotes)
-    row = out.row(0, named=True)
+    row = out.row(0, named=True)  # type: ignore[union-attr]
     # 今收 = 15 x (1 - 0.0188) = 14.718; mom3d = 14.718/13 - 1
     assert abs(row["bench_mom3d"] - (15.0 * 0.9812 / 13 - 1)) < 1e-9
 
@@ -130,7 +154,7 @@ def test_benchmark_momentum_today_excludes_today_rows(tmp_path) -> None:
     _write_index_daily(tmp_path, rows)
 
     out = benchmark_momentum_today(tmp_path, None)
-    assert abs(out.row(0, named=True)["bench_mom3d"] - (15.0 / 13 - 1)) < 1e-9
+    assert abs(out.row(0, named=True)["bench_mom3d"] - (15.0 / 13 - 1)) < 1e-9  # type: ignore[union-attr]
 
 
 def test_attach_deviation_columns_today(tmp_path) -> None:
@@ -184,7 +208,7 @@ def test_attach_deviation_columns_no_bench_close_leak(tmp_path) -> None:
     out = attach_deviation_columns(stock, tmp_path)
     assert "bench_close" not in out.columns
     frame = load_benchmark_momentum(tmp_path)
-    assert "bench_close" in frame.columns
+    assert "bench_close" in frame.columns  # type: ignore[union-attr]
 
 
 def test_board_and_st_rules() -> None:
@@ -222,9 +246,7 @@ class _FakeRepo:
 
 class _FakeQuotes:
     def get_index_quotes(self):
-        return pl.DataFrame(
-            {"symbol": ["000001.SH"], "close": [3300.0], "prev_close": [3270.0]}
-        )
+        return pl.DataFrame({"symbol": ["000001.SH"], "close": [3300.0], "prev_close": [3270.0]})
 
 
 class _PercentQuotes:
@@ -374,10 +396,12 @@ def test_build_overview_negative_side_stricter_threshold() -> None:
 
 # ── 监控规则接入 (type=abnormal) ────────────────────────
 
-import pytest
+import pytest  # noqa: E402 - E402: 延迟导入避免循环依赖/降低启动开销
 
-from app.strategy import monitor_rules
-from app.strategy.monitor import MonitorRuleEngine
+from app.strategy import monitor_rules  # noqa: E402 - E402: 延迟导入避免循环依赖/降低启动开销
+from app.strategy.monitor import (  # noqa: E402 - fixture 内延迟导入
+    MonitorRuleEngine,
+)
 
 
 def _ab_rule(**overrides) -> dict:
@@ -397,17 +421,32 @@ def _ab_rule(**overrides) -> dict:
     return rule
 
 
-def _row(symbol: str, *wins: tuple[str, float], name: str = "股A",
-         board: str = "主板", rt_pct: float = 0.05) -> dict:
+def _row(
+    symbol: str,
+    *wins: tuple[str, float],
+    name: str = "股A",
+    board: str = "主板",
+    rt_pct: float = 0.05,
+) -> dict:
     # wins: (窗口, 偏离值) — 阈值按交易所口径: 主板 3d=0.2, 10d=1.0, 30d=2.0
     thresholds = {"3d": 0.2, "10d": 1.0, "30d": 2.0}
     windows = {
-        key: {"value": value, "threshold": thresholds[key],
-              "closeness": round(abs(value) / thresholds[key], 4)}
+        key: {
+            "value": value,
+            "threshold": thresholds[key],
+            "closeness": round(abs(value) / thresholds[key], 4),
+        }
         for key, value in wins
     }
-    return {"symbol": symbol, "name": name, "board": board, "st": False,
-            "close": 10.0, "rt_pct": rt_pct, "windows": windows}
+    return {
+        "symbol": symbol,
+        "name": name,
+        "board": board,
+        "st": False,
+        "close": 10.0,
+        "rt_pct": rt_pct,
+        "windows": windows,
+    }
 
 
 def test_abnormal_rule_validation_and_defaults() -> None:
@@ -490,10 +529,12 @@ def test_engine_abnormal_direction_window_scope_filters() -> None:
     engine = MonitorRuleEngine()
     engine.set_rules([_ab_rule(scope="symbols", symbols=["600000.SH"])])
     engine.evaluate_abnormal(
-        [_row("600000.SH", ("3d", 0.10)), _row("000001.SZ", ("3d", 0.10))], now=1000.0,
+        [_row("600000.SH", ("3d", 0.10)), _row("000001.SZ", ("3d", 0.10))],
+        now=1000.0,
     )
     events = engine.evaluate_abnormal(
-        [_row("600000.SH", ("3d", 0.16)), _row("000001.SZ", ("3d", 0.19))], now=1006.0,
+        [_row("600000.SH", ("3d", 0.16)), _row("000001.SZ", ("3d", 0.19))],
+        now=1006.0,
     )
     assert [ev["symbol"] for ev in events] == ["600000.SH"]
 
@@ -509,13 +550,14 @@ def test_engine_abnormal_down_direction_event_type() -> None:
 
 # ── 板块基准路由: 科创板→科创50, 创业板→创业板综指 (交易所官方对应指数) ──
 
+
 def test_attach_deviation_columns_board_routing(tmp_path) -> None:
     """科创板股票减科创50、创业板股票减创业板综指, 不再共用交易所 A 指。
 
     构造 68/30 前缀股票 close 与各自官方基准同序列 → 偏离恰为 0。
     """
     days = [date(2026, 8, 13), date(2026, 8, 14), date(2026, 8, 15), date(2026, 8, 18)]
-    rows = [("000688.SH", d, 100.0 + i) for i, d in enumerate(days)]       # 科创50
+    rows = [("000688.SH", d, 100.0 + i) for i, d in enumerate(days)]  # 科创50
     rows += [("399102.SZ", d, 200.0 + 5 * i) for i, d in enumerate(days)]  # 创业板综指
     _write_index_daily(tmp_path, rows)
 
@@ -557,11 +599,11 @@ def test_benchmark_momentum_today_gem_key(tmp_path) -> None:
     quotes = pl.DataFrame({"symbol": ["399102.SZ"], "change_pct": [10.0]})  # 百分数: +10%
 
     out = benchmark_momentum_today(tmp_path, quotes)
-    gem = out.filter(pl.col("bench_key") == "GEM")
+    gem = out.filter(pl.col("bench_key") == "GEM")  # type: ignore[union-attr]
     assert gem.height == 1
     assert abs(gem["bench_mom3d"][0] - (15.0 * 1.10 / 13 - 1)) < 1e-9
     # 其他键 (如 SH) 候选不在实时缓存 → rt=0, 用昨收外推
-    sh = out.filter(pl.col("bench_key") == "SH")
+    sh = out.filter(pl.col("bench_key") == "SH")  # type: ignore[union-attr]
     assert sh.height == 1
     assert abs(sh["bench_mom3d"][0] - (15.0 / 13 - 1)) < 1e-9
 

@@ -1,0 +1,43 @@
+---
+description: "Redis 缓存接入规范：CacheBackend 介质可切换、Arrow IPC 序列化、命名空间与 generation 契约（tsp 项目 CacheBackend → RedisCacheBackend）"
+globs: backend/app/**/*.py, backend/tests/**/*.py
+alwaysApply: false
+---
+# Redis（CacheBackend）规范
+
+## 架构约束
+- **业务代码只依赖 `CacheBackend` 接口（Protocol），不直接持有 Redis 客户端**；介质可在 `memory` ↔ `redis` 间无感切换
+- 选择方式：`CACHE_BACKEND=memory|redis` + `CACHE_REDIS_URL`，与存储层解耦、可独立切换
+- 默认实现 `MemoryCacheBackend`（单进程，零序列化）；多进程/多实例场景才用 `RedisCacheBackend`
+
+## 接口契约（必须保持一致语义，见 `app/storage/cache.py` CacheBackend Protocol）
+- `get(key) -> pl.DataFrame | None` / `set(key, df, ttl_s=None)`：值类型统一用 Polars DataFrame
+- `get_json(key) -> dict | None` / `set_json(key, value, ttl_s=None)`：JSON 值
+- `invalidate(prefix)` / `clear()`：按前缀批量失效或整体清空
+- `generation(name) -> int` / `bump(name) -> int`：命名空间版本快照 + 递增强制失效
+
+## 键名与命名空间
+- 键名约定 `命名空间:标识`（如 `enriched:latest`、`pool:CSS300`）；**命名空间就是 generation 的作用域**，`invalidate(generation)` 都以此切分
+- 增删键名时先确认命名空间归属，避免覆盖其他模块缓存
+
+## 序列化（安全关键）
+- DataFrame 一律用 **Arrow IPC**，dict 用 **JSON**；**严禁使用 pickle**（安全与跨语言兼容风险）
+- 介质可替换，接口不得泄漏 Polars 之外的特殊类型，保证切换 Redis 后行为一致
+
+## generation / bump 契约
+- 语义：`_put` 写入时记录当前 `generation(name)`；`bump(name)` 把版本 +1 并**立即清掉所有 `generation < 新值` 的条目**，防止旧数据滞留
+- 读取时 `_live` 会同时校验 TTL 与 `generation`，过期/过期版本条目即刻剔除——切 Redis 后此语义必须保持
+- 跨进程一致性：切 Redis 后 `bump` 必须通过 **Redis 计数器** 实现（而非进程内变量），保证多实例同时失效
+- 线程安全：实时线程与请求线程会并发读写同一命名空间，实现需加锁/原子操作避免竞态
+
+## 命名空间与 TTL
+- `enriched:*`：enriched 最新日全量/区间历史，热路径逐秒读，跟随 `generation` 失效，不设 TTL
+- `live:*`：当日实时聚合结果，同 `generation`
+- `instruments:*`：标的清单/映射，可共享，同 `generation`
+- `pool:*`：标的池（CSI300/中证500/上证50/全A），TTL 1 天
+- `ai:*`：AI 对话/生成结果，按用途（对话 24h / 生成 7d）
+
+## 性能与定位
+- **CK 之上必须有缓存层**——不要对每次查询直连 CK；页面实时性依赖缓存命中率
+- 缓存只承载「可重建」数据（远程接口结果、AI 结果、派生中间态），不做权威数据源
+- 自选分组、标的池成员这类「用户配置 + 远程缓存」归 CacheBackend，不要建 CK 表

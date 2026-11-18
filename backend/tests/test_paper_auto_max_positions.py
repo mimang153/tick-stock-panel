@@ -5,6 +5,7 @@
 - 已持仓标的加仓不受限; 卖出信号不受限
 - max_positions = 0 (默认) 不限制
 """
+
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
@@ -35,9 +36,14 @@ def _market_session(monkeypatch):
 
 def _rule(**over) -> dict:
     base = {
-        "name": "跟策略", "match_kind": "strategy", "match_id": "strat_1",
-        "side": "buy", "size_mode": "fixed_amount", "size_value": 10000,
-        "order_type": "market", "cooldown_days": 0,
+        "name": "跟策略",
+        "match_kind": "strategy",
+        "match_id": "strat_1",
+        "side": "buy",
+        "size_mode": "fixed_amount",
+        "size_value": 10000,
+        "order_type": "market",
+        "cooldown_days": 0,
     }
     base.update(over)
     return base
@@ -68,7 +74,7 @@ def test_max_positions_allows_rebuy_held_symbol(data_dir: Path):
     paper_auto.create_auto_rule(data_dir, _rule(max_positions=1))
 
     assert len(paper_auto.on_rule_events(data_dir, [_ev(SYM)])) == 1
-    paper.evaluate_intraday(data_dir, {SYM: 10.0})          # 成交建仓 (1万/10元 = 1000股)
+    paper.evaluate_intraday(data_dir, {SYM: 10.0})  # 成交建仓 (1万/10元 = 1000股)
     assert paper.load_positions(data_dir)[SYM]["qty"] == 1000
     assert len(paper_auto.on_rule_events(data_dir, [_ev(SYM)])) == 1  # 加仓通过
     paper.evaluate_intraday(data_dir, {SYM: 10.0})
@@ -83,7 +89,8 @@ def test_max_positions_pending_buy_occupies_slot(data_dir: Path):
     created = paper_auto.on_rule_events(data_dir, [_ev(SYM), _ev(SYM2, 12.0)])
     # 同批: 第一单 pending 占槽 → 第二标的跳过
     assert len(created) == 1 and created[0]["order_type"] == "next_open"
-    assert paper.get_order(data_dir, created[0]["id"])["status"] == "pending"
+    assert created is not None
+    assert paper.get_order(data_dir, created[0]["id"])["status"] == "pending"  # type: ignore[index]
 
 
 def test_max_positions_zero_means_unlimited(data_dir: Path):
@@ -123,7 +130,13 @@ def test_rule_validation_rejects_bad_max_positions(tmp_path: Path):
 
 
 def _ev_typed(etype: str, symbol: str, price: float = 10.0) -> dict:
-    return {"source": "strategy", "strategy_id": "strat_1", "type": etype, "symbol": symbol, "price": price}
+    return {
+        "source": "strategy",
+        "strategy_id": "strat_1",
+        "type": etype,
+        "symbol": symbol,
+        "price": price,
+    }
 
 
 def test_auto_side_follows_signal_direction(data_dir: Path, monkeypatch):
@@ -168,7 +181,9 @@ def test_auto_side_rejects_non_strategy_match(tmp_path: Path):
     with pytest.raises(ValueError, match="auto"):
         paper_auto.create_auto_rule(tmp_path, _rule(side="auto", match_kind="rule"))
     # normalize: strategy 缺 side → auto; rule 缺 side → buy (存量兼容)
-    no_side = _rule(); no_side.pop("side")
+    no_side = _rule()
+    no_side.pop("side")
     assert paper_auto.normalize_rule(no_side)["side"] == "auto"
-    no_side_r = _rule(match_kind="rule"); no_side_r.pop("side")
+    no_side_r = _rule(match_kind="rule")
+    no_side_r.pop("side")
     assert paper_auto.normalize_rule(no_side_r)["side"] == "buy"

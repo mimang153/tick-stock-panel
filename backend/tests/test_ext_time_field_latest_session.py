@@ -5,6 +5,7 @@
 都按 symbol 去重取一行。去重只看行序, 所以写入端必须保证分区内按时间列升序:
 合并去重后的行序不稳定时, 各 symbol 取到的是随机一盘。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -42,13 +43,26 @@ def _symbols() -> list[str]:
     return [f"{i:06d}.SZ" for i in range(1, N_SYMBOLS + 1)]
 
 
-def _write_three_sessions(data_dir: Path) -> ExtConfig:
+def _write_three_sessions(data_dir: Path, ck=None) -> ExtConfig:
     """按真实拉取节奏逐盘写入: 每一盘一次 rows_to_parquet, 走合并去重分支。"""
     cfg = _config()
     ExtConfigStore(data_dir).upsert(cfg)
     for value, ts in enumerate(SESSIONS, start=1):
         rows = [{"symbol": sym, "ts": ts, "v": float(value)} for sym in _symbols()]
         rows_to_parquet(rows, cfg, data_dir, snapshot_date=DAY)
+        # 读侧走 CK read_ext_timeseries：逐盘同步写 CK（time_value=ts）
+        if ck is not None:
+            ck.write_ext_timeseries(
+                pl.DataFrame(
+                    {
+                        "ext_id": ["auction"] * len(rows),
+                        "symbol": [r["symbol"] for r in rows],
+                        "date": [DAY] * len(rows),
+                        "time_value": [ts] * len(rows),
+                        "v": [float(value)] * len(rows),
+                    }
+                )
+            )
     return cfg
 
 
@@ -61,8 +75,8 @@ def data_dir(tmp_path: Path) -> Path:
     return d
 
 
-def test_value_maps_take_latest_session_after_merge(data_dir):
-    _write_three_sessions(data_dir)
+def test_value_maps_take_latest_session_after_merge(data_dir, ck_runtime):
+    _write_three_sessions(data_dir, ck_runtime)
     repo = SimpleNamespace(store=SimpleNamespace(db=None, data_dir=data_dir))
 
     vmap = screener._load_ext_value_maps(repo, "auction.v")["auction__v"]
@@ -72,12 +86,14 @@ def test_value_maps_take_latest_session_after_merge(data_dir):
     assert picked == {3.0}, f"应全部取最新一盘 09:25 (v=3.0), 实际取到 {sorted(picked)}"
 
 
-def test_ext_factor_frame_takes_latest_session_after_merge(data_dir):
-    cfg = _write_three_sessions(data_dir)
+def test_ext_factor_frame_takes_latest_session_after_merge(data_dir, ck_runtime):
+    cfg = _write_three_sessions(data_dir, ck_runtime)
 
     frame = ext_factors._timeseries_frame(data_dir, cfg, cfg.fields)
 
-    value_col = next(c for c in frame.columns if c not in ("symbol", "_ext_date") and c.endswith("v"))
+    value_col = next(
+        c for c in frame.columns if c not in ("symbol", "_ext_date") and c.endswith("v")
+    )
     assert frame.height == N_SYMBOLS
     assert set(frame[value_col].to_list()) == {3.0}
 
@@ -92,7 +108,7 @@ def test_sector_flow_takes_latest_session_after_merge(data_dir):
     assert set(flow["_flow"].to_list()) == {3.0}
 
 
-def test_fresh_partition_sorted_even_if_upstream_returns_latest_first(data_dir):
+def test_fresh_partition_sorted_even_if_upstream_returns_latest_first(data_dir, ck_runtime):
     """首次落盘 (无旧分区, 不经合并去重): 上游按时间倒序返回也要按时间列升序落盘。"""
     cfg = _config()
     ExtConfigStore(data_dir).upsert(cfg)
@@ -103,6 +119,22 @@ def test_fresh_partition_sorted_even_if_upstream_returns_latest_first(data_dir):
     ]
     rows_to_parquet(rows, cfg, data_dir, snapshot_date=DAY)
     repo = SimpleNamespace(store=SimpleNamespace(db=None, data_dir=data_dir))
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    assert runtime is not None  # ck_runtime fixture 已初始化全局 runtime
+    ck = runtime.store
+    ck.write_ext_timeseries(
+        pl.DataFrame(
+            {
+                "ext_id": ["auction"] * len(rows),
+                "symbol": [r["symbol"] for r in rows],
+                "date": [DAY] * len(rows),
+                "time_value": [r["ts"] for r in rows],
+                "v": [r["v"] for r in rows],
+            }
+        )
+    )
 
     vmap = screener._load_ext_value_maps(repo, "auction.v")["auction__v"]
     assert vmap == {"000001.SZ": 3.0}

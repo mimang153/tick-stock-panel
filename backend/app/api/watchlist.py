@@ -1,18 +1,18 @@
 """自选 API。"""
+
 from __future__ import annotations
 
 import logging
-import math
 import time
+from collections.abc import Callable
 from datetime import UTC, date, datetime
-from typing import Callable, Literal
+from typing import Literal
 
 import anyio
 import polars as pl
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 
-from app.db_safe import quote_ident
 from app.market_time import CN_TZ, cn_today
 from app.price_limits import (
     polars_is_risk_warning_name,
@@ -115,7 +115,7 @@ def _with_names(rows: list[dict], request: Request) -> list[dict]:
         if not name_by_symbol:
             return rows
         return [{**row, "name": name_by_symbol.get(row.get("symbol"))} for row in rows]
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.debug("attach watchlist names failed: %s", e)
         return rows
 
@@ -167,10 +167,15 @@ def prepare_data(body: PrepareRequest, request: Request):
     if any(symbol not in saved for symbol in selected):
         raise HTTPException(400, "仅支持补齐已加入自选的标的")
     qs = getattr(request.app.state, "quote_service", None)
-    return {"results": daily_bootstrap.prepare(
-        request.app.state.repo, request.app.state.capabilities, selected, cn_today(),
-        on_updated=qs.notify_data_updated if qs else None,
-    )}
+    return {
+        "results": daily_bootstrap.prepare(
+            request.app.state.repo,
+            request.app.state.capabilities,
+            selected,
+            cn_today(),
+            on_updated=qs.notify_data_updated if qs else None,
+        )
+    }
 
 
 @router.post("/groups")
@@ -230,7 +235,7 @@ def ocr_status():
 
 
 @router.post("/import-image")
-async def import_from_image(request: Request, file: UploadFile = File(...)):
+async def import_from_image(request: Request, file: UploadFile = File(...)):  # noqa: B008 - B008: FastAPI Depends 默认值为框架惯例
     """从自选截图识别股票代码，返回候选列表（不自动写入自选）。"""
     content_type = (file.content_type or "").split(";")[0].strip().lower()
     filename = (file.filename or "").lower()
@@ -256,7 +261,7 @@ async def import_from_image(request: Request, file: UploadFile = File(...)):
         raise HTTPException(400, str(e)) from e
     except RuntimeError as e:
         raise HTTPException(503, str(e)) from e
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception("watchlist import-image failed")
         raise HTTPException(500, f"识别失败: {e}") from e
 
@@ -271,7 +276,7 @@ def _run_candidate_import(parse: Callable[[], dict], empty_msg: str) -> dict:
         result = parse()
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception("watchlist import failed")
         raise HTTPException(500, f"解析失败: {e}") from e
     if not result["candidates"]:
@@ -281,7 +286,7 @@ def _run_candidate_import(parse: Callable[[], dict], empty_msg: str) -> dict:
 
 
 @router.post("/import-csv")
-async def import_from_csv(request: Request, file: UploadFile = File(...)):
+async def import_from_csv(request: Request, file: UploadFile = File(...)):  # noqa: B008 - B008: FastAPI Depends 默认值为框架惯例
     """从 CSV / TXT 导入自选候选列表（不自动写入自选）。
 
     兼容同花顺/东财/通达信导出（逗号或 Tab 分隔、UTF-8 或 GBK 编码）。目标分组
@@ -348,7 +353,9 @@ def assign_group(symbol: str, req: GroupAssignRequest, request: Request):
 @router.post("/groups/{group_id}/transfer")
 def transfer_group_members(group_id: str, req: GroupTransferRequest, request: Request):
     try:
-        rows, changed = watchlist.transfer_members(group_id, req.target_group_id, req.symbols, req.action)
+        rows, changed = watchlist.transfer_members(
+            group_id, req.target_group_id, req.symbols, req.action
+        )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     return {"symbols": _with_names(rows, request), "changed": changed}
@@ -393,27 +400,65 @@ def clear_all():
 
 # 自选页需要的列
 _WATCHLIST_COLS = [
-    "symbol", "date", "close", "open", "high", "low", "prev_close", "volume", "quote_ts",
-    "change_pct", "change_amount", "amount",
+    "symbol",
+    "date",
+    "close",
+    "open",
+    "high",
+    "low",
+    "prev_close",
+    "volume",
+    "quote_ts",
+    "change_pct",
+    "change_amount",
+    "amount",
     "turnover_rate",
-    "amplitude", "annual_vol_20d",
+    "amplitude",
+    "annual_vol_20d",
     "vol_ratio_5d",
-    "ma5", "ma10", "ma20", "ma60",
-    "vol_ma5", "vol_ma10",
-    "high_60d", "low_60d",
-    "rsi_6", "rsi_14", "rsi_24",
-    "macd_dif", "macd_dea", "macd_hist",
-    "kdj_k", "kdj_d", "kdj_j",
-    "boll_upper", "boll_lower",
+    "ma5",
+    "ma10",
+    "ma20",
+    "ma60",
+    "vol_ma5",
+    "vol_ma10",
+    "high_60d",
+    "low_60d",
+    "rsi_6",
+    "rsi_14",
+    "rsi_24",
+    "macd_dif",
+    "macd_dea",
+    "macd_hist",
+    "kdj_k",
+    "kdj_d",
+    "kdj_j",
+    "boll_upper",
+    "boll_lower",
     "atr_14",
-    "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
-    "deviate_3d", "deviate_10d", "deviate_30d",
-    "consecutive_limit_ups", "consecutive_limit_downs",
-    "signal_limit_up", "signal_limit_down", "signal_volume_surge",
-    "signal_ma_golden_5_20", "signal_macd_golden", "signal_n_day_high",
-    "signal_boll_breakout_upper", "signal_ma20_breakout",
-    "signal_ma_dead_5_20", "signal_macd_dead", "signal_n_day_low",
-    "signal_boll_breakdown_lower", "signal_ma20_breakdown",
+    "momentum_5d",
+    "momentum_10d",
+    "momentum_20d",
+    "momentum_30d",
+    "momentum_60d",
+    "deviate_3d",
+    "deviate_10d",
+    "deviate_30d",
+    "consecutive_limit_ups",
+    "consecutive_limit_downs",
+    "signal_limit_up",
+    "signal_limit_down",
+    "signal_volume_surge",
+    "signal_ma_golden_5_20",
+    "signal_macd_golden",
+    "signal_n_day_high",
+    "signal_boll_breakout_upper",
+    "signal_ma20_breakout",
+    "signal_ma_dead_5_20",
+    "signal_macd_dead",
+    "signal_n_day_low",
+    "signal_boll_breakdown_lower",
+    "signal_ma20_breakdown",
 ]
 
 
@@ -465,7 +510,9 @@ def _added_base_closes(
     if len(in_range) < len(stock_targets):
         logger.debug(
             "自选加入后涨跌幅: %d/%d 只早于可查询历史 (%s 之前), 降级为 null",
-            len(stock_targets) - len(in_range), len(stock_targets), span_start,
+            len(stock_targets) - len(in_range),
+            len(stock_targets),
+            span_start,
         )
     if not in_range:
         return pl.DataFrame()
@@ -519,8 +566,12 @@ def watchlist_enriched(
     entries = watchlist.list_symbols()
     symbols = [r["symbol"] for r in entries]
     if not symbols:
-        return {"rows": [], "as_of": None, "elapsed_ms": 0,
-                "dates": {"stock": None, "etf": None, "index": None}}
+        return {
+            "rows": [],
+            "as_of": None,
+            "elapsed_ms": 0,
+            "dates": {"stock": None, "etf": None, "index": None},
+        }
 
     # 按资产拆分自选 symbol; ETF enriched 是独立缓存, 仅自选真的含 ETF 才去加载
     # (避免无 ETF 用户在缓存冷启动时触发 ETF 全量懒加载)
@@ -530,46 +581,14 @@ def watchlist_enriched(
     index_symbols = [s for s in symbols if s not in etf_set and s in index_set]
     stock_symbols = [s for s in symbols if s not in etf_set and s not in index_set]
 
-    df_e, cache_date = repo.get_enriched_latest()
-
-    # 以自选列表为主表 LEFT JOIN enriched, 保证自选的每一只都返回一行;
-    # 不在 enriched 缓存里的标的 (新股/冷门股/新用户未同步) 指标为 null, 前端渲染为 "—".
-    # 旧实现是 df_e.filter(is_in(stock_symbols)), 方向反了 (以 enriched 为主),
-    # 会把不在缓存 universe 里的自选静默丢弃.
-    if stock_symbols:
-        watchlist_df = pl.DataFrame({"symbol": stock_symbols})
-        if df_e.is_empty():
-            df = watchlist_df
-        else:
-            df = watchlist_df.join(_latest_watchlist_rows(df_e, stock_symbols), on="symbol", how="left")
-    else:
-        df = pl.DataFrame()
-
-    # ETF 行合并; 缺失列 (换手率/涨跌停信号等) 为 null
-    etf_date = None
-    if etf_symbols:
-        df_etf_all, etf_date = repo.get_enriched_latest_asset("etf")
-        etf_watchlist_df = pl.DataFrame({"symbol": etf_symbols})
-        if not df_etf_all.is_empty():
-            # ETF 同样以自选为主表 LEFT JOIN, 缺失标的指标为 null
-            df_etf = etf_watchlist_df.join(_latest_watchlist_rows(df_etf_all, etf_symbols), on="symbol", how="left")
-        else:
-            df_etf = etf_watchlist_df
-        df = df_etf if df.is_empty() else pl.concat([df, df_etf], how="diagonal_relaxed")
-
-    # 指数行合并 (镜像 ETF 分支); 缺失列 (换手率/涨跌停信号等) 为 null
-    index_date = None
-    if index_symbols:
-        df_idx_all, index_date = repo.get_enriched_latest_asset("index")
-        idx_watchlist_df = pl.DataFrame({"symbol": index_symbols})
-        if not df_idx_all.is_empty():
-            df_idx = idx_watchlist_df.join(_latest_watchlist_rows(df_idx_all, index_symbols), on="symbol", how="left")
-        else:
-            df_idx = idx_watchlist_df
-        df = df_idx if df.is_empty() else pl.concat([df, df_idx], how="diagonal_relaxed")
+    df, cache_date, etf_date, index_date = _watchlist_frames(
+        repo, stock_symbols, etf_symbols, index_symbols
+    )
 
     # as_of 取三类缓存中较旧者
-    dates = [d for d in (cache_date if stock_symbols else None, etf_date, index_date) if d is not None]
+    dates = [
+        d for d in (cache_date if stock_symbols else None, etf_date, index_date) if d is not None
+    ]
     as_of = min(dates) if dates else None
     # 按资产类型的行情日期 (ISO): as_of 是三类取 min 的全局值, 分不清哪类过期。
     # 前端分时缩略图续画据此判定「该类行情是否为当日」—— ETF 未开实时拉取时
@@ -581,9 +600,75 @@ def watchlist_enriched(
         "index": str(index_date) if index_date else None,
     }
     if df.is_empty():
-        return {"rows": [], "as_of": str(as_of) if as_of else None,
-                "elapsed_ms": 0, "dates": quote_dates}
+        return {
+            "rows": [],
+            "as_of": str(as_of) if as_of else None,
+            "elapsed_ms": 0,
+            "dates": quote_dates,
+        }
 
+    df, name_map = _watchlist_enrich_columns(repo, df, etf_symbols, index_symbols)
+
+    df = _watchlist_prepared_fallback(repo, df, name_map, stock_symbols, etf_symbols, index_symbols)
+
+    df = _watchlist_final_columns(df, as_of)
+    df = _watchlist_pct_since_added(df, repo, entries, symbols, stock_symbols)
+
+    ext_specs = _parse_ext_columns(ext_columns) if ext_columns else []
+    if ext_specs:
+        df = _watchlist_ext_join(df, ext_specs, repo.store.data_dir)
+
+    return _watchlist_final_response(request, df, symbols, as_of, quote_dates, t0)
+
+
+def _watchlist_frames(repo, stock_symbols, etf_symbols, index_symbols):
+    df_e, cache_date = repo.get_enriched_latest()
+
+    # 以自选列表为主表 LEFT JOIN enriched, 保证自选的每一只都返回一行;
+    # 不在 enriched 缓存里的标的 (新股/冷门股/新用户未同步) 指标为 null, 前端渲染为 "—".
+    # 旧实现是 df_e.filter(is_in(stock_symbols)), 方向反了 (以 enriched 为主),
+    # 会把不在缓存 universe 里的自选静默丢弃.
+    if stock_symbols:
+        watchlist_df = pl.DataFrame({"symbol": stock_symbols})
+        if df_e.is_empty():
+            df = watchlist_df
+        else:
+            df = watchlist_df.join(
+                _latest_watchlist_rows(df_e, stock_symbols), on="symbol", how="left"
+            )
+    else:
+        df = pl.DataFrame()
+
+    # ETF 行合并; 缺失列 (换手率/涨跌停信号等) 为 null
+    etf_date = None
+    if etf_symbols:
+        df_etf_all, etf_date = repo.get_enriched_latest_asset("etf")
+        etf_watchlist_df = pl.DataFrame({"symbol": etf_symbols})
+        if not df_etf_all.is_empty():
+            # ETF 同样以自选为主表 LEFT JOIN, 缺失标的指标为 null
+            df_etf = etf_watchlist_df.join(
+                _latest_watchlist_rows(df_etf_all, etf_symbols), on="symbol", how="left"
+            )
+        else:
+            df_etf = etf_watchlist_df
+        df = df_etf if df.is_empty() else pl.concat([df, df_etf], how="diagonal_relaxed")
+
+    # 指数行合并 (镜像 ETF 分支); 缺失列 (换手率/涨跌停信号等) 为 null
+    index_date = None
+    if index_symbols:
+        df_idx_all, index_date = repo.get_enriched_latest_asset("index")
+        idx_watchlist_df = pl.DataFrame({"symbol": index_symbols})
+        if not df_idx_all.is_empty():
+            df_idx = idx_watchlist_df.join(
+                _latest_watchlist_rows(df_idx_all, index_symbols), on="symbol", how="left"
+            )
+        else:
+            df_idx = idx_watchlist_df
+        df = df_idx if df.is_empty() else pl.concat([df, df_idx], how="diagonal_relaxed")
+    return df, cache_date, etf_date, index_date
+
+
+def _watchlist_enrich_columns(repo, df, etf_symbols, index_symbols):
     # JOIN float_shares (仅股票有) + 名称 (股票/ETF 统一走 get_name_map)
     df_i = repo.get_instruments()
     if not df_i.is_empty() and "float_shares" in df_i.columns:
@@ -597,31 +682,58 @@ def watchlist_enriched(
     # 标注资产类型: 前端据此渲染徽标/豁免板块筛选/分时列降级
     asset_map = {**{s: "etf" for s in etf_symbols}, **{s: "index" for s in index_symbols}}
     df = df.with_columns(
-        pl.col("symbol").replace_strict(asset_map, default="stock", return_dtype=pl.Utf8).alias("asset_type")
+        pl.col("symbol")
+        .replace_strict(asset_map, default="stock", return_dtype=pl.Utf8)
+        .alias("asset_type")
     )
+    return df, name_map
 
+
+def _watchlist_prepared_fallback(repo, df, name_map, stock_symbols, etf_symbols, index_symbols):
     # 定向补齐仅作缺失行回退，不把旧日K注入全市场实时快照。
     prepared_reader = getattr(repo, "get_prepared_daily", None)
-    if callable(prepared_reader):
-        parts = []
-        for asset, group in (("stock", stock_symbols), ("etf", etf_symbols), ("index", index_symbols)):
-            missing = df.filter(pl.col("symbol").is_in(group))
-            if "close" in missing.columns:
-                missing = missing.filter(pl.col("close").is_null())
-            if missing.height:
-                fallback = prepared_reader(asset, missing["symbol"].to_list())
-                if isinstance(fallback, pl.DataFrame) and not fallback.is_empty():
-                    parts.append(_latest_watchlist_rows(fallback, missing["symbol"].to_list()).with_columns(
-                        pl.lit(asset).alias("asset_type"), pl.lit(True).alias("prepared_daily"),
-                    ))
-        if parts:
-            prepared = pl.concat(parts, how="diagonal_relaxed")
-            df = pl.concat([df.filter(~pl.col("symbol").is_in(prepared["symbol"].to_list())), prepared], how="diagonal_relaxed")
-            # 回退行也由维表统一补名称/股本。
-            df = df.with_columns(pl.col("symbol").replace_strict(name_map, default=None, return_dtype=pl.Utf8).alias("name"))
+    if not callable(prepared_reader):
+        return df
+    parts = []
+    for asset, group in (
+        ("stock", stock_symbols),
+        ("etf", etf_symbols),
+        ("index", index_symbols),
+    ):
+        missing = df.filter(pl.col("symbol").is_in(group))
+        if "close" in missing.columns:
+            missing = missing.filter(pl.col("close").is_null())
+        if missing.height:
+            fallback = prepared_reader(asset, missing["symbol"].to_list())
+            if isinstance(fallback, pl.DataFrame) and not fallback.is_empty():
+                parts.append(
+                    _latest_watchlist_rows(fallback, missing["symbol"].to_list()).with_columns(
+                        pl.lit(asset).alias("asset_type"),
+                        pl.lit(True).alias("prepared_daily"),
+                    )
+                )
+    if parts:
+        prepared = pl.concat(parts, how="diagonal_relaxed")
+        df = pl.concat(
+            [df.filter(~pl.col("symbol").is_in(prepared["symbol"].to_list())), prepared],
+            how="diagonal_relaxed",
+        )
+        # 回退行也由维表统一补名称/股本。
+        df = df.with_columns(
+            pl.col("symbol")
+            .replace_strict(name_map, default=None, return_dtype=pl.Utf8)
+            .alias("name")
+        )
+    return df
 
+
+def _watchlist_final_columns(df, as_of):
     # 选择内置需要的列
-    keep = [c for c in _WATCHLIST_COLS + ["name", "float_shares", "asset_type", "prepared_daily"] if c in df.columns]
+    keep = [
+        c
+        for c in [*_WATCHLIST_COLS, "name", "float_shares", "asset_type", "prepared_daily"]
+        if c in df.columns
+    ]
     df = df.select(keep)
 
     # 涨跌停价 (交易所整数分半进位口径, 仅股票): prev_close/名称已在行上, 对自选的
@@ -633,7 +745,9 @@ def watchlist_enriched(
             as_of_date = date.fromisoformat(str(as_of)[:10])
         except ValueError:
             as_of_date = None
-    if {"symbol", "prev_close", "name", "asset_type"}.issubset(df.columns) and as_of_date is not None:
+    if {"symbol", "prev_close", "name", "asset_type"}.issubset(
+        df.columns
+    ) and as_of_date is not None:
         pct = polars_price_limit_pct(
             pl.col("symbol"),
             pl.lit(as_of_date),
@@ -650,7 +764,10 @@ def watchlist_enriched(
             .otherwise(None)
             .alias("limit_down_price"),
         )
+    return df
 
+
+def _watchlist_pct_since_added(df, repo, entries, symbols, stock_symbols):
     # 「加入日期」与「加入以来」— 与涨跌停价同为读时现算, 不落盘。只在这一处挂一次即
     # 覆盖 stock/etf/index 三分支。pct_since_added 为小数口径 (与 momentum_* 一致)。
     try:
@@ -684,80 +801,89 @@ def watchlist_enriched(
                 )
                 .drop("base_close")
             )
-    except Exception as e:
-        # 装饰列失败不得影响自选主表; 两列必须存在 (值可为 null), 否则前端排序/筛选静默失效
+    except Exception as e:  # noqa: BLE001 - 装饰列失败不得影响自选主表
+        # 两列必须存在 (值可为 null), 否则前端排序/筛选静默失效
         logger.warning("自选加入日期/加入后涨跌幅计算跳过: %s", e, exc_info=True)
         df = df.with_columns(
             pl.lit(None, dtype=pl.Utf8).alias("added_at"),
             pl.lit(None, dtype=pl.Float64).alias("pct_since_added"),
         )
+    return df
 
-    # 动态 JOIN 扩展数据表
-    ext_specs = _parse_ext_columns(ext_columns) if ext_columns else []
-    if ext_specs:
-        db = repo.store.db
-        data_dir = repo.store.data_dir
-        from app.api.ext_data import _read_ext_dataframe
-        from app.services.ext_data import ExtConfigStore, collapse_ext_rows_at
 
-        ext_store = ExtConfigStore(data_dir)
-        configs = {c.id: c for c in ext_store.load_all()}
+def _watchlist_ext_join(df, ext_specs, data_dir):
+    from app.api.ext_data import _read_ext_dataframe
+    from app.services.ext_data import ExtConfigStore, collapse_ext_rows_at
 
-        for config_id, field_name, at in ext_specs:
-            view_name = f"ext_{config_id}"
-            ext_col_name = f"{config_id}__{field_name}"
-            try:
-                # 扩展时序数据必须只取最新分区；否则一个 symbol 会按历史分区数被 JOIN 放大。
-                cfg = configs.get(config_id)
-                if cfg:
+    ext_store = ExtConfigStore(data_dir)
+    configs = {c.id: c for c in ext_store.load_all()}
+
+    for config_id, field_name, at in ext_specs:
+        ext_col_name = f"{config_id}__{field_name}"
+        try:
+            # 扩展时序数据必须只取最新分区；否则一个 symbol 会按历史分区数被 JOIN 放大。
+            # 配置未注册（无 CK 扩展表）→ 跳过该列；原 DuckDB 视图 fallback 已移除。
+            cfg = configs.get(config_id)
+            if not cfg:
+                continue
+            ext_df, _ = _read_ext_dataframe(cfg, data_dir)
+            if not ext_df.is_empty() and "symbol" in ext_df.columns:
+                time_field = cfg.pull.time_field if cfg and cfg.pull else None
+                # 收敛在 select 之前: 时间列被裁掉后 collapse 会静默回退末行
+                ext_df = (
+                    collapse_ext_rows_at(ext_df, at, time_field)
+                    .select(["symbol", field_name])
+                    .rename({field_name: ext_col_name})
+                )
+                df = df.join(ext_df.select(["symbol", ext_col_name]), on="symbol", how="left")
+        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+            # view 不存在或字段不存在，尝试直接读 parquet
+            cfg = configs.get(config_id)
+            if cfg:
+                try:
                     ext_df, _ = _read_ext_dataframe(cfg, data_dir)
-                else:
-                    ext_df = pl.from_arrow(db.query(
-                        f"SELECT symbol, {quote_ident(field_name)} FROM {view_name}"
-                    ).arrow())
-                if not ext_df.is_empty() and "symbol" in ext_df.columns:
-                    time_field = cfg.pull.time_field if cfg and cfg.pull else None
-                    # 收敛在 select 之前: 时间列被裁掉后 collapse 会静默回退末行
-                    ext_df = (
-                        collapse_ext_rows_at(ext_df, at, time_field)
-                        .select(["symbol", field_name])
-                        .rename({field_name: ext_col_name})
+                    if (
+                        not ext_df.is_empty()
+                        and "symbol" in ext_df.columns
+                        and field_name in ext_df.columns
+                    ):
+                        ext_df = (
+                            ext_df.select(["symbol", field_name])
+                            .unique(subset=["symbol"], keep="last")
+                            .rename({field_name: ext_col_name})
+                        )
+                        df = df.join(ext_df, on="symbol", how="left")
+                except Exception as e2:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+                    logger.debug(
+                        "ext join fallback failed for %s.%s: %s", config_id, field_name, e2
                     )
-                    df = df.join(ext_df.select(["symbol", ext_col_name]), on="symbol", how="left")
-            except Exception:
-                # view 不存在或字段不存在，尝试直接读 parquet
-                cfg = configs.get(config_id)
-                if cfg:
-                    try:
-                        ext_df, _ = _read_ext_dataframe(cfg, data_dir)
-                        if not ext_df.is_empty() and "symbol" in ext_df.columns and field_name in ext_df.columns:
-                            ext_df = (
-                                ext_df
-                                .select(["symbol", field_name])
-                                .unique(subset=["symbol"], keep="last")
-                                .rename({field_name: ext_col_name})
-                            )
-                            df = df.join(ext_df, on="symbol", how="left")
-                    except Exception as e2:
-                        logger.debug("ext join fallback failed for %s.%s: %s", config_id, field_name, e2)
+    return df
 
+
+def _watchlist_final_response(request, df, symbols, as_of, quote_dates, t0):
     # 最终输出也保证每标的一行，兼容旧名单或附加数据中的重复记录。
     df = df.unique(subset=["symbol"], keep="first", maintain_order=True)
 
     # sanitize NaN / Inf
     float_cols = [c for c in df.columns if df[c].dtype.is_float()]
     if float_cols:
-        df = df.with_columns([
-            pl.when(pl.col(c).is_nan() | pl.col(c).is_infinite())
-              .then(None)
-              .otherwise(pl.col(c))
-              .alias(c)
-            for c in float_cols
-        ])
+        df = df.with_columns(
+            [
+                pl.when(pl.col(c).is_nan() | pl.col(c).is_infinite())
+                .then(None)
+                .otherwise(pl.col(c))
+                .alias(c)
+                for c in float_cols
+            ]
+        )
 
     # 按自选添加顺序（新加的在前）重排行
     order_map = {s: i for i, s in enumerate(symbols)}
-    df = df.with_columns(pl.col("symbol").map_elements(lambda s: order_map.get(s, len(symbols)), return_dtype=pl.Int32).alias("_sort_order"))
+    df = df.with_columns(
+        pl.col("symbol")
+        .map_elements(lambda s: order_map.get(s, len(symbols)), return_dtype=pl.Int32)
+        .alias("_sort_order")
+    )
     df = df.sort("_sort_order").drop("_sort_order")
 
     rows = df.to_dicts()
@@ -767,8 +893,12 @@ def watchlist_enriched(
     for row in rows:
         row["quote_freshness"] = freshness.describe(row)
     elapsed = (time.perf_counter() - t0) * 1000
-    return {"rows": rows, "as_of": str(as_of) if as_of else None,
-            "elapsed_ms": elapsed, "dates": quote_dates}
+    return {
+        "rows": rows,
+        "as_of": str(as_of) if as_of else None,
+        "elapsed_ms": elapsed,
+        "dates": quote_dates,
+    }
 
 
 def _parse_ext_columns(ext_columns: str) -> list[tuple[str, str, str | None]]:

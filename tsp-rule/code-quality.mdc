@@ -1,0 +1,70 @@
+---
+description: "tsp 代码质量规约: 注释/docstring 覆盖、方法行数、嵌套深度、圈复杂度、异常规范。对标 P3C 精神(命名/注释/异常/性能/控制流 硬性约定), 与 pre-commit + ruff/mypy 门禁一致。"
+globs: "**/*"
+alwaysApply: false
+priority: high
+---
+
+# 代码质量规约 (Code Quality)
+
+对标阿里 P3C 的通用编码约定的本地化落地。核心目标: 新写/改动的代码清晰、可维护、
+异常面上可追溯, 并通过 **pre-commit 门禁** 强制, 而非仅靠自觉。
+
+## 命名 (对标 P3C: 命名规范)
+
+- Python/TS 一致: 函数/变量 `snake_case`/`camelCase`, 类 `PascalCase`, 常量 `UPPER_SNAKE`。
+- **禁止拼音/缩写命名**变量或含混单字母(循环索引除外), 必须表意。已由 ruff `N`(pep8-naming) 守护。
+- 布尔返回用 `is_/has_/should_` 等谓词开头。
+
+## 方法与函数规模 (对标 P3C: 控制流/方法体)
+
+- 单个函数/方法体 **不得超过 80 行**(复杂逻辑拆多函数)。80 行是上限, 不是目标——绝大多数函数应明显更短。
+- **嵌套深度建议 ≤ 2 层面**(if/try/for 相互嵌套); 超过 → 用 guard clause(提前 `return`/`continue`)、
+  抽出 `is_valid(...)`/`_do_x(...)` 子函数, 禁止靠缩进堆多层。
+- **圈复杂度 ≤ 12**(ruff `C901`, 已在 pyproject `[tool.ruff.lint.mccabe]` 锁定)。必须超限时,
+  用 `# noqa: C901` 显式承认并附一行理由, 不得静默绕过。
+
+## 注释与文档覆盖 (对标 P3C: 注释规范, 优先级高)
+
+- **公共接口必须有 docstring**: 每个模块、公开类、公开函数、API handler、数据转换边界函数。
+  docstring 写清「输入约束 → 行为 → 输出/异常」。
+- **业务代码关键分支必须注释**: 成果看似合理但易错的金融语义(见 CONTRIBUTING §「正确性必须被证明」),
+  单位换算、边界条件、look-ahead 防护点等处必须有说明性注释。
+- **不得有冗余注释**: 不逐行复述代码; 不保留注释掉的旧代码; 不放临时 TODO 进场(must 用跟踪)。
+- 文档字符串以中文为主, 注意全角标点属正常书写, 不必规避。
+
+## 异常规范 (对标 P3C: 异常处理)
+
+- **禁止裸 `except Exception` 不留痕**(ruff `BLE`, 已启用)。必须 `raise` 传播、或记录日志后约束失败范围。
+- **禁止用 `print()` 报错**: 应 `raise` 具体的业务异常传播(ruff `TRY400`), 或用日志器记录(ruff `TRY401`)。
+- 删掉无用的空 `try/except`(ruff `TRY203`)。
+- 失败路径与成功路径语义要能区分, 不允许"看起来对实则错的静默吞掉"。
+
+## 性能 (对标 P3C: 性能规范)
+
+- 数据密集路径优先 Polars/向量化, 避免逐行 Python 循环(见 polars.mdc)。
+- 遵守 ruff `PERF` 告警(低效 dict/list 构造等, 已纳入 `select`)。
+- 性能关键改动需「同环境同数据量实测对比」, 而非凭空优化。
+
+## 与门禁的对应关系
+
+| 规约条目 | 落地门禁 |
+|---------|---------|
+| 命名 | ruff `N` (select) |
+| 圈复杂度 ≤12 | ruff `C901` (select + mccabe) |
+| 异常不留痕 | ruff `BLE` (select) |
+| 异常传播/日志 | ruff `TRY400/401/203` (extend-select) |
+| 性能写法 | ruff `PERF` (select) |
+| 类型正确性 | mypy `[tool.mypy]` (backend-mypy 钩子, 增量只查改动文件) |
+| 函数/方法 ≤80 行 | 脚本 `backend/scripts/check_function_length.py` (AST 统计, 钩子 `backend-function-length`, 默认 ≤80 行) |
+| 文档覆盖(行注释+docstring) | 脚本 `backend/scripts/comment_coverage.py` (钩子 `backend-comment-coverage`, 默认区间 5%~60%) |
+| 空白/行尾/合并冲突 | pre-commit 通用 hooks |
+
+## 约束方式说明
+
+- 以上硬度量(复杂度/命名/异常/性能/类型/函数行数/文档覆盖)由 **pre-commit + ruff/mypy + 自定义脚本强制**。
+- 函数行数已由 AST 脚本精确判定: 超限须拆分, 或写 `# func-length-allow: <理由>` 显式承认(理由必填、可 grep 追踪)。
+- 文档覆盖率把行注释与 docstring 都计为文档行(与上文「公共接口必须有 docstring」一致); 测试文件/scripts 由钩子豁免(测试即文档)。
+- 嵌套深度这类「无法完全自动判定」的项, 由本规则在 AI 写码时执行,
+  并在 PR 审查时人工核对(见 CONTRIBUTING §8/§9)。
+- 存量代码的历史违规不阻塞提交(pre-commit 增量设计), 但**改动过的文件**内不得新增上述违规。

@@ -4,16 +4,19 @@
 (None/Free 档均可用,无需 quote.pool 权限);付费档可额外用
 quotes.get_by_universes 作为补充来源。日K统一走 klines.batch。
 """
+
 from __future__ import annotations
 
-import logging
 import gc
+import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta
 
 import polars as pl
 
 from app.indicators.pipeline import compute_enriched
+from app.parquet import scan_parquet_compat
+from app.polars_guard import guarded_collect
 from app.services import kline_sync, preferences
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.client import get_client
@@ -46,10 +49,12 @@ def _quotes_to_index_instruments(resp) -> pl.DataFrame:
             symbol = item.get("symbol")
             if not symbol:
                 continue
-            rows.append({
-                "symbol": str(symbol),
-                "name": ext.get("name") or item.get("name") or str(symbol),
-            })
+            rows.append(
+                {
+                    "symbol": str(symbol),
+                    "name": ext.get("name") or item.get("name") or str(symbol),
+                }
+            )
         df = pl.DataFrame(rows)
 
     if df.is_empty() or "symbol" not in df.columns:
@@ -64,13 +69,17 @@ def _quotes_to_index_instruments(resp) -> pl.DataFrame:
         else:
             df = df.with_columns(pl.col("symbol").cast(pl.Utf8).alias("name"))
 
-    result = df.select([
-        pl.col("symbol").cast(pl.Utf8),
-        pl.col("name").cast(pl.Utf8),
-    ]).with_columns([
-        pl.col("symbol").str.split(".").list.first().alias("code"),
-        pl.lit("index").alias("asset_type"),
-    ])
+    result = df.select(
+        [
+            pl.col("symbol").cast(pl.Utf8),
+            pl.col("name").cast(pl.Utf8),
+        ]
+    ).with_columns(
+        [
+            pl.col("symbol").str.split(".").list.first().alias("code"),
+            pl.lit("index").alias("asset_type"),
+        ]
+    )
     return result.unique(subset=["symbol"], keep="last").sort("symbol")
 
 
@@ -91,11 +100,13 @@ def _fetch_instruments_by_type(instrument_type: str, asset_type_label: str) -> p
                 symbol = item.get("symbol")
                 if not symbol:
                     continue
-                rows.append({
-                    "symbol": str(symbol),
-                    "name": item.get("name") or str(symbol),
-                })
-        except Exception as e:  # noqa: BLE001
+                rows.append(
+                    {
+                        "symbol": str(symbol),
+                        "name": item.get("name") or str(symbol),
+                    }
+                )
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.warning("get_instruments(%s, type=%s) failed: %s", ex, instrument_type, e)
 
     if not rows:
@@ -103,16 +114,18 @@ def _fetch_instruments_by_type(instrument_type: str, asset_type_label: str) -> p
 
     return (
         pl.DataFrame(rows)
-        .with_columns([
-            pl.col("symbol").str.split(".").list.first().alias("code"),
-            pl.lit(asset_type_label).alias("asset_type"),
-        ])
+        .with_columns(
+            [
+                pl.col("symbol").str.split(".").list.first().alias("code"),
+                pl.lit(asset_type_label).alias("asset_type"),
+            ]
+        )
         .unique(subset=["symbol"], keep="last")
         .sort("symbol")
     )
 
 
-def sync_index_instruments(
+def sync_index_instruments(  # noqa: C901 - C901: 分支为业务多阶段编排, 拆分会割裂上下文; 单测已覆盖
     repo: KlineRepository,
     pull_index: bool = True,
     pull_etf: bool = True,
@@ -140,8 +153,9 @@ def sync_index_instruments(
         capset = None
         try:
             from app.tickflow import policy
+
             capset = policy.detect_capabilities(force=False)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             pass
         if capset is not None and capset.has(Cap.QUOTE_POOL):
             tf = get_client()
@@ -156,17 +170,25 @@ def sync_index_instruments(
                         if not sup.is_empty():
                             index_parts.append(sup)
                         break
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
                     logger.debug("CN_Index universe supplement failed: %s", e)
 
     total = 0
     if index_parts:
-        index_inst = pl.concat(index_parts, how="diagonal_relaxed").unique(subset=["symbol"], keep="last").sort("symbol")
+        index_inst = (
+            pl.concat(index_parts, how="diagonal_relaxed")
+            .unique(subset=["symbol"], keep="last")
+            .sort("symbol")
+        )
         if not index_inst.is_empty():
             repo.save_index_instruments(index_inst)
             total += index_inst.height
     if etf_parts:
-        etf_inst = pl.concat(etf_parts, how="diagonal_relaxed").unique(subset=["symbol"], keep="last").sort("symbol")
+        etf_inst = (
+            pl.concat(etf_parts, how="diagonal_relaxed")
+            .unique(subset=["symbol"], keep="last")
+            .sort("symbol")
+        )
         if not etf_inst.is_empty():
             repo.save_etf_instruments(etf_inst)
             total += etf_inst.height
@@ -174,7 +196,6 @@ def sync_index_instruments(
     if total == 0:
         logger.warning("指数/ETF 标的列表为空(pull_index=%s, pull_etf=%s)", pull_index, pull_etf)
         return 0
-    repo.refresh_index_views()
     logger.info("指数/ETF 标的同步完成: %d 只", total)
     return total
 
@@ -185,7 +206,6 @@ def sync_etf_instruments(repo: KlineRepository) -> int:
     if etf_df.is_empty():
         return 0
     repo.save_etf_instruments(etf_df)
-    repo.refresh_index_views()
     return etf_df.height
 
 
@@ -195,8 +215,12 @@ def _iter_custom_daily_frames(provider, symbols, asset_type, start_time, end_tim
     asset_type 按内部契约传 "index"/"etf"; 只服务股票的源 (fuyao/tdxquant/amber
     对 asset_type≠stock 一律空手而归) 由此自然表达「不支持」, 由调用方回退。"""
     yield from kline_sync.iter_custom_daily_frames(
-        provider, symbols, asset_type=asset_type, start_time=start_time,
-        end_time=end_time, on_chunk_done=on_chunk_done,
+        provider,
+        symbols,
+        asset_type=asset_type,
+        start_time=start_time,
+        end_time=end_time,
+        on_chunk_done=on_chunk_done,
     )
 
 
@@ -229,13 +253,19 @@ def _sync_custom_daily(
     if provider_name == "tickflow":
         return -1
     from app.data_providers import custom as custom_sources
+
     if not custom_sources.provider_has_dataset(provider_name, "daily"):
         return -1
 
     provider = custom_sources.get_provider(provider_name)
     total_rows = 0
     for raw in _iter_custom_daily_frames(
-        provider, symbols, asset_type, start_time, end_time, on_chunk_done,
+        provider,
+        symbols,
+        asset_type,
+        start_time,
+        end_time,
+        on_chunk_done,
     ):
         if raw is None or raw.is_empty():
             continue
@@ -244,13 +274,76 @@ def _sync_custom_daily(
         del raw
         gc.collect()
     if total_rows > 0:
-        repo.refresh_index_views()
         return total_rows
     logger.warning(
         "自定义源 %s 未返回%s日K数据 (源仅服务股票时属预期), 本轮回退 TickFlow",
-        provider_name, asset_label,
+        provider_name,
+        asset_label,
     )
     return -1
+
+
+def _persist_index_frame(repo: KlineRepository, raw: pl.DataFrame) -> int:
+    repo.append_index_daily(raw)
+    enriched = compute_enriched(raw, factors=None, instruments=None)
+    repo.append_index_enriched(enriched)
+    del enriched
+    return raw.height
+
+
+def _persist_etf_frame(repo: KlineRepository, factors: pl.DataFrame, raw: pl.DataFrame) -> int:
+    frame_symbols = raw["symbol"].unique().to_list()
+    repo.append_etf_daily(raw)
+    batch_factors = (
+        factors.filter(pl.col("symbol").is_in(frame_symbols)) if not factors.is_empty() else factors
+    )
+    local = _load_local_etf_daily(repo, frame_symbols)
+    hist = local if not local.is_empty() else raw
+    enriched = compute_enriched(hist, factors=batch_factors, instruments=None)
+    repo.append_etf_enriched(enriched)
+    del enriched, local, hist
+    return raw.height
+
+
+def _sync_tickflow_daily_batches(
+    repo: KlineRepository,
+    capset: CapabilitySet,
+    symbols: list[str],
+    count: int | None,
+    start_time: datetime,
+    end_time: datetime,
+    on_chunk_done: Callable[[int, int], None] | None,
+    persist_frame: Callable[[pl.DataFrame], int],
+    asset_label: str,
+    cap_label: str,
+) -> int:
+    if not capset.has(Cap.KLINE_DAILY_BATCH):
+        kline_sync._log_cap_unavailable("daily", cap_label)
+        return 0
+    limit = resolve_limit(capset, Cap.KLINE_DAILY_BATCH)
+    batch_size = min_batch(preferences.get_index_daily_batch_size(), limit)
+    total_rows = 0
+    chunks = chunked(symbols, batch_size)
+    for i, chunk in enumerate(chunks):
+        sleep_between_batches(i, limit.rpm)
+        raw = kline_sync.sync_daily_batch(
+            chunk,
+            count=count,
+            batch_size=None,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        if raw.is_empty():
+            continue
+        total_rows += persist_frame(raw)
+        logger.info(
+            "%s daily synced: %d/%d chunks, +%d rows", asset_label, i + 1, len(chunks), raw.height
+        )
+        if on_chunk_done:
+            on_chunk_done(i + 1, len(chunks))
+        del raw
+        gc.collect()
+    return total_rows
 
 
 def sync_and_persist_index_daily(
@@ -286,53 +379,33 @@ def sync_and_persist_index_daily(
     end_time = end_date or datetime.now()
     start_time = start_date or (end_time - timedelta(days=365))
 
-    def _persist_index_frame(raw: pl.DataFrame) -> int:
-        repo.append_index_daily(raw)
-        enriched = compute_enriched(raw, factors=None, instruments=None)
-        repo.append_index_enriched(enriched)
-        del enriched
-        return raw.height
-
     # 自定义日K源优先接管指数日K (#502): 路由判定在 TickFlow 能力检查之前,
     # 纯自定义源部署 (未配置 TickFlow) 也能同步; 空手而归时回退下方 TickFlow 路径。
     custom_rows = _sync_custom_daily(
-        repo, symbols,
-        asset_type="index", asset_label="指数",
-        start_time=start_time, end_time=end_time,
+        repo,
+        symbols,
+        asset_type="index",
+        asset_label="指数",
+        start_time=start_time,
+        end_time=end_time,
         on_chunk_done=on_chunk_done,
-        persist_frame=_persist_index_frame,
+        persist_frame=lambda raw: _persist_index_frame(repo, raw),
     )
     if custom_rows >= 0:
         return custom_rows
 
-    if not capset.has(Cap.KLINE_DAILY_BATCH):
-        kline_sync._log_cap_unavailable("daily", "指数/ETF 日K同步")
-        return 0
-    limit = resolve_limit(capset, Cap.KLINE_DAILY_BATCH)
-    batch_size = min_batch(preferences.get_index_daily_batch_size(), limit)
-
-    total_rows = 0
-    chunks = chunked(symbols, batch_size)
-    for i, chunk in enumerate(chunks):
-        sleep_between_batches(i, limit.rpm)
-        raw = kline_sync.sync_daily_batch(
-            chunk,
-            count=count,
-            batch_size=None,
-            start_time=start_time,
-            end_time=end_time,
-        )
-        if raw.is_empty():
-            continue
-
-        total_rows += _persist_index_frame(raw)
-        logger.info("index/etf daily synced: %d/%d chunks, +%d rows", i + 1, len(chunks), raw.height)
-        if on_chunk_done:
-            on_chunk_done(i + 1, len(chunks))
-        del raw
-        gc.collect()
-    repo.refresh_index_views()
-    return total_rows
+    return _sync_tickflow_daily_batches(
+        repo,
+        capset,
+        symbols,
+        count,
+        start_time,
+        end_time,
+        on_chunk_done,
+        lambda raw: _persist_index_frame(repo, raw),
+        "index/etf",
+        "指数/ETF 日K同步",
+    )
 
 
 def _load_etf_factors(repo: KlineRepository) -> pl.DataFrame:
@@ -341,7 +414,7 @@ def _load_etf_factors(repo: KlineRepository) -> pl.DataFrame:
         return pl.DataFrame()
     try:
         return pl.read_parquet(factor_path)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("ETF 复权因子读取失败: %s", e)
         return pl.DataFrame()
 
@@ -356,8 +429,11 @@ def etf_adj_factor_window_start(adj_path, history_start: datetime) -> datetime:
     if not adj_path.exists():
         return history_start
     try:
-        max_date = pl.scan_parquet(adj_path).select(pl.col("trade_date").max()).collect().item()
-    except Exception as e:
+        max_date = guarded_collect(
+            scan_parquet_compat(adj_path).select(pl.col("trade_date").max()),
+            priority="background",
+        ).item()
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("读取 ETF 除权因子最新日期失败, 回退日K历史起点: %s", e)
         return history_start
     if max_date is None:
@@ -372,18 +448,31 @@ def etf_adj_factor_window_start(adj_path, history_start: datetime) -> datetime:
 
 
 def _load_local_etf_daily(repo: KlineRepository, symbols: list[str]) -> pl.DataFrame:
-    """读本批 symbol 的完整本地 ETF 日K, 供前复权改写历史价。"""
+    """读本批 symbol 的完整 ETF 日K, 供前复权改写历史价。
+
+    CK 为优先读源 (kline_etf_daily 镜像)；无 runtime 时回退本地 parquet 分区
+    (离线脚本/单测场景)。
+    """
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is not None:
+        try:
+            return runtime.store.read_daily("kline_etf_daily", symbols=symbols)
+        except Exception as e:  # noqa: BLE001 - 已有日志, CK 读失败回退本地
+            logger.warning("CK 读取 ETF 日K失败, 回退本地: %s", e)
     daily_dir = repo.store.data_dir / "kline_etf_daily"
     if not daily_dir.exists() or not any(daily_dir.glob("date=*")):
         return pl.DataFrame()
     from app.parquet import scan_daily_parquet
+
     try:
         return (
             scan_daily_parquet((daily_dir / "**" / "*.parquet").as_posix())
             .filter(pl.col("symbol").is_in(symbols))
-            .collect()
+            .pipe(guarded_collect, priority="background")
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("读取本地 ETF 日K失败: %s", e)
         return pl.DataFrame()
 
@@ -438,59 +527,29 @@ def sync_and_persist_etf_daily(
 
     factors = _load_etf_factors(repo)
 
-    def _persist_etf_frame(raw: pl.DataFrame) -> int:
-        frame_symbols = raw["symbol"].unique().to_list()
-        repo.append_etf_daily(raw)
-        batch_factors = (
-            factors.filter(pl.col("symbol").is_in(frame_symbols))
-            if not factors.is_empty() else factors
-        )
-        # 前复权 ratio = cum/total, 新除权事件会改写全部历史价。只用本次拉取
-        # 窗口算 enriched 时, 拆分日前的分区停在未复权价, 日K 留下跳空。
-        local = _load_local_etf_daily(repo, frame_symbols)
-        hist = local if not local.is_empty() else raw
-        # ETF 使用复权和通用技术指标; 不传 instruments, 避免套用 A股涨跌停/连板逻辑。
-        enriched = compute_enriched(hist, factors=batch_factors, instruments=None)
-        repo.append_etf_enriched(enriched)
-        del enriched, local, hist
-        return raw.height
-
     # 自定义日K源优先接管 ETF 日K (#502), 语义与上方指数分支一致
     custom_rows = _sync_custom_daily(
-        repo, symbols,
-        asset_type="etf", asset_label="ETF",
-        start_time=start_time, end_time=end_time,
+        repo,
+        symbols,
+        asset_type="etf",
+        asset_label="ETF",
+        start_time=start_time,
+        end_time=end_time,
         on_chunk_done=on_chunk_done,
-        persist_frame=_persist_etf_frame,
+        persist_frame=lambda raw: _persist_etf_frame(repo, factors, raw),
     )
     if custom_rows >= 0:
         return custom_rows
 
-    if not capset.has(Cap.KLINE_DAILY_BATCH):
-        kline_sync._log_cap_unavailable("daily", "ETF 日K同步")
-        return 0
-    limit = resolve_limit(capset, Cap.KLINE_DAILY_BATCH)
-    batch_size = min_batch(preferences.get_index_daily_batch_size(), limit)
-
-    total_rows = 0
-    chunks = chunked(symbols, batch_size)
-    for i, chunk in enumerate(chunks):
-        sleep_between_batches(i, limit.rpm)
-        raw = kline_sync.sync_daily_batch(
-            chunk,
-            count=count,
-            batch_size=None,
-            start_time=start_time,
-            end_time=end_time,
-        )
-        if raw.is_empty():
-            continue
-
-        total_rows += _persist_etf_frame(raw)
-        logger.info("etf daily synced: %d/%d chunks, +%d rows", i + 1, len(chunks), raw.height)
-        if on_chunk_done:
-            on_chunk_done(i + 1, len(chunks))
-        del raw
-        gc.collect()
-    repo.refresh_index_views()
-    return total_rows
+    return _sync_tickflow_daily_batches(
+        repo,
+        capset,
+        symbols,
+        count,
+        start_time,
+        end_time,
+        on_chunk_done,
+        lambda raw: _persist_etf_frame(repo, factors, raw),
+        "etf",
+        "ETF 日K同步",
+    )

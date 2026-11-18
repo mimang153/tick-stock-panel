@@ -7,7 +7,7 @@ from app.market_time import CN_TZ
 
 def _row(day="2026-11-06", time="10:00:00"):
     stamp = int(datetime.fromisoformat(f"{day}T{time}").replace(tzinfo=CN_TZ).timestamp() * 1000)
-    return {"symbol": "000985.SH", "date": day, "close": 100., "quote_ts": stamp}
+    return {"symbol": "000985.SH", "date": day, "close": 100.0, "quote_ts": stamp}
 
 
 @pytest.fixture
@@ -29,20 +29,23 @@ def test_intraday_outage_is_delayed_but_value_is_preserved(context):
     status = context.describe(row)
     assert status["state"] == "delayed"
     assert status["quote_ts"] == row["quote_ts"]
-    assert row["close"] == 100.
+    assert row["close"] == 100.0
 
 
 def test_daily_preparation_and_unknown_timestamp_are_never_live(context):
     assert context.describe({**_row(), "prepared_daily": True})["state"] == "historical"
-    assert context.describe({"date": "2026-11-06", "close": 100.})["state"] == "unknown"
+    assert context.describe({"date": "2026-11-06", "close": 100.0})["state"] == "unknown"
     assert context.describe({"symbol": "000985.SH"})["state"] == "missing"
 
 
-@pytest.mark.parametrize("now,trading", [
-    (datetime(2026, 11, 7, 10, tzinfo=CN_TZ), False),
-    (datetime(2026, 11, 6, 8, tzinfo=CN_TZ), True),
-    (datetime(2026, 10, 1, 10, tzinfo=CN_TZ), False),
-])
+@pytest.mark.parametrize(
+    "now,trading",
+    [
+        (datetime(2026, 11, 7, 10, tzinfo=CN_TZ), False),
+        (datetime(2026, 11, 6, 8, tzinfo=CN_TZ), True),
+        (datetime(2026, 10, 1, 10, tzinfo=CN_TZ), False),
+    ],
+)
 def test_weekend_preopen_and_holiday_do_not_claim_last_close_is_stale(now, trading):
     from app.services.quote_freshness import QuoteFreshness
 
@@ -72,15 +75,29 @@ def test_old_timestamp_is_not_hidden_by_current_partition_date(context):
     assert context.describe({**old, "date": date(2026, 11, 6)})["state"] == "stale"
 
 
-@pytest.mark.parametrize("asset,symbol", [("stock", "600519.SH"), ("etf", "159558.SZ"), ("index", "000985.SH")])
-def test_restarted_cache_preserves_each_asset_quote_timestamp(tmp_path, asset, symbol):
+@pytest.mark.parametrize(
+    "asset,symbol", [("stock", "600519.SH"), ("etf", "159558.SZ"), ("index", "000985.SH")]
+)
+def test_restarted_cache_preserves_each_asset_quote_timestamp(tmp_path, ck_runtime, asset, symbol):
     import polars as pl
 
     from app.tickflow.repository import DataStore, KlineRepository
 
     repo = KlineRepository(DataStore(tmp_path))
-    rows = pl.DataFrame([{**_row(), "symbol": symbol, "date": date(2026, 11, 6),
-                          "open": 100., "high": 101., "low": 99., "volume": 100., "amount": 10000.}])
+    rows = pl.DataFrame(
+        [
+            {
+                **_row(),
+                "symbol": symbol,
+                "date": date(2026, 11, 6),
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "volume": 100.0,
+                "amount": 10000.0,
+            }
+        ]
+    )
     repo.append_enriched_asset(asset, rows)
     # A new repository must recover provenance from existing compatible Parquets.
     restarted = KlineRepository(DataStore(tmp_path))

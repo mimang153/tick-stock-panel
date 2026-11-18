@@ -2,7 +2,9 @@
 
 修改、调试或审查本仓库前，必须完整阅读并遵循根目录的 [`CONTRIBUTING.md`](CONTRIBUTING.md)。其中定义了项目架构、数据契约、数据源插件化、缓存与性能要求、测试矩阵以及 PR 复审和合并标准。
 
-涉及代码二次开发、前端插槽、后端可替换策略、扩展注册或上游升级兼容时，还必须阅读 [`docs/secondary-development.md`](docs/secondary-development.md)。该文档区分当前已实现能力与目标扩展契约；不得根据设计示例虚构尚不存在的 API。
+涉及代码二次开发、前端插槽、后端可替换策略、扩展注册或上游升级兼容时，还必须阅读 [`docs/base_v1.0/secondary-development.md`](docs/base_v1.0/secondary-development.md)。该文档区分当前已实现能力与目标扩展契约；不得根据设计示例虚构尚不存在的 API。
+
+涉及 Pre-Commit、ruff、mypy、lint 等**代码质量门禁**的配置、阈值与豁免原则，还必须阅读 [`CONVENTIONS.md`](CONVENTIONS.md)。该文档是 CONTRIBUTING 在质量门禁层的落地补充，定义了软规约(tsp-rule)与硬门禁(pre-commit)的分工与实操流程；开发、提交或修改门禁配置前先查阅，避免新增被豁免的存量文件或误改阈值。
 
 同时遵守以下规则：
 

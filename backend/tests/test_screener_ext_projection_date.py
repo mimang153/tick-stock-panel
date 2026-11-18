@@ -9,6 +9,7 @@
 cached/cached-result) 按结果日期取分区, 该日期无分区时回退最新; as_of=None 的
 实时/自选/个股详情场景维持「最新分区」的当前值语义。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -38,7 +39,7 @@ def _config() -> ExtConfig:
 
 
 @pytest.fixture()
-def data_dir(tmp_path: Path) -> Path:
+def data_dir(tmp_path: Path, ck_runtime) -> Path:
     screener._ext_value_map_cache.clear()
     d = tmp_path / "data"
     d.mkdir()
@@ -91,16 +92,22 @@ def test_cached_payload_projection_matches_each_result_date(data_dir):
     cached = {
         "as_of": str(D1),
         "results": {
-            "daily": {"total": 2, "as_of": str(D1), "rows": [
-                {"symbol": "A.SZ", "date": str(D1)}, {"symbol": "B.SZ", "date": str(D1)}]},
-            "realtime": {"total": 2, "as_of": str(D2), "rows": [
-                {"symbol": "A.SZ", "date": str(D2)}, {"symbol": "B.SZ", "date": str(D2)}]},
+            "daily": {
+                "total": 2,
+                "as_of": str(D1),
+                "rows": [{"symbol": "A.SZ", "date": str(D1)}, {"symbol": "B.SZ", "date": str(D1)}],
+            },
+            "realtime": {
+                "total": 2,
+                "as_of": str(D2),
+                "rows": [{"symbol": "A.SZ", "date": str(D2)}, {"symbol": "B.SZ", "date": str(D2)}],
+            },
         },
         "today_ever_rows": {
             "daily": {"A.SZ": {"symbol": "A.SZ", "date": str(D1)}},
         },
     }
-    dates = {r.get("as_of") for r in cached["results"].values()} | {None}
+    dates = {r.get("as_of") for r in cached["results"].values()} | {None}  # type: ignore[attr-defined]
     maps = screener._ext_maps_for_dates(repo, "heat.rank", dates)
     payload = screener._cache_payload_with_ext(cached, maps)
 

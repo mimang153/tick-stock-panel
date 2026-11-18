@@ -22,51 +22,85 @@ RATIO_BEFORE = 1.0 / EX_FACTOR  # 前复权: 除权日前一日价格 * 1/1.25
 
 def _minute_frame(symbol: str, day: date, price: float, rows: int = 3) -> pl.DataFrame:
     base = datetime(day.year, day.month, day.day, 9, 30)
-    return pl.DataFrame({
-        "symbol": [symbol] * rows,
-        "datetime": [base.replace(minute=30 + i) for i in range(rows)],
-        "open": [price] * rows,
-        "high": [price * 1.01] * rows,
-        "low": [price * 0.99] * rows,
-        "close": [price] * rows,
-        "volume": [100.0] * rows,
-        "amount": [price * 100 * 100] * rows,  # volume(手)*100*price → VWAP=price
-    })
+    return pl.DataFrame(
+        {
+            "symbol": [symbol] * rows,
+            "datetime": [base.replace(minute=30 + i) for i in range(rows)],
+            "open": [price] * rows,
+            "high": [price * 1.01] * rows,
+            "low": [price * 0.99] * rows,
+            "close": [price] * rows,
+            "volume": [100.0] * rows,
+            "amount": [price * 100 * 100] * rows,  # volume(手)*100*price → VWAP=price
+        }
+    )
 
 
-def _write_factor_table(data_dir: Path, rows: list[tuple[str, date, float]]) -> None:
-    d = data_dir / "adj_factor"
+def _write_factor_table(
+    data_dir: Path, rows: list[tuple[str, date, float]], ck_runtime=None, *, etf=False
+) -> None:
+    d = data_dir / ("adj_factor_etf" if etf else "adj_factor")
     d.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame(
-        {"symbol": [r[0] for r in rows], "trade_date": [r[1] for r in rows], "ex_factor": [r[2] for r in rows]},
+    df = pl.DataFrame(
+        {
+            "symbol": [r[0] for r in rows],
+            "trade_date": [r[1] for r in rows],
+            "ex_factor": [r[2] for r in rows],
+        },
         schema={"symbol": pl.String, "trade_date": pl.Date, "ex_factor": pl.Float64},
-    ).write_parquet(d / "all.parquet")
+    )
+    df.write_parquet(d / "all.parquet")
+    if ck_runtime is not None:
+        # 因子读路径已切 CK: 同步写入带前缀的 CK 表
+        ck_runtime.write_adj_factor(df, etf=etf)
+        minute_adjust._factor_cache.clear()
 
 
-def _write_minute_partition(data_dir: Path, day: date, df: pl.DataFrame, etf: bool = False) -> None:
+def _write_minute_partition(
+    data_dir: Path, day: date, df: pl.DataFrame, etf: bool = False, ck_runtime=None
+) -> None:
     root = data_dir / ("kline_etf_minute" if etf else "kline_minute")
     part = root / f"date={day.isoformat()}"
     part.mkdir(parents=True, exist_ok=True)
     df.write_parquet(part / "part.parquet")
+    if ck_runtime is not None:
+        # repo.get_minute 已切 CK
+        ck_runtime.write_minute("kline_etf_minute" if etf else "kline_minute", df)
 
 
-def _write_daily_partition(data_dir: Path, day: date, closes: dict[str, float], etf: bool = False) -> None:
+def _write_daily_partition(
+    data_dir: Path,
+    day: date,
+    closes: dict[str, float],
+    etf: bool = False,
+    ck_runtime=None,
+) -> None:
     root = data_dir / ("kline_etf_daily" if etf else "kline_daily")
     part = root / f"date={day.isoformat()}"
     part.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame({
-        "symbol": list(closes.keys()),
-        "close": list(closes.values()),
-    }).write_parquet(part / "part.parquet")
+    df = pl.DataFrame(
+        {
+            "symbol": list(closes.keys()),
+            "close": list(closes.values()),
+        }
+    )
+    if ck_runtime is not None:
+        # 日K锚点读路径已切 CK: 同步写入带前缀的 CK 表（写入侧仍为本地分区）
+        ck_runtime.write_daily(
+            "kline_etf_daily" if etf else "kline_daily",
+            df.with_columns(pl.lit(day).alias("date")),
+        )
+    df.write_parquet(part / "part.parquet")
 
 
 # ================================================================
 # 复权投影数学
 # ================================================================
 
-def test_apply_adjustment_factor_math(tmp_path):
+
+def test_apply_adjustment_factor_math(tmp_path, ck_runtime):
     """除权日前的价格与 amount * ratio, 除权日起不动; volume 不变。"""
-    _write_factor_table(tmp_path, [(AA, EX_DATE, EX_FACTOR)])
+    _write_factor_table(tmp_path, [(AA, EX_DATE, EX_FACTOR)], ck_runtime=ck_runtime)
     df = pl.concat([_minute_frame(AA, date(2026, 6, 30), 10.0), _minute_frame(AA, EX_DATE, 8.0)])
     out = minute_adjust.apply_minute_adjustment(df, tmp_path, "stock")
 
@@ -80,16 +114,16 @@ def test_apply_adjustment_factor_math(tmp_path):
     assert abs(after["amount"][0] - 8.0 * 100 * 100) < 1e-6
 
 
-def test_apply_adjustment_vwap_consistency(tmp_path):
+def test_apply_adjustment_vwap_consistency(tmp_path, ck_runtime):
     """复权后 amount/(volume*100) 与复权 close 同口径 (均价线契约)。"""
-    _write_factor_table(tmp_path, [(AA, EX_DATE, EX_FACTOR)])
+    _write_factor_table(tmp_path, [(AA, EX_DATE, EX_FACTOR)], ck_runtime=ck_runtime)
     df = _minute_frame(AA, date(2026, 6, 30), 10.0)
     out = minute_adjust.apply_minute_adjustment(df, tmp_path, "stock")
     vwap = out["amount"][0] / (out["volume"][0] * 100)
     assert abs(vwap - out["close"][0]) < 1e-9
 
 
-def test_apply_adjustment_identity_cases(tmp_path):
+def test_apply_adjustment_identity_cases(tmp_path, ck_runtime):
     """指数恒等 / 无因子表恒等 / 无事件恒等 (fail-open 语义)。"""
     df = _minute_frame(AA, date(2026, 6, 30), 10.0)
 
@@ -99,19 +133,15 @@ def test_apply_adjustment_identity_cases(tmp_path):
     out_no_factors = minute_adjust.apply_minute_adjustment(df, tmp_path, "stock")
     assert out_no_factors.equals(df)
 
-    _write_factor_table(tmp_path, [(BB, EX_DATE, EX_FACTOR)])
+    _write_factor_table(tmp_path, [(BB, EX_DATE, EX_FACTOR)], ck_runtime=ck_runtime)
     out_no_events = minute_adjust.apply_minute_adjustment(df, tmp_path, "stock")
     assert out_no_events.equals(df)
 
 
-def test_apply_adjustment_etf_routing(tmp_path):
+def test_apply_adjustment_etf_routing(tmp_path, ck_runtime):
     """ETF 用 adj_factor_etf 表路由。"""
     etf = "159001.SZ"
-    (tmp_path / "adj_factor_etf").mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": [etf], "trade_date": [EX_DATE], "ex_factor": [EX_FACTOR],
-    }, schema={"symbol": pl.String, "trade_date": pl.Date, "ex_factor": pl.Float64},
-    ).write_parquet(tmp_path / "adj_factor_etf" / "all.parquet")
+    _write_factor_table(tmp_path, [(etf, EX_DATE, EX_FACTOR)], ck_runtime=ck_runtime, etf=True)
 
     df = _minute_frame(etf, date(2026, 6, 30), 10.0)
     out = minute_adjust.apply_minute_adjustment(df, tmp_path, "etf")
@@ -122,6 +152,7 @@ def test_apply_adjustment_etf_routing(tmp_path):
 # 基准标记与读取门控
 # ================================================================
 
+
 def test_fetch_adjust_param_gated_by_marker(tmp_path):
     assert minute_adjust.minute_fetch_adjust(tmp_path) == "forward"
     minute_adjust.mark_minute_basis_raw(tmp_path)
@@ -129,11 +160,13 @@ def test_fetch_adjust_param_gated_by_marker(tmp_path):
     assert minute_adjust.minute_basis_is_raw(tmp_path) is True
 
 
-def test_repository_marker_gate(tmp_path):
+def test_repository_marker_gate(tmp_path, ck_runtime):
     """标记未开启 → 读取原样 (旧行为逐字节不变); 开启 → 读取应用投影。"""
-    _write_factor_table(tmp_path, [(AA, EX_DATE, EX_FACTOR)])
+    _write_factor_table(tmp_path, [(AA, EX_DATE, EX_FACTOR)], ck_runtime=ck_runtime)
     raw_day = date(2026, 6, 30)
-    _write_minute_partition(tmp_path, raw_day, _minute_frame(AA, raw_day, 10.0))
+    _write_minute_partition(
+        tmp_path, raw_day, _minute_frame(AA, raw_day, 10.0), ck_runtime=ck_runtime
+    )
     repo = KlineRepository(DataStore(tmp_path))
 
     legacy = repo.get_minute(AA, raw_day)
@@ -145,7 +178,9 @@ def test_repository_marker_gate(tmp_path):
 
     # 当日 (因子事件之后) 恒等短路
     today_day = EX_DATE
-    _write_minute_partition(tmp_path, today_day, _minute_frame(AA, today_day, 8.0))
+    _write_minute_partition(
+        tmp_path, today_day, _minute_frame(AA, today_day, 8.0), ck_runtime=ck_runtime
+    )
     same = repo.get_minute(AA, today_day)
     assert abs(same["close"][0] - 8.0) < 1e-12
 
@@ -154,9 +189,10 @@ def test_repository_marker_gate(tmp_path):
 # 存量迁移
 # ================================================================
 
-def test_migration_mixed_basis_partitions(tmp_path):
+
+def test_migration_mixed_basis_partitions(tmp_path, ck_runtime):
     """前复权存量 → 原始; 原始存量 no-op; 全部成功建标记; 幂等。"""
-    _write_factor_table(tmp_path, [(AA, EX_DATE, EX_FACTOR)])
+    _write_factor_table(tmp_path, [(AA, EX_DATE, EX_FACTOR)], ck_runtime=ck_runtime)
     day = date(2026, 6, 30)
     raw_price = 10.0
     # AA: 旧架构落盘形态 — 价格为"拉取时前复权"(*1/1.25), amount 保持原始 (复权只动价格)
@@ -165,7 +201,7 @@ def test_migration_mixed_basis_partitions(tmp_path):
     )
     raw_stored = _minute_frame(BB, day, raw_price)
     _write_minute_partition(tmp_path, day, pl.concat([adjusted_stored, raw_stored]))
-    _write_daily_partition(tmp_path, day, {AA: raw_price, BB: raw_price})
+    _write_daily_partition(tmp_path, day, {AA: raw_price, BB: raw_price}, ck_runtime=ck_runtime)
 
     stats = minute_adjust.migrate_minute_to_raw(tmp_path)
     assert stats["failed"] == 0
@@ -176,8 +212,8 @@ def test_migration_mixed_basis_partitions(tmp_path):
     stored = pl.read_parquet(tmp_path / "kline_minute" / f"date={day.isoformat()}" / "part.parquet")
     aa = stored.filter(pl.col("symbol") == AA)
     bb = stored.filter(pl.col("symbol") == BB)
-    assert abs(aa["close"][0] - raw_price) < 1e-9          # 前复权被还原为原始
-    assert abs(bb["close"][0] - raw_price) < 1e-12         # 原始 no-op
+    assert abs(aa["close"][0] - raw_price) < 1e-9  # 前复权被还原为原始
+    assert abs(bb["close"][0] - raw_price) < 1e-12  # 原始 no-op
     assert abs(aa["amount"][0] - raw_price * 100 * 100) < 1e-6  # amount 本就原始, 不动
 
     # 幂等: 二次运行为 no-op
@@ -186,9 +222,9 @@ def test_migration_mixed_basis_partitions(tmp_path):
     assert stats2["converted_symbols"] == 0
 
 
-def test_migration_missing_daily_anchor_skipped(tmp_path):
+def test_migration_missing_daily_anchor_skipped(tmp_path, ck_runtime):
     """无日K锚点的分区跳过且不建标记 (未收敛), 日K补齐后可续跑。"""
-    _write_factor_table(tmp_path, [(AA, EX_DATE, EX_FACTOR)])
+    _write_factor_table(tmp_path, [(AA, EX_DATE, EX_FACTOR)], ck_runtime=ck_runtime)
     day = date(2026, 6, 30)
     _write_minute_partition(tmp_path, day, _minute_frame(AA, day, 10.0))  # 无日K分区
 
@@ -198,25 +234,26 @@ def test_migration_missing_daily_anchor_skipped(tmp_path):
     assert minute_adjust.minute_basis_is_raw(tmp_path) is False
 
     # 补齐日K锚点后续跑 → 收敛并标记
-    _write_daily_partition(tmp_path, day, {AA: 10.0})
+    _write_daily_partition(tmp_path, day, {AA: 10.0}, ck_runtime=ck_runtime)
     stats2 = minute_adjust.migrate_minute_to_raw(tmp_path)
     assert stats2["marked"] is True
 
 
-def test_migration_partial_missing_anchor_not_marked(tmp_path):
+def test_migration_partial_missing_anchor_not_marked(tmp_path, ck_runtime):
     """部分分区缺日K锚点: 其余分区照常换算, 但不建标记; 日K补齐后续跑换算剩余分区并收敛。"""
-    _write_factor_table(tmp_path, [(AA, EX_DATE, EX_FACTOR)])
+    _write_factor_table(tmp_path, [(AA, EX_DATE, EX_FACTOR)], ck_runtime=ck_runtime)
     day1, day2 = date(2026, 6, 29), date(2026, 6, 30)
     raw_price = 10.0
     # 两个分区都是旧架构落盘形态 (拉取时前复权), 日K锚点只有 day1
     for day in (day1, day2):
         _write_minute_partition(
-            tmp_path, day,
+            tmp_path,
+            day,
             _minute_frame(AA, day, raw_price).with_columns(
                 [pl.col(c) * RATIO_BEFORE for c in ("open", "high", "low", "close")]
             ),
         )
-    _write_daily_partition(tmp_path, day1, {AA: raw_price})
+    _write_daily_partition(tmp_path, day1, {AA: raw_price}, ck_runtime=ck_runtime)
 
     stats = minute_adjust.migrate_minute_to_raw(tmp_path)
     assert stats["skipped_no_daily"] == 1
@@ -225,24 +262,26 @@ def test_migration_partial_missing_anchor_not_marked(tmp_path):
     assert minute_adjust.minute_basis_is_raw(tmp_path) is False
 
     # 补齐 day2 日K锚点后续跑 → day2 换算为原始价并建标记
-    _write_daily_partition(tmp_path, day2, {AA: raw_price})
+    _write_daily_partition(tmp_path, day2, {AA: raw_price}, ck_runtime=ck_runtime)
     stats2 = minute_adjust.migrate_minute_to_raw(tmp_path)
     assert stats2["marked"] is True
     assert stats2["converted_symbols"] == 1
-    stored = pl.read_parquet(tmp_path / "kline_minute" / f"date={day2.isoformat()}" / "part.parquet")
+    stored = pl.read_parquet(
+        tmp_path / "kline_minute" / f"date={day2.isoformat()}" / "part.parquet"
+    )
     assert abs(stored["close"][0] - raw_price) < 1e-9
     # 读取投影只复权一次: 除权日前 = 原始价 * 1/1.25
     shown = minute_adjust.apply_minute_adjustment(stored, tmp_path)
     assert abs(shown["close"][0] - raw_price * RATIO_BEFORE) < 1e-9
 
 
-def test_migration_anchor_out_of_sane_range_rejected(tmp_path):
+def test_migration_anchor_out_of_sane_range_rejected(tmp_path, ck_runtime):
     """锚点偏离合理界 (数据异常) 不换算, 不产生破坏性写入。"""
     _write_factor_table(tmp_path, [(AA, EX_DATE, EX_FACTOR)])
     day = date(2026, 6, 30)
     # 日K锚点 0.001 vs 分钟 10 → k=10000 超界: 视为异常, 原样保留
     _write_minute_partition(tmp_path, day, _minute_frame(AA, day, 10.0))
-    _write_daily_partition(tmp_path, day, {AA: 0.001})
+    _write_daily_partition(tmp_path, day, {AA: 0.001}, ck_runtime=ck_runtime)
 
     stats = minute_adjust.migrate_minute_to_raw(tmp_path)
     assert stats["marked"] is True  # 分区处理完成 (仅未换算), 仍可收敛

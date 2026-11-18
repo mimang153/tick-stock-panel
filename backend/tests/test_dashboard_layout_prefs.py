@@ -1,4 +1,5 @@
 """看板自定义布局偏好 — 保存往返、护栏与清除回默认。"""
+
 from __future__ import annotations
 
 import pytest
@@ -36,15 +37,26 @@ def test_layout_null_clears_back_to_default():
 
 
 def test_layout_clamps_and_normalizes_fields():
-    saved = preferences.set_dashboard_layout({
-        "v": 1,
-        "items": [
-            {"i": "x" * 100, "t": "radar", "x": 99, "y": -5, "w": 99, "h": 0, "p": {"url": "javascript:alert(1)"}},
-            {"i": "", "t": ""},
-            "not-a-dict",
-        ],
-    })
+    saved = preferences.set_dashboard_layout(
+        {
+            "v": 1,
+            "items": [
+                {
+                    "i": "x" * 100,
+                    "t": "radar",
+                    "x": 99,
+                    "y": -5,
+                    "w": 99,
+                    "h": 0,
+                    "p": {"url": "javascript:alert(1)"},
+                },
+                {"i": "", "t": ""},
+                "not-a-dict",
+            ],
+        }
+    )
     # 后端只做护栏(类型/范围), 语义校验(未知组件/危险 URL)在前端规范化层
+    assert saved is not None
     (item,) = saved["items"]
     assert item["i"] == "x" * 64
     assert item["x"] == 11 and item["y"] == 0 and item["w"] == 12 and item["h"] == 1
@@ -63,8 +75,18 @@ def test_layout_rejects_empty_items():
 
 def test_layout_rejects_oversized_blob():
     # 单项字段有长度护栏, 用大量 p 键把 blob 顶过 64KB
-    items = [{"i": f"ext-link-{k}", "t": "ext-link", "x": 0, "y": k, "w": 4, "h": 5,
-              "p": {f"key{j}": "v" * 480 for j in range(4)}} for k in range(40)]
+    items = [
+        {
+            "i": f"ext-link-{k}",
+            "t": "ext-link",
+            "x": 0,
+            "y": k,
+            "w": 4,
+            "h": 5,
+            "p": {f"key{j}": "v" * 480 for j in range(4)},
+        }
+        for k in range(40)
+    ]
     with pytest.raises(ValueError):
         preferences.set_dashboard_layout({"v": 1, "items": items})
 
@@ -81,4 +103,6 @@ def test_settings_endpoint_round_trip(monkeypatch):
     assert cleared["dashboard_layout"] is None
 
     with pytest.raises(HTTPException):
-        settings_api.update_dashboard_layout(settings_api.DashboardLayoutIn(layout={"v": 1, "items": []}))
+        settings_api.update_dashboard_layout(
+            settings_api.DashboardLayoutIn(layout={"v": 1, "items": []})
+        )

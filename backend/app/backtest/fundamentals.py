@@ -14,6 +14,7 @@
   毫秒级; 矩阵路径每个因子只物化一张 float32 TxN 矩阵 (T~900, N~5500
   约 20MB), 且仅在策略/挖掘请求该因子时才构建。
 """
+
 from __future__ import annotations
 
 import logging
@@ -42,32 +43,30 @@ FUNDAMENTAL_FACTOR_NAMES = frozenset(FUNDAMENTAL_FACTORS)
 
 
 def load_fundamental_snapshot(data_dir: Path | None) -> pl.DataFrame | None:
-    """读取财务指标快照; 文件缺失或无有效行时返回 None。
+    """读取财务指标快照; 存储不可用或无有效行时返回 None。
 
+    CK ``financials_metrics`` 为唯一读源（``data_dir`` 仅为兼容签名保留）。
     返回列: symbol, _announce (Date), 以及各因子对应的 metrics 列。
     """
-    if data_dir is None:
-        return None
-    path = data_dir / "financials" / "metrics" / "part.parquet"
-    if not path.exists():
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is None:
         return None
     try:
-        frame = pl.read_parquet(path)
-    except Exception as exc:
+        frame = runtime.store.read_financials("financials_metrics")
+    except Exception as exc:  # noqa: BLE001 - 财务缺失时回测降级为无财务因子
         logger.warning("读取财务指标快照失败: %s", exc)
         return None
-    needed = {"symbol", "announce_date"} | {
-        spec["column"] for spec in FUNDAMENTAL_FACTORS.values()
-    }
+    if frame.is_empty():
+        return None
+    needed = {"symbol", "announce_date"} | {spec["column"] for spec in FUNDAMENTAL_FACTORS.values()}
     if not needed.issubset(frame.columns):
         logger.warning("财务指标快照缺少列: %s", sorted(needed - set(frame.columns)))
         return None
     snapshot = (
         frame.select(sorted(needed))
-        .filter(
-            pl.col("symbol").is_not_null()
-            & pl.col("announce_date").is_not_null()
-        )
+        .filter(pl.col("symbol").is_not_null() & pl.col("announce_date").is_not_null())
         .with_columns(
             pl.col("announce_date").cast(pl.Utf8).str.slice(0, 10).str.to_date().alias("_announce")
         )
@@ -95,14 +94,11 @@ def attach_fundamental_factors(
         return panel
 
     if snapshot is None:
-        return panel.with_columns([
-            pl.lit(None, dtype=pl.Float64).alias(name)
-            for name in missing_columns
-        ])
+        return panel.with_columns(
+            [pl.lit(None, dtype=pl.Float64).alias(name) for name in missing_columns]
+        )
 
-    columns = sorted(
-        {FUNDAMENTAL_FACTORS[name]["column"] for name in missing_columns}
-    )
+    columns = sorted({FUNDAMENTAL_FACTORS[name]["column"] for name in missing_columns})
     # asof 键取生效日 (公告日次日) 而非公告日: 直接用公告日回看会在换报告期的
     # 公告当日取到「尚未生效」的新一期并被门控置 null, 打断上一期的前向填充,
     # 与矩阵路径 (searchsorted side="right") 不一致。
@@ -125,16 +121,10 @@ def attach_fundamental_factors(
         spec = FUNDAMENTAL_FACTORS[name]
         source = pl.col(spec["column"])
         if spec["price_ratio"]:
-            value = (
-                pl.when(source > 0)
-                .then(pl.col("close") / source)
-                .otherwise(None)
-            )
+            value = pl.when(source > 0).then(pl.col("close") / source).otherwise(None)
         else:
             value = source
-        expressions.append(
-            pl.when(announced).then(value).otherwise(None).alias(name)
-        )
+        expressions.append(pl.when(announced).then(value).otherwise(None).alias(name))
     return joined.with_columns(expressions).drop("_effective")
 
 
@@ -201,7 +191,9 @@ def build_fundamental_matrices(
     return result
 
 
-def attach_matrix_fundamental_fields(market: Any, data_dir: Path | None, names: Any, *, evidence=None) -> Any:
+def attach_matrix_fundamental_fields(
+    market: Any, data_dir: Path | None, names: Any, *, evidence=None
+) -> Any:
     """把财务因子作为 matrix fields 附加到 (frozen) MarketDataMatrix 副本。"""
     import dataclasses
 

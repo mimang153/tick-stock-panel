@@ -1,0 +1,129 @@
+# 开发环境 compose: 容器跑工具链, 源码目录挂载进容器, 前后端热更新调试。
+# 与生产 docker-compose.yml(代码烘焙进镜像的单容器)互补, 互不影响。
+#
+# 用法: ./dev.container.sh   (见 docs/dev-container.md)
+#
+# 数据流:
+#   源码改动 → 容器内 uvicorn --reload / vite HMR 立即生效, 无需重建镜像
+#   依赖下载缓存(pnpm store / npm / uv) → 宿主机 .docker-cache/, 跨容器重建复用
+#   安装产物(node_modules / .venv)      → 容器内 named volume, Linux 原生链接
+#   用户数据 data/                      → 宿主机 data/ 挂载, 重建不丢
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        # 构建期镜像源开关: 默认国内, .env 设 USE_CN_MIRROR=0 切回官方源
+        USE_CN_MIRROR: ${USE_CN_MIRROR:-1}
+        NODE_VERSION: ${NODE_VERSION:-20.18.1}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+    container_name: tsp-dev
+    working_dir: /app
+    # 容器入口: 先经国内镜像预装后端依赖(绕开 uv.lock 锁定的官方源地址),
+    # 再交给仓库自带 dev.sh 启动(uvicorn --reload + vite HMR)
+    command: ./dev.container.entry.sh
+    init: true
+    tty: true
+    stdin_open: true
+    ports:
+      - "${PORT:-3018}:3018"   # 后端 FastAPI
+      - "3011:3011"            # 前端 Vite dev server
+    environment:
+      # ---- 数据与运行环境 ----
+      # 显式固定容器内绝对路径, 防止 .env 的 DATA_DIR=./data 被按错误目录解析
+      - DATA_DIR=/app/data
+      - TZ=Asia/Shanghai
+      # 容器内 localhost 即本容器, vite 的 /api 代理目标(源码布局下无需 TSP_DOCKER)
+      - BACKEND_HOST=0.0.0.0
+      - BACKEND_PORT=3018
+      # ---- 后端 extras ----
+      # 默认带 dev(pytest/ruff) + backtest(vectorbt/numba): 开发容器要能跑测试,
+      # 否则 dev.sh 的 `uv sync --frozen` 会把手动装的测试工具当多余包清掉。
+      # .env 里显式设置优先(含设为空); 老 CPU 需加 legacy-cpu: BACKEND_EXTRAS=dev legacy-cpu backtest
+      - BACKEND_EXTRAS=${BACKEND_EXTRAS:-dev backtest}
+      # ---- 国内镜像源(运行期依赖安装) ----
+      # uv: 清华主源 + 阿里云兜底, 与生产镜像同源策略
+      - UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+      - UV_EXTRA_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+      # pnpm/npm: 国内 registry(pnpm 读取 npm config 环境变量)
+      - npm_config_registry=https://registry.npmmirror.com
+      # ---- ClickHouse(存储层必需依赖, 见下方 clickhouse 服务) ----
+      # 容器间走 compose 网络服务名, 不能用 localhost(那是本容器自己)。
+      # 覆盖 .env 里的 CLICKHOUSE_URL, 源码直跑与容器内使用不同地址。
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-tsp}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-tsp}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-tsp123456}
+    depends_on:
+      # 后端启动即连 CK 且 fail-closed, 必须等容器健康后再起, 否则启动直接失败
+      clickhouse:
+        condition: service_healthy
+    volumes:
+      # ---- 源码挂载(核心): 改代码即时生效 ----
+      - .:/app
+      # ---- 依赖安装产物: 留在容器内 named volume ----
+      # 不挂宿主机的原因: pnpm 依赖 store 的硬链接, 跨 bind mount 会失败(EXDEV);
+      # store 已持久化在宿主机, 依赖卷重建后重装只是链接操作, 成本极低。
+      - tsp-dev-backend-venv:/app/backend/.venv
+      - tsp-dev-frontend-node-modules:/app/frontend/node_modules
+      # ---- 依赖下载缓存: 持久化到宿主机, 容器/依赖卷全删也不重新下载 ----
+      - ./.docker-cache/pnpm-store:/root/.local/share/pnpm/store
+      - ./.docker-cache/npm-cache:/root/.npm
+      - ./.docker-cache/uv-cache:/root/.cache/uv
+      # ---- 用户数据: 宿主机 data/ 持久化(与生产部署一致) ----
+      # DATA_DIR 已固定为 /app/data, 此处必须挂到相同目标
+      - ./data:/app/data
+    extra_hosts:
+      # 宿主机上的自定义数据源(fuyao 等)经此地址访问
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 6g
+
+  # ClickHouse 存储层(必需依赖, 设计文档 §4.8)。
+  # 后端启动即连 CK 并 fail-closed, 所以 CK 与 dev 一起编排, 不再依赖宿主机装 CK。
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8.8-alpine
+    container_name: tsp-dev-clickhouse
+    init: true
+    restart: unless-stopped
+    ports:
+      # 宿主调试/CLI 用; 宿主 8123 被占时在 .env 设 CLICKHOUSE_HTTP_PORT=18123
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+    environment:
+      - TZ=Asia/Shanghai
+      # 镜像首个数据目录为空时会创建该用户; 默认账号与 .env.example / config.py 一致
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-tsp}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-tsp123456}
+      # 允许该用户执行 SQL 级用户/权限管理(初始化脚本要建库并授权)
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      # 仅供 ./dev.container.sh ck 选默认库(CK 自身不读这个变量)
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-tsp}
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    # 与 config.d 里的 max_server_memory_usage(3.5 GB) 配套: 超限时是 CK 报错而非内核 OOM
+    mem_limit: 4g
+    volumes:
+      # CK 数据独立于面板数据目录(./data): 不被"清空数据"、备份打包和升级搬迁逻辑波及
+      - ./ckdata:/var/lib/clickhouse
+      # 预建 tsp / tsp_test 库(仅在数据目录为空时执行一次)
+      - ./deploy/clickhouse/init:/docker-entrypoint-initdb.d:ro
+      # 只挂单个 drop-in: 整个 config.d 目录挂载会覆盖镜像自带的
+      # docker_related_config.xml(其中含 listen_host), 导致 CK 只监听 127.0.0.1
+      - ./deploy/clickhouse/config.d/40-tsp-container.xml:/etc/clickhouse-server/config.d/40-tsp-container.xml:ro
+    healthcheck:
+      # /ping 无需认证, 避免账号密码参与健康判定
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  tsp-dev-backend-venv:
+  tsp-dev-frontend-node-modules:

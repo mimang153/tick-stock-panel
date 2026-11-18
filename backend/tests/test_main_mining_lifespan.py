@@ -44,7 +44,7 @@ def test_lifespan_holds_mining_process_lock_around_application(monkeypatch) -> N
     app = _app_stub()
 
     async def exercise() -> None:
-        async with main_module.lifespan(app):
+        async with main_module.lifespan(app):  # type: ignore[arg-type]
             events.append("request_serving")
 
     asyncio.run(exercise())
@@ -88,7 +88,7 @@ def test_lifespan_releases_lock_when_application_shutdown_raises(monkeypatch) ->
     monkeypatch.setattr(main_module, "_application_lifespan", application_lifespan)
 
     async def exercise() -> None:
-        async with main_module.lifespan(_app_stub()):
+        async with main_module.lifespan(_app_stub()):  # type: ignore[arg-type]
             pass
 
     with pytest.raises(RuntimeError, match="shutdown failed"):
@@ -97,9 +97,7 @@ def test_lifespan_releases_lock_when_application_shutdown_raises(monkeypatch) ->
     assert events == ["acquired", "released"]
 
 
-def test_lifespan_degrades_instead_of_failing_when_lock_held(
-    monkeypatch, caplog
-) -> None:
+def test_lifespan_degrades_instead_of_failing_when_lock_held(monkeypatch, caplog) -> None:
     """抢锁失败: 不再让 lifespan 上抛 (整个后端起不来), 改为降级启动。
 
     面板照常可用, 挖掘启动入口返回 409; WARNING 日志留排查线索;
@@ -132,7 +130,7 @@ def test_lifespan_degrades_instead_of_failing_when_lock_held(
     app = _app_stub()
 
     async def exercise() -> None:
-        async with main_module.lifespan(app):
+        async with main_module.lifespan(app):  # type: ignore[arg-type]
             events.append("request_serving")
 
     with caplog.at_level("WARNING", logger="app.main"):
@@ -161,7 +159,9 @@ def test_application_only_recovers_runs_when_it_owns_lock(tmp_path, monkeypatch,
         raise StopAfterManagerInitializationError
 
     monkeypatch.setattr(main_module, "DataStore", lambda: SimpleNamespace(data_dir=tmp_path))
-    monkeypatch.setattr(main_module, "KlineRepository", lambda _: SimpleNamespace(refresh_cache=stop))
+    monkeypatch.setattr(
+        main_module, "KlineRepository", lambda *a, **kw: SimpleNamespace(refresh_cache=stop)
+    )
     monkeypatch.setattr(main_module.settings, "backtest_matrix_disk_cache_enabled", False)
     monkeypatch.setattr("app.services.auth.bootstrap_from_env", lambda: None)
     monkeypatch.setattr("app.strategy.custom_signals.seed_if_empty", lambda _: 0)
@@ -169,11 +169,11 @@ def test_application_only_recovers_runs_when_it_owns_lock(tmp_path, monkeypatch,
     app = SimpleNamespace(state=SimpleNamespace(mining_lock_acquired=acquired))
 
     async def exercise():
-        async with main_module._application_lifespan(app):
+        async with main_module._application_lifespan(app):  # type: ignore[arg-type]
             pytest.fail("fixture should stop before background services start")
 
     with pytest.raises(StopAfterManagerInitializationError):
         asyncio.run(exercise())
-    assert store.get("existing_run")["status"] == ("interrupted" if acquired else "running")
+    assert store.get("existing_run")["status"] == ("interrupted" if acquired else "running")  # type: ignore[index]
     if not acquired:
         assert manifest.read_bytes() == before
