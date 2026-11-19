@@ -1,6 +1,6 @@
 # ClickHouse 需求后续问题清单
 
-> 文档类型：问题 | 编号：ISS-002 | 状态：评审中 | 文档版本：v1.4 | 最后更新：2026-11-18
+> 文档类型：问题 | 编号：ISS-002 | 状态：评审中 | 文档版本：v1.5 | 最后更新：2026-11-20
 > 负责人：— | 关联：REQ-002、DES-002、ISS-003、DEP-001、DEP-002、DEP-003、REQ-001
 
 用途：把 REQ-002 当前未闭环问题集中记录，便于后续逐项处理和验收复核。本文以 2026-11-18 的代码、文档和实跑结果为准。
@@ -110,13 +110,14 @@ pnpm build
 | CH-09 | 中 | 否 | 前端构建未验证 | 本机无 `pnpm` | 在有 pnpm 的环境执行 `pnpm build`，记录结果 |
 | CH-10 | 中 | 是 | 文档状态与真实状态不一致 | REQ-002 / DES-001 / DES-002 / DES-003 状态已回填（2026-11-19）；DEP-001“有条件通过”结论未变 | 已回填；剩余 DEP-002 结论与 CH-04~CH-08 验收结果待补（见 ISS-005） |
 | CH-11 | 低 | 否 | 健康端点路径不一致 | WBS T1.6 写 `/api/health`，代码实际注册 `/health`；`/api/health` 只在白名单出现 | 确认是否需加别名；若不需要，统一文档口径 |
-| CH-12 | 低 | 否 | `v_screener_base` 只有定义未见业务调用 | `store.screener_base()` 存在，但 `backend/app` 内无调用点 | 确认是纳入后续 screener 慢路径，还是从 B3 DoD 中移除 |
+| CH-12（已确认） | 低 | 否 | `v_screener_base` 只有定义未见业务调用 | `store.screener_base()` 存在，但 `backend/app` 内无调用点 | 2026-11-20 PH-1 按分布式原则确认：从 B3 DoD 移除，PH-3 删除视图 DDL 与 store 方法（见 ISS-005 §7.1.3） |
 | CH-13 | 低 | 否 | 历史对照报告存在未解释差异 | `backend/reports/cmp_b2_kline_daily_enriched.json` 仍为 `diff` / `ok=false` | 重新生成或标注为已解释的历史中间产物 |
 
 ### 处理进展（2026-11-18）
 
 - **CH-01 已处理**：根因不是单纯内存不足，而是测试把带 `t_` 前缀的表写进正式库 `tsp`（dev compose 注入 `CLICKHOUSE_DATABASE=tsp`，`os.environ.setdefault` 未能覆盖）。已把 `tests/conftest.py` 改为强制写入 `tsp_test`；清理 `tsp` 中 17,267 张测试残留表和 `tsp_test` 残留表；开发 compose 单独挂 `41-tsp-dev-memory.xml`，容器上限 5g、CK 上限 4.5 GB。全量测试从 `2 failed/179 errors`、`4 failed/554 errors` 恢复为 `4817 passed / 13 skipped / 1 xfailed`，0 failed / 0 errors。
 - **CH-11 已处理**：`routes_api` 同时注册 `/health` 与 `/api/health`，`tests/test_memory_guards.py` 参数化覆盖两个路径。
+- **CH-12 已确认（2026-11-20 PH-1）**：`v_screener_base` 无业务调用且慢路径已由其他 CK 读法闭环，从 B3 DoD 移除；PH-3 B5 清理阶段删除视图 DDL 与 `store.screener_base()` 方法，不触及在线读路径。
 - **CH-02 / CH-03 首批完成**：`KlineRepository` 的股票/指数/ETF 日 K 扫描、分钟 K 四种读法改为 CK 优先，查不到时保留本地兼容路径；新增 `tests/test_repository_ck_first.py` 断言 CK 值优先；`test_symbol_data_concurrency.py` 改为显式注入 `ck_runtime`，避免全局 runtime 泄漏造成顺序依赖。
 - **B5 第二批完成（核心数据写路径 CK-only）**：
   - `minute_shared_pull.pull()` 与 `minute_refresh._write_round_data()` 不再调用 `_write_minute_partition`，改走 `store.write_minute()`；缓存键加入 `data_dir.resolve()` 以避免跨测试/跨仓库串用。
@@ -163,4 +164,4 @@ pnpm build
 - `market_level` 扩展是否支持 timeseries；如支持，需要为无 symbol 行设计 CK 存储。
 - 回滚演练使用哪个基线分支替代文档中的 `master`。
 - ~~`/api/health` 是否作为真实路由别名提供，还是仅修正文档~~ → **已处理**：`routes_api` 同时注册 `/health` 与 `/api/health`，`test_memory_guards` 参数化覆盖两个路径（CH-11）。
-- `v_screener_base` 是否纳入后续 screener 慢路径，或从 B3 DoD 中移除。
+- ~~`v_screener_base` 是否纳入后续 screener 慢路径，或从 B3 DoD 中移除~~ → **已确认**：从 B3 DoD 移除，PH-3 删除视图 DDL 与 store 方法（CH-12，ISS-005 §7.1.3）。

@@ -1,11 +1,12 @@
 # ClickHouse 修补契约设计
 
-> 文档类型：设计 | 编号：DES-002 | 状态：主体已落地（P0~P4），尾巴待验收 | 文档版本：v1.6 | 最后更新：2026-11-19
+> 文档类型：设计 | 编号：DES-002 | 状态：主体已落地（P0~P4），尾巴待验收 | 文档版本：v1.8 | 最后更新：2026-11-20
 > 负责人：— | 关联：REQ-002、ISS-002、DES-001、DEP-001、ISS-005（未闭环项汇总）
 
 > 状态说明（2026-11-19 更新）：P0~P4 已于 2026-11-18~19 落地——`daily/enriched` 在显式 storage 下的在线读写（修补、校验、universe、常规写入、live merge/flush、状态统计与 generation）已 CK-only，本地 Parquet 仅留离线兼容（REQ-002 §13.16、ISS-002 处理进展）。
 > 仍属待办：`pipeline_recompute` 常规 enriched 编排、派生缓存与离线迁移工具保留本地 Parquet 路径（ISS-003 §3.3）；B4/B5 尾巴与 B6 人工验收见 ISS-005。
 > §2.3 保留 2026-11-18 首次原型因 34 个测试失败回退的原因，作为设计依据，不代表当前实现状态。
+> 2026-11-20 PH-1 按“跨实例状态不得本地化”原则确认 §9 五项口径：30 天 TTL + repair 租约/CAS、保留 `ck_`、`String` + `schema_version`、600s generation 租约 + 自动接管、staging 按 `repair_id` 私有化；口径详见 ISS-005 §7.1.1。
 
 ## 1. 背景与目标
 
@@ -126,7 +127,7 @@ begin_repair
 
 ## 4. 数据模型
 
-以下表名在本文中使用 `ck_` 前缀，便于与业务事实表区分；实现时按 DES-001 的命名规范可在 DDL 阶段最终确认。
+以下表名在本文中使用 `ck_` 前缀，便于与业务事实表区分；PH-1 已决定保留该前缀，不再改名为无前缀。
 
 三张元数据表统一包含 `id`、`created_by`、`created_at`、`updated_by`、`updated_at`。ClickHouse 不提供强制唯一约束，`id` 由 `generateUUIDv4()` 生成并作为技术主键；`ORDER BY` 表达物理稀疏主索引，不替代业务去重键。
 
@@ -147,6 +148,7 @@ CREATE TABLE IF NOT EXISTS ck_repair_audit
     after_json     Nullable(String),
     reason         LowCardinality(String),
     status         LowCardinality(String), -- started / committed / failed
+    schema_version UInt32 DEFAULT 1,       -- 审计 JSON 结构版本
     created_by     LowCardinality(String),
     created_at     DateTime64(3) DEFAULT now64(3),
     updated_by     LowCardinality(String),
@@ -162,9 +164,9 @@ ORDER BY (dataset, day, repair_id, symbol, id);
 - 审计表是追加写，不做 in-place update。
 - `id` 为技术主键，由 `generateUUIDv4()` 生成；ClickHouse 不强制唯一约束，写入方不得复用 `id`。
 - `created_by/created_at` 记录首次写入人和时间；`updated_by/updated_at` 记录最近一次状态变更人和时间。追加写时两者相同。
-- JSON 字段存单行数据的序列化结果，字段顺序由存储层固定。
+- JSON 字段存规范化序列化的单行结果；`schema_version` 固定结构版本，读取端需容忍旧版本缺字段。
 - `symbol='*'` 表示整日修补，仍需在差异行里记录真实 symbol。
-- `status` 用于识别中断任务：长时间 `started` 视为异常。
+- `status` 用于识别中断任务；状态更新必须按 `repair_id` 做租约/CAS，禁止并发覆盖。
 
 ### 4.2 修补快照表 `ck_repair_snapshot`
 
@@ -179,6 +181,7 @@ CREATE TABLE IF NOT EXISTS ck_repair_snapshot
     day            Date,
     symbol         String,
     payload_json   String,
+    schema_version UInt32 DEFAULT 1,       -- 快照 JSON 结构版本
     created_by     LowCardinality(String),
     created_at     DateTime64(3) DEFAULT now64(3),
     updated_by     LowCardinality(String),
@@ -186,7 +189,8 @@ CREATE TABLE IF NOT EXISTS ck_repair_snapshot
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(day)
-ORDER BY (dataset, day, repair_id, symbol, id);
+ORDER BY (dataset, day, repair_id, symbol, id)
+TTL toDate(created_at) + INTERVAL 30 DAY;
 ```
 
 说明：
@@ -194,8 +198,9 @@ ORDER BY (dataset, day, repair_id, symbol, id);
 - 快照是修补前受影响范围的完整旧行，不是仅差异行。
 - `id` 为技术主键；`repair_id` 关联同一次修补的审计记录。
 - `created_by/created_at` 记录快照采集人和时间；`updated_by/updated_at` 记录最近一次维护人和时间。
-- 回滚按 `repair_id` 读取快照，删除当前数据后写回快照。
-- 需要设置保留期，例如 30 天；过期清理任务独立实现。
+- 回滚按 `repair_id` 读取快照，删除当前数据后写回快照；只有持有该 `repair_id` 租约的写者可执行。
+- 保留期为 30 天，通过 DDL TTL 实现；过期快照不再承诺可回滚。
+- `payload_json` 与审计 JSON 一样带 `schema_version`，使用规范化序列化。
 - 快照写入成功前，不允许删除业务表中的旧数据。
 
 ### 4.3 enriched generation 表 `ck_enriched_generation`
@@ -211,6 +216,9 @@ CREATE TABLE IF NOT EXISTS ck_enriched_generation
     state          LowCardinality(String), -- publishing / ready / failed
     changed_from   Nullable(Date),
     heartbeat_at   DateTime64(3),
+    owner          LowCardinality(String), -- 当前 lease 持有者
+    fencing_token UInt64 DEFAULT 0,        -- 单调递增，用于拒绝旧 owner 写入
+    lease_expires_at Nullable(DateTime64(3)),
     committed_at   Nullable(DateTime64(3)),
     created_by     LowCardinality(String),
     created_at     DateTime64(3) DEFAULT now64(3),
@@ -228,8 +236,9 @@ ORDER BY (asset_type, generation_id);
 - `id` 为每次状态写入的技术主键；`generation_id` 是业务 generation 单号，`ORDER BY (asset_type, generation_id)` 作为 ReplacingMergeTree 的归并键，不能把 `id` 放进归并键，否则同一 generation 的多次状态写入无法互相替换。
 - `created_by/created_at` 记录 generation 创建人和时间；`updated_by/updated_at` 记录最近一次心跳/提交/失败写入人和时间，`updated_at` 同时作为版本号。
 - 当前 generation 定义为 `state='ready'` 且 `updated_at` 最大的一行。
-- `heartbeat_at` 超时后，新的写者可以接管并写新的 generation。
-- 缓存层把当前 `generation_id` 纳入 enriched 缓存键；generation 变化即缓存失效。
+- `begin_generation` 必须先取得 Redis 租约并写入 `owner/fencing_token/lease_expires_at`；心跳续租，所有写入携带 fencing token，旧 owner 的迟到写入必须被拒绝。
+- `heartbeat_at` 或 `lease_expires_at` 超过 600s 未续期后自动 `failed`，新的写者以更大 fencing token 接管并写新的 generation；redis 模式禁止回退本地 marker 形成双权威。
+- 缓存层把当前 `generation_id` 纳入 enriched 缓存键；generation 变化即缓存失效。`commit_generation` 与 `cache.bump()` 非原子，缓存失效必须按 CK generation 幂等重建，不依赖调用顺序。
 - 不在 enriched 事实表中增加 `generation_id` 列；事实表已有 `updated_at`，`changed_from` 足以驱动缓存范围失效。
 
 ## 5. 模块设计
@@ -277,7 +286,7 @@ def current_generation(asset_type: str) -> dict: ...
   → 记录审计/快照/generation
 ```
 
-staging 文件继续保留，因为它解决的是“修补输入如何临时落地”的问题，不是“最终数据存在哪里”的问题。
+staging 文件继续保留，因为它解决的是“修补输入如何临时落地”的问题，不是“最终数据存在哪里”的问题。staging 不纳入跨任务统一清理器，但必须按 `repair_id` 使用私有目录并绑定租约；只有持有租约的写者可清理自己的 staging。
 
 ### 5.4 enriched generation
 
@@ -323,9 +332,9 @@ fail_generation(failed)
 
 ## 7. 风险
 
-1. **CK 无跨表事务**：审计、快照、事实表写入不能原子提交。用 `status` 和对账任务补偿。
-2. **快照膨胀**：修补频繁时快照表增长快，需要保留期和清理任务。
-3. **generation 竞争**：多进程同时 publishing 时，需要用 `updated_at` 版本和心跳超时接管。
+1. **CK 无跨表事务**：审计、快照、事实表写入不能原子提交。用 outbox/对账补偿，且修补状态更新走 `repair_id` 租约/CAS。
+2. **快照膨胀**：修补频繁时快照表增长快，30 天 TTL 控制总量；超出窗口不再承诺可回滚。
+3. **generation 竞争**：多实例同时 publishing 时必须先取得 Redis 租约并携带 fencing token；600s 未续期自动失败，由更大 token 的写者接管。redis 模式不得回退本地 marker。
 4. **测试迁移成本**：当前修补测试深度绑定本地文件，必须先迁契约。
 5. **离线工具兼容**：`repair_daily` 的 staging 仍存在，容易误认为仍在双写；需要在代码注释和文档中明确 staging 不是 storage。
 
@@ -363,13 +372,17 @@ fail_generation(failed)
 - 全量测试通过，且不生成 `backend/MagicMock/`。
 - REQ-002 / ISS-002 / DEP-002 状态同步更新。
 
-## 9. 待决事项
+## 9. 待决事项（2026-11-20 PH-1 已按分布式原则确认）
 
-- 快照保留期具体取 30 天还是更长。
-- `ck_` 前缀是否保留，还是与 DES-001 现有业务表命名统一为无前缀。
-- 审计 JSON 字段是否使用 `String` 还是 `Map(String, String)`。
-- generation 心跳超时阈值。
-- `repair_daily.py` 的 staging 目录是否纳入统一清理策略。
+| 项 | 决策 | 落地说明 |
+|---|---|---|
+| 快照保留期 | 30 天 TTL + repair 租约/CAS | DDL 使用 `TTL toDate(created_at) + INTERVAL 30 DAY`；状态更新按 `repair_id` 仲裁，回滚演练需在窗口内完成 |
+| `ck_` 前缀 | 保留 | 元数据表沿用 `ck_repair_audit` / `ck_repair_snapshot` / `ck_enriched_generation` |
+| 审计 JSON 字段类型 | `String` + `schema_version` | 差异/快照 JSON 规范化序列化；版本字段固定结构，读取端容忍旧版本缺字段 |
+| generation 心跳超时 | 600s 租约 + 自动接管 | `begin_generation` 取 Redis 租约，写入 owner/fencing token；600s 未续期自动 failed，由新写者接管；禁止本地 marker 双权威 |
+| staging 清理策略 | 按 `repair_id` 私有化 | `repair_daily.py` 的 staging 使用私有目录 + 租约，仅 owner 清理，不新增跨任务共享目录 |
+
+口径同步登记于 ISS-005 §7.1.1；后续变更走 REQ-002 §12 变更控制。
 
 ## 10. 实现状态（2026-11-18）
 
@@ -389,4 +402,5 @@ fail_generation(failed)
   - `ClickHouseStore.write` 为未显式给 `updated_at` 的写入生成严格递增的毫秒版本，避免同毫秒替换结果不确定。
 - **P4 主体完成，离线兼容保留**：显式 `storage` 路径不再依赖本地 backup/fingerprint/marker/glob；无 `storage` 的离线工具/单测仍保留 parquet 兼容路径（DES-002 §3.2 约定）。`SCHEMA_VERSION` 无需因三张元数据表升级，新增表由幂等 `ensure_schema` 覆盖。
 - 剩余：`pipeline_recompute` 的常规 enriched 编排与派生缓存（pools/regime/mainline/mining/factors）仍写本地 parquet/marker，离线工具同理；指数 enriched 表尚未纳入 CK。
+- 2026-11-20 PH-1 已按分布式原则确认 §9 五项口径（见上方）；本文 DDL 示例已同步 TTL / `schema_version` / owner / fencing token，但当前代码尚未补齐 repair 租约/CAS、generation 自动接管、私有 staging 与本地 marker 双权威收敛，待 PH-2/PH-3 随相关代码最小变更落地。
 - 验证：定向测试全绿；全量回归 `4820 passed / 13 skipped / 1 xfailed`，0 failed / 0 errors。改动文件 Ruff 全绿，`git diff --check` 通过。

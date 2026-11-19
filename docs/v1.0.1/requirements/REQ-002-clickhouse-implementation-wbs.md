@@ -1,6 +1,6 @@
 # ClickHouse 存储层：开发内容分解（WBS）
 
-> 文档类型：需求 | 编号：REQ-002 | 状态：主体已实现，B4/B5 尾巴与 B6 验收未闭环 | 文档版本：v1.2 | 最后更新：2026-11-19
+> 文档类型：需求 | 编号：REQ-002 | 状态：主体已实现，B4/B5 尾巴与 B6 验收未闭环 | 文档版本：v1.3 | 最后更新：2026-11-20
 > 负责人：— | 关联：REQ-001、ISS-002、DES-002、ISS-005（未闭环项汇总）
 > 归档来源：base_v1.0 基线文档，按 DOC-STANDARD v1.0 归类命名；批次历史与实测数字保留原样。
 
@@ -254,11 +254,11 @@ T2.6（repository 切换）/ T2.8（首次同步）未开始，阻塞点见下�
       （zip 成员路径做穿越校验），memmap 仍读真实文件
     - 过期：表级 TTL `toDate(accessed_at)+30d`，与本地 LRU 清理互补
   - 实测：上传 → 索引 → 删本地目录 → 同步只留 manifest → 命中后还原 `matrix.bin` 2048 字节
-- T3.7 CK 联合视图
-  - 新增视图 `v_screener_base`：`kline_daily_enriched ⋈ instruments`，两侧 `FINAL`
+- T3.7 CK 联合视图（历史记录）
+  - 曾新增视图 `v_screener_base`：`kline_daily_enriched ⋈ instruments`，两侧 `FINAL`
     （否则 ReplacingMergeTree 未合并版本会把行数放大：实测 5571 → 10787）
-  - `store.screener_base(day, symbols=...)` 直接查视图，省掉两表各读一次 + 内存 join
-  - `screener` 5 处 Parquet 慢路径全部切 CK：`_load_enriched_for_date`、
+  - 曾有 `store.screener_base(day, symbols=...)` 直接查视图；2026-11-20 PH-1 按 CH-12 决议**从 B3 DoD 移除该视图要求**，PH-3 删除视图 DDL 与 store 方法
+  - `screener` 5 处 Parquet 慢路径全部切 CK（该部分保留）：`_load_enriched_for_date`、
     `_compute_enriched_full` warmup、`_load_enriched_history`、`load_prior_consecutive`
     （窄读两列）、`_prior_partition_dates`（`list_daily_dates`）
   - `BacktestService._load_panel` 改 `store.read_daily(enriched)`（原来 `scan_enriched_parquet`）
@@ -376,7 +376,7 @@ T2.6（repository 切换）/ T2.8（首次同步）未开始，阻塞点见下�
 | T4.4 展示/监控侧 | 🟡 部分 | `auction_benchmark`、`sector_rotation`、`market_mainline`、`regime_builder`、`market_overview_builder` 已切；`quote_service`、`sector_monitor` 未改 |
 | T4.5 因子链路 | 🟡 部分 | `factors/ext_factors` 时序已切；`materialize_cache` 未接 T3.5 矩阵缓存 |
 | T4.6 API 层 | 🟡 部分 | `api/ext_data` 的 timeseries/snapshot 读已切；3 处 DuckDB `DESCRIBE read_parquet`、`api/overview`、`api/data`、`api/paper`、`api/mining` 未改 |
-| T4.7 选股器 SQL | ✅ 完成（B3 交付） | `v_screener_base` 联合视图 + 5 处慢路径 |
+| T4.7 选股器 SQL | ✅ 完成（B3 交付） | 5 处慢路径已切 CK；`v_screener_base` 已按 CH-12 从 DoD 移除，PH-3 删除视图 DDL/store 方法 |
 | T4.8 标的池缓存 | ❌ 未开始 | `tickflow/pools.py` |
 
 > B4 的 DoD（grep 归零）**尚未达成**：当前 `app/` 下仍有 81 处真实调用（其中 34 处在 `tickflow/repository.py`，随 B5 删除）。
@@ -491,7 +491,7 @@ B1、B2、B3 已交付并通过验收级验证；**B4 中 T4.1 与 T4.7 已完�
 
 | 批次 | 内容 | 记录位置 |
 | --- | --- | --- |
-| B3 收口 | 回测结果落 `backtest_runs`/`backtest_trades`、矩阵缓存"CK 持久层 + 本地工作区"、`v_screener_base` 联合视图、screener 5 处慢路径 | 本文 §4 内嵌记录（第六段） |
+| B3 收口 | 回测结果落 `backtest_runs`/`backtest_trades`、矩阵缓存"CK 持久层 + 本地工作区"、screener 5 处慢路径；`v_screener_base` 曾为历史交付，已按 CH-12 从 DoD 移除 | 本文 §4 内嵌记录（第六段） |
 | B4 第一批 | `daily_pipeline` 自愈（`list_daily_dates`+`delete_daily_date`）、`indicators/pipeline` 写侧 upsert（enriched 首次真正写入 CK）、`extend_history`、`minute_refresh`、`fundamentals`、`market_data`、`auction_benchmark`、`sector_rotation`、`market_mainline`、`regime_builder` | 本文 §4 内嵌记录（B4 第一批） |
 | B4 第二批 | `kline_sync`（复权 upsert、分钟分区读 CK）、`minute_adjust` 因子、`minute_gaps`、`api/ext_data` timeseries 主路径、`market_overview_builder`、`factors/ext_factors`；新增 `store.list_ext_dates` | 本文 §4 内嵌记录（B4 第二批） |
 | 本轮另修 | `tests/test_ch_schema.py` 7 例（`v_screener_base` 视图加入后未更新断言）→ 现 10 例全绿 | 本次会话修复 |

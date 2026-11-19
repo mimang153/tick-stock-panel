@@ -1,11 +1,11 @@
 # mining CK 化契约设计（MN-01：run 状态 / 事件 / 摘要）
 
-> 文档类型：设计 | 编号：DES-003 | 状态：决策已拍板并部分落地，MN-02/03 待处理 | 文档版本：v1.3 | 最后更新：2026-11-19
+> 文档类型：设计 | 编号：DES-003 | 状态：决策已按分布式原则确认并部分落地，MN-02/03 待处理 | 文档版本：v1.5 | 最后更新：2026-11-20
 > 负责人：待分配 | 关联：ISS-004（MN-01~MN-05）、DES-002、DES-004（D-01 决策依据）、ISS-003 §7.5、REQ-002、ISS-005（未闭环项汇总）
 
 ## 0. 文档状态与边界（先读）
 
-**决策状态（2026-11-19）**：D-01 已拍板方案 C 并落地——run 状态机权威在 Redis（`RedisMiningRunStore`，Lua 原子状态机），CK 承担审计与历史查询；跨实例取消经 `coordination.cancel_flags` 验证闭环（ISS-004 MN-01、DIST-04）。这不等于全文已实现：**MN-02（artifact 归属）/ MN-03（claim 与指纹）仍为明确待处理项**，本文定义的 CK 表/读写路径按"已决策 + 部分实现"理解，不得假定 artifact/claim 已迁移。
+**决策状态（2026-11-19，2026-11-20 PH-1 按分布式原则确认）**：D-01 已拍板方案 C 并落地——run 状态机权威在 Redis（`RedisMiningRunStore`，Lua 原子状态机），CK 承担审计与历史查询；跨实例取消经 `coordination.cancel_flags` 验证闭环（ISS-004 MN-01、DIST-04）。2026-11-20 PH-1 进一步确认：数据指纹拆为两层且实现指纹不进签名；D-02 事件 TTL 90 天且不小于重建窗口；D-03 内容寻址 + 跨实例可解析的共享 URI；D-04 候选库随 artifact 共享，不再保留本地独占副本；D-05 不新增 `CK_MINING` 独立开关且多 worker 强制 redis 后端。这不等于全文已实现：**MN-02（artifact 归属）/ MN-03（claim 与指纹）仍为明确待处理项**，本文定义的 CK 表/读写路径按“已确认 + 部分实现”理解，不得假定 artifact/claim 已迁移或已跨实例可见。
 
 范围（MN-01）：把 run 的 **manifest（状态机）、compact summary、事件流、周度 claim 与数据指纹** 的权威副本迁到 CK，使多实例可查询状态、事件不丢、claim 幂等。
 
@@ -57,7 +57,7 @@ namespace 区分：`MiningRunStore(namespace="mining")` 与 guardian 用独立 n
 ### 1.5 周度 claim 与数据指纹
 
 - claim：`schedule_claim(day) -> "weekly-<iso_year>-W<week:02d>"`（`mining_schedule.py:170-173`），**直接作为 run_id**；去重靠 `store.get(claim)` 判存在（`:199-202`）。
-- `data_fingerprint`：`build_data_fingerprint`（`:75-123`）以 `version("weekly-mining-data-v2") + asset_type + generation + latest_enriched_date + enriched/instruments/regime digest + algorithm_version("mining-v3") + methodology_version + implementation + strategies + factors` 规范化后 sha256。用于 worker 入口防漂移（`mining_runtime.py:471,479`）与晋升校验（`mining_candidates.py:458`）。
+- `data_fingerprint`：`build_data_fingerprint`（`:75-123`）当前仍以 `version("weekly-mining-data-v2") + asset_type + generation + latest_enriched_date + enriched/instruments/regime digest + algorithm_version("mining-v3") + methodology_version + implementation + strategies + factors` 规范化后 sha256，用于 worker 入口防漂移（`mining_runtime.py:471,479`）与晋升校验（`mining_candidates.py:458`）。**2026-11-20 PH-1 按分布式原则修正口径**：权威数据指纹只能由共享状态和请求计算（CK generation、数据范围、请求参数）；源码全量哈希、策略源码树哈希、本地 Parquet `mtime_ns/size` 降级为实现指纹，仅作审计。**实现指纹不得进入 `compute_run_signature`，也不得参与 claim/去重判定**；现有测试需同步调整，否则代码仍不满足该口径。
 - `run_signature`：`compute_run_signature`（`mining_jobs.py:106-121`），`find_by_signature` 用于幂等复用（`:350`）。
 
 ## 2. 设计原则
@@ -133,7 +133,7 @@ COMMENT '挖掘运行事件流:每个run的追加日志,保留全量后按event_
 - `id` 为行主键（UUID）；事件序号另用 `event_id UInt32`，由 store 分配（沿用现有自增），避免占用主键名。
 - `MergeTree` 追加语义，不覆盖；`timestamp` 与 `created_at` 分别承载事件时刻与入库时刻。
 - `payload_json` 上限 16KB 在写入侧校验，与现有 `MAX_EVENT_PAYLOAD` 一致。
-- 现有 256 条截断是文件大小优化，CK 下改为**保留全量 + 查询侧限制**：`read_events(after_id, limit=256)` 用 `WHERE event_id > after_id ORDER BY event_id DESC LIMIT 256` 复刻原语义；TTL 90 天控制总量。TTL 值待评审确认（见 §8）。
+- 现有 256 条截断是文件大小优化，CK 下改为**保留全量 + 查询侧限制**：`read_events(after_id, limit=256)` 用 `WHERE event_id > after_id ORDER BY event_id DESC LIMIT 256` 复刻原语义；TTL 90 天控制总量（D-02 已确认），且不得小于协调态最大重建窗口，否则事件审计不足以重建 run 历史。
 
 ### 3.3 `ck_mining_claim`（claim 与指纹幂等）
 
@@ -155,7 +155,7 @@ ORDER BY claim
 COMMENT '周度挖掘认领表:同一ISO周仅触发一次,记录数据指纹与认领结果'
 ```
 
-设计要点：claim（`weekly-YYYY-Www`）作唯一键，`outcome` 记录即使前置不满足也占用该周 claim（现有语义：`_record_skipped_prerequisite` 仍建 run）。`data_fingerprint` 落表供跨实例漂移校验；算法版本升级后指纹变化，旧 claim 不复用（与 `mining.md` §87 一致）。
+设计要点：claim（`weekly-YYYY-Www`）作唯一键，`outcome` 记录即使前置不满足也占用该周 claim（现有语义：`_record_skipped_prerequisite` 仍建 run）。`data_fingerprint` 落表供跨实例漂移校验；算法版本升级后指纹变化，旧 claim 不复用（与 `mining.md` §87 一致）。当前 `find_by_signature → create` 依赖进程内锁，跨实例不原子；落地时必须改为 Redis `SETNX(signature → run_id)` 或 Lua，避免同一签名双跑。
 
 ### 3.4 `ck_mining_artifact`（产物登记，MN-02 预留）
 
@@ -179,7 +179,7 @@ ORDER BY (namespace, run_id, artifact_name)
 COMMENT '挖掘产物登记表:每个run的四类结果产物的内容寻址元数据(MN-02落地)'
 ```
 
-本文只定表形态，具体产物落地（CK 行 vs 内容寻址 parquet）与四类 schema 由 MN-02 决策；`content_addr` 预留内容寻址，避免把宽表行写进 CK。
+2026-11-20 PH-1 按分布式原则确认 D-03：产物采用内容寻址，CK 只存元数据，不存 payload；`content_addr` 必须是跨实例可解析的共享 URI（CK/对象存储/共享卷），不能是本地相对路径，否则 Redis 状态可共享但产物仍不可达。四类产物 schema 与存储细节在 MN-02 落地。
 
 ## 4. store 方法 → CK 操作映射
 
@@ -191,10 +191,10 @@ COMMENT '挖掘产物登记表:每个run的四类结果产物的内容寻址元�
 | `get(run_id)` | `SELECT ... WHERE namespace=? AND run_id=? FINAL` | 缺字段补默认，归一化同 `:459-498` |
 | `transition_status(run_id, status, error=None)` | 读当前 → 校验 `_ALLOWED_TRANSITIONS` → 更新 status + 时间戳 | 校验必须在读版本后进行；非法转换抛错；用 CAS/事务防并发覆盖 |
 | `write_summary / read_summary` | 更新 / 读 `summary_json` | 整包替换；运行中 progress 追加 |
-| `register_artifact(run_id, name, path)` | `ck_mining_artifact` upsert + 更新 `artifact_names` | 与 MN-02 产物表联动 |
+| `register_artifact(run_id, name, path)` | `ck_mining_artifact` upsert + 更新 `artifact_names` | 登记共享 URI；`artifact_names` 更新必须 Lua/原子，避免多实例并发丢更新 |
 | `append_event(run_id, type, payload)` | `ck_mining_run_event` INSERT，`event_id` 取 `max(event_id)+1`，`id` 由 UUID 默认生成 | payload ≤16KB；`event_id` 单调 |
 | `read_events(run_id, after_id)` | `WHERE event_id > after_id ORDER BY event_id DESC LIMIT 256` | 复刻尾部 256 条语义 |
-| `list_runs(limit, statuses)` / `find_by_signature` | `SELECT ... ORDER BY created_at DESC LIMIT n` / `WHERE run_signature=?` | 排序与过滤与现有一致 |
+| `list_runs(limit, statuses)` / `find_by_signature` | `SELECT ... ORDER BY created_at DESC LIMIT n` / `WHERE run_signature=?` | 排序与过滤与现有一致；去重改 Redis `SETNX(signature → run_id)`，不得只靠进程内锁 |
 | `recover_interrupted()` | `WHERE status IN ACTIVE → interrupted` 批量更新 | 启动恢复语义不变 |
 | `schedule_claim` / 指纹校验 | `ck_mining_claim` 查 / upsert | claim 幂等，指纹漂移拒绝复用 |
 
@@ -203,12 +203,13 @@ COMMENT '挖掘产物登记表:每个run的四类结果产物的内容寻址元�
 状态机合法性与并发安全是本次迁移的核心风险。契约要求：
 - 用单条原子操作完成"读当前状态 → 校验合法 → 写新状态 + 时间戳"，避免读后写之间的竞态；
 - CK 不提供行级 CAS，需在写入层用 `updated_at` 版本做乐观并发（写入带期望版本，冲突则重试），或把状态转换收敛到单实例写入者（依赖 MN-04 锁）；
-- **决策待定**：乐观并发 vs 单写者，见 §8。这是评审必须拍板的第一项。
+- D-01 已拍板方案 C：状态权威在 Redis Lua，CK 只保留审计；§4.1 的乐观并发/单写者讨论保留为历史备选，不再作为待决项。
+- 同类原子性要求覆盖 `find_by_signature → create` 和 `register_artifact`：前者用 Redis `SETNX(signature → run_id)`，后者用 Lua/原子更新；Redis 状态转换与 CK 审计之间用 outbox 或可等待的 rebuild barrier 闭环，禁止“状态已变、审计未落”的不可恢复窗口。
 
 ## 5. 读写路径与兼容策略
 
-- **在线路径**：`MiningJobManager` 的 `_store` 在显式 `storage` 且 `CK_MINING=1`（或复用 `CACHE_BACKEND` 之外的独立开关）时注入 `CKMiningRunStore`；无 storage 的离线工具保留 `MiningRunStore` 文件实现（同 DES-002 §3.2 兼容模式）。
-- **worker 子进程**：`mining_runtime.py` 的 `run_mining_runtime` 仍写本地 artifact 与 summary（spawn 子进程通过 `storage_prefix` 访问 CK，见 `backtest/worker.py:196`）；主进程 manager 负责把 run 状态 / 事件 / 摘要落 CK。MN-01 阶段 artifact 不迁，worker 路径不变。
+- **在线路径**：`MiningJobManager` 的 `_store` 通过现有 `storage` 注入切换实现；不新增 `CK_MINING` 独立开关（D-05 已确认）。多 worker 部署强制 redis 后端；memory 文件版 + flock 仅作离线兼容，禁止运行时回退。无 storage 的离线工具保留 `MiningRunStore` 文件实现（同 DES-002 §3.2 兼容模式）。
+- **worker 子进程**：`mining_runtime.py` 的 `run_mining_runtime` 产出的 artifact 与候选库不得停留在 worker 本地；MN-02 必须写共享 URI（内容寻址存储或共享卷），主进程只登记共享 URI 与元数据。当前仍写本地 Parquet 的实现是待迁移缺口，不是可接受的分布式形态。
 - **前端**：API 层 `app/api/mining.py` 读取契约（字段名、排序、分页）保持不变，仅底层 store 换 CK；MN-05 再处理历史本地 run 的只读兼容。
 - **generation 联动**：run 依赖的 enriched/regime 数据 generation 变化应使进行中 run 可感知（与数据指纹配合），不额外引入新 generation 命名空间。
 
@@ -230,21 +231,28 @@ COMMENT '挖掘产物登记表:每个run的四类结果产物的内容寻址元�
 
 全量回归与 pre-commit 放在 MN-01 整体验收前统一跑（用户已要求全量回归推迟到后续批次）。
 
-## 8. 待决事项（评审必须回答）
+## 8. 待决事项（2026-11-20 PH-1 已按分布式原则确认）
 
-| 编号 | 问题 | 影响 | 建议 |
+| 编号 | 问题 | 决策 | 落地说明 |
 | --- | --- | --- | --- |
-| D-01 | `transition_status` 的并发方案？ | 决定 §4.1 实现复杂度与锁依赖 | **已拍板（2026-11-19）：方案 C（Redis Lua 状态机 + CK 审计）**，依据 [DES-004](DES-004-distributed-architecture-roadmap.md) §5；flock 出局，B 仅备选，否决 MySQL；§4.1 需按方案 C 重写（状态权威改 Redis，CK 仅审计） |
-| D-02 | 事件表 TTL 保留期（90 天？） | 影响存储成本与历史可查范围 | 按产品对历史事件的保留要求定 |
-| D-03 | artifact 进 CK 行还是内容寻址（MN-02） | 决定 `ck_mining_artifact` 是否存 payload | 倾向内容寻址，CK 只存元数据 |
-| D-04 | 候选库 `research_candidates.json` 是否同期迁 CK | backlink 回写（`mining_candidates.py:844-872`）跨存储 | 建议与 MN-02 合并评估，不在 MN-01 处理 |
-| D-05 | 是否设 `CK_MINING` 独立开关 | 灰度与回滚粒度 | 建议独立于 `CACHE_BACKEND`，便于按模块灰度 |
+| D-01 | `transition_status` 的并发方案 | 方案 C：Redis Lua 状态机 + CK 审计 | 2026-11-19 已落地；flock 出局，否决 MySQL |
+| D-02 | 事件表 TTL 保留期 | 90 天，且不小于协调态重建窗口 | 与 §3.2 DDL 一致；MN-02 实现时校验重建窗口 |
+| D-03 | artifact 归属 | 内容寻址 + 共享 URI，CK 只存元数据 | `content_addr` 必须跨实例可解析；不能是本地相对路径 |
+| D-04 | 候选库是否迁 CK | 随 artifact 共享，不保留本地独占副本 | 可内容寻址或共享卷；共享存储是分布式部署硬条件 |
+| D-05 | 是否设 `CK_MINING` 独立开关 | 不新增；多 worker 强制 redis，memory 仅离线 | 复用 `CACHE_BACKEND` / storage 注入，禁止运行时回退 flock |
+| FP-01 | 数据指纹口径 | 拆分数据指纹 + 实现指纹，实现指纹不进签名 | 权威 digest 只含共享状态与请求；同步修改 `compute_run_signature` 与相关测试 |
+| D-06 | 去重/产物注册原子性 | Redis `SETNX(signature→run_id)` + Lua 更新产物 | 消除进程内锁与读-改-写竞态 |
+| D-07 | 审计闭环 | outbox 或可等待 rebuild barrier | 消除 Redis 状态已变、CK 审计未落的窗口 |
+
+口径同步登记于 ISS-005 §7.1.2；后续变更走 REQ-002 §12 变更控制。
 
 ## 9. 验收标准
 
 1. 四张 CK 表 DDL 幂等、schema 测试覆盖；`ck_mining_run` 以 `(namespace, run_id)` 唯一。
 2. `MiningRunStore` 全部公开方法在 CK 后端下有等价实现，语义与本地版一致（状态机、事件单调、256 截断、幂等去重）。
-3. 两个实例共享 CK 时：状态转换不丢、事件可见、同一 ISO 周只 claim 一次、指纹漂移被拒。
-4. 存量 run 回填后 CK 与本地文件解析结果一致。
-5. CK 不可达 fail-closed，不静默回退本地造成分叉。
-6. 定向测试全绿、pre-commit 全门禁通过；全量回归在后续批次统一执行。
+3. 两个实例共享 CK 时：状态转换不丢、事件可见、同一 ISO 周只 claim 一次、同一签名只建一个 run、指纹漂移被拒。
+4. artifact 与候选库通过共享 URI 可读；在实例 A 产出的结果，实例 B 无需共享本地 `data/` 即可消费。
+5. Redis 状态转换与 CK 审计在崩溃注入下不留不可恢复窗口；重建对所有实例有 barrier，不会部分实例先读到空状态。
+6. 存量 run 回填后 CK 与本地文件解析结果一致。
+7. CK 不可达 fail-closed，不静默回退本地造成分叉；memory 后端不可在多 worker 生产路径启用。
+8. 定向测试全绿、pre-commit 全门禁通过；全量回归在后续批次统一执行。
