@@ -1,4 +1,10 @@
-"""前端资源使用固定 MIME，避免 Windows 注册表中的文件关联影响页面执行。"""
+"""前端资源使用固定 MIME，避免 Windows 注册表中的文件关联影响页面执行。
+
+FileResponse 的 media_type 必须显式给出，否则 starlette 会回退到 mimetypes，
+在 Windows 上读取注册表关联后可能把 .js 判成 text/plain，浏览器拒绝执行模块。
+FrontendStaticFiles 覆写 file_response 让静态目录与单文件响应走同一口径。
+"""
+
 from __future__ import annotations
 
 import os
@@ -22,22 +28,31 @@ _MIME_TYPES = {
 
 
 def frontend_file_response(
-    path: str | os.PathLike[str], *, status_code: int = 200,
+    path: str | os.PathLike[str],
+    *,
+    status_code: int = 200,
     stat_result: os.stat_result | None = None,
 ) -> FileResponse:
     return FileResponse(
-        path, media_type=_MIME_TYPES.get(Path(path).suffix.lower()),
-        status_code=status_code, stat_result=stat_result,
+        path,
+        media_type=_MIME_TYPES.get(Path(path).suffix.lower()),
+        status_code=status_code,
+        stat_result=stat_result,
     )
 
 
 class FrontendStaticFiles(StaticFiles):
     def file_response(
-        self, full_path: str | os.PathLike[str], stat_result: os.stat_result,
-        scope: Scope, status_code: int = 200,
+        self,
+        full_path: str | os.PathLike[str],
+        stat_result: os.stat_result,
+        scope: Scope,
+        status_code: int = 200,
     ) -> Response:
         response = frontend_file_response(
-            full_path, status_code=status_code, stat_result=stat_result,
+            full_path,
+            status_code=status_code,
+            stat_result=stat_result,
         )
         if self.is_not_modified(response.headers, Headers(scope=scope)):
             return NotModifiedResponse(response.headers)

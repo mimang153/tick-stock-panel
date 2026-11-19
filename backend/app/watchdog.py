@@ -11,6 +11,7 @@ supervisor / Docker restart / dev 脚本拉起, 把恢复时间从"人工发现"
 误伤防护: 探测本身是毫秒级微型 collect + 1s 写锁试探, 阈值要求连续失败
 (默认 2 次 × 15s 超时), 高负载下"慢而未死"不会触发。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -77,13 +78,12 @@ class HealthWatchdog:
                 # BaseException 分支吞掉, 取消会被误计为一次"探测失败"且循环
                 # 继续运行 — stop() 的 await self._task 永久等待 (关闭死锁)。
                 raise
-            except BaseException as exc:  # 探测任何异常都算失败 (含 to_thread 超时)
+            except BaseException:
                 self._consecutive_failures += 1
-                logger.error(
-                    "watchdog probe failed (%d/%d): %r",
+                logger.exception(
+                    "watchdog probe failed (%d/%d)",
                     self._consecutive_failures,
                     self._failure_threshold,
-                    exc,
                 )
                 if self._consecutive_failures >= self._failure_threshold:
                     logger.critical(

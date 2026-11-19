@@ -1,4 +1,5 @@
 """页面管理源码扩展删除: 校验拒绝路径、先备份后删除、备份下载穿越防御。"""
+
 from __future__ import annotations
 
 import io
@@ -23,7 +24,9 @@ def _make_client(tmp_path: Path, monkeypatch, custom_root: Path) -> TestClient:
 def _seed_custom(root: Path, ns: str = "zz_test_delete") -> Path:
     ns_dir = root / ns
     ns_dir.mkdir(parents=True)
-    (ns_dir / "extension.tsx").write_text("export default { id: 'zz_test_delete' }", encoding="utf-8")
+    (ns_dir / "extension.tsx").write_text(
+        "export default { id: 'zz_test_delete' }", encoding="utf-8"
+    )
     (root / "_template").mkdir(exist_ok=True)
     return ns_dir
 
@@ -71,7 +74,9 @@ def test_backup_download_serves_only_own_archives(tmp_path, monkeypatch):
     root = tmp_path / "frontend" / "src" / "custom"
     _seed_custom(root)
     client = _make_client(tmp_path, monkeypatch, root)
-    backup_name = client.delete("/api/pages-admin/source-extensions/zz_test_delete").json()["backup"]
+    backup_name = client.delete("/api/pages-admin/source-extensions/zz_test_delete").json()[
+        "backup"
+    ]
 
     ok = client.get(f"/api/pages-admin/backups/{backup_name}")
     assert ok.status_code == 200

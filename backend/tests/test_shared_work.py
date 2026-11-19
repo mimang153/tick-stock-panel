@@ -6,14 +6,20 @@ import pytest
 from app.services.shared_work import SharedWork, WorkBusyError
 
 
+def _record(result, log, *items):
+    """记录本次调用参数后返回既定结果(替代 append(x) or result 惯用法)。"""
+    log.extend(items)
+    return result
+
+
 def test_fifty_cold_requests_execute_once():
     work = SharedWork("strategy.single")
     barrier = threading.Barrier(50)
-    calls = []
+    calls: list = []
 
     def request(_):
         barrier.wait(5)
-        return work.run("same", lambda: calls.append(1) or {"value": 42}, ttl_s=1)
+        return work.run("same", lambda: _record({"value": 42}, calls, 1), ttl_s=1)
 
     with ThreadPoolExecutor(50) as pool:
         results = list(pool.map(request, range(50)))
@@ -24,7 +30,7 @@ def test_fifty_cold_requests_execute_once():
 def test_overlapping_batches_only_fetch_unclaimed_keys():
     work = SharedWork("minute.pull")
     entered, release = threading.Event(), threading.Event()
-    calls = []
+    calls: list = []
 
     def fetch(keys):
         calls.append(keys)
@@ -46,9 +52,11 @@ def test_overlapping_batches_only_fetch_unclaimed_keys():
 
 def test_manual_rerun_bypasses_completed_cache_but_keeps_identity():
     work = SharedWork("strategy.single")
-    calls = []
+    calls: list = []
+
     def run():
-        return work.run("k", lambda: len(calls.append(1) or calls), ttl_s=5)
+        return work.run("k", lambda: len(_record(calls, calls, 1)), ttl_s=5)
+
     assert run() == run() == 1
     assert work.run("k", lambda: 2, ttl_s=0) == 2
     assert run() == 2  # manual computation evicts the previous cached value

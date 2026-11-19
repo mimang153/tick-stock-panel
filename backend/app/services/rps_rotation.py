@@ -12,21 +12,23 @@
 性能: 387 概念 × 30 天的 group_by + sort 是 polars 内存操作, 实测 <50ms;
 另加进程级结果缓存 (_CACHE_TTL=120s), 重复请求 <1ms。
 """
+
 from __future__ import annotations
 
 import logging
 import time
 from datetime import date, timedelta
+from typing import Any
 
 import polars as pl
 
+from app.services.ext_data import ExtConfigStore
 from app.services.market_overview_builder import (
     _dimension_field,
     _dimension_values,
     _read_ext_rows,
     _symbol_keys,
 )
-from app.services.ext_data import ExtConfigStore
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ def invalidate_cache() -> None:
 
 def _latest_enriched_date(repo) -> date | None:
     """取 enriched 缓存里的最新交易日(矩阵的右端=最新日期)。"""
-    cache = repo._enriched_history_cache  # noqa: SLF001 —— 缓存字段无公开 getter
+    cache = repo._enriched_history_cache
     if cache is None or cache.is_empty() or "date" not in cache.columns:
         return None
     latest = cache["date"].max()
@@ -77,9 +79,7 @@ def _change_pct_range(repo, start: date, end: date) -> pl.DataFrame | None:
     hist = repo._enriched_history_cache
     if hist is None or hist.is_empty() or not set(_PCT_COLS) <= set(hist.columns):
         return None
-    hist = hist.select(_PCT_COLS).filter(
-        (pl.col("date") >= start) & (pl.col("date") <= end)
-    )
+    hist = hist.select(_PCT_COLS).filter((pl.col("date") >= start) & (pl.col("date") <= end))
     live, live_date = repo.get_enriched_latest()
     if (
         live_date is not None
@@ -151,7 +151,35 @@ _map_cache: dict[str, tuple[pl.DataFrame, int]] = {}
 _map_ts: dict[str, float] = {}
 
 
-def build_rps_rotation(repo, days: int = 12, kind: str = "concept", level: int | None = None) -> dict:
+def _aggregate_rotation_columns(
+    df: pl.DataFrame, map_df: pl.DataFrame, kind: str, level: int | None
+) -> tuple[list[str], dict[str, list[tuple[Any, Any]]]] | None:
+    """聚合成按日期排序的轮动列; 无匹配标的时返回 None。"""
+    df = df.with_columns(pl.col("symbol").str.to_uppercase().alias("_sym_up"))
+    joined = df.join(map_df, on="_sym_up", how="inner").drop("_sym_up")
+    if joined.is_empty():
+        return None
+    if kind == "industry" and level is not None:
+        parts = pl.col(kind).str.split("-")
+        idx = pl.min_horizontal(pl.lit(level - 1), pl.col(kind).str.count_matches("-"))
+        joined = joined.with_columns(parts.list.get(idx).alias(kind))
+    agg = joined.group_by(["date", kind]).agg(pl.col("change_pct").mean().alias("avg_pct"))
+    agg = agg.filter(pl.col("avg_pct").is_not_null() & pl.col("avg_pct").is_not_nan())
+    agg = agg.sort(["date", "avg_pct"], descending=[False, True])
+    grouped = agg.group_by("date", maintain_order=True).agg(pl.col(kind), pl.col("avg_pct"))
+    grouped = grouped.sort("date", descending=True)
+    columns: dict[str, list[tuple[Any, Any]]] = {}
+    all_dates_sorted: list[str] = []
+    for row in grouped.iter_rows(named=True):
+        d_str = str(row["date"])
+        all_dates_sorted.append(d_str)
+        columns[d_str] = list(zip(row[kind], row["avg_pct"], strict=False))
+    return all_dates_sorted, columns
+
+
+def build_rps_rotation(
+    repo, days: int = 12, kind: str = "concept", level: int | None = None
+) -> dict:
     """构建维度涨幅轮动矩阵(概念或行业)。
 
     Args:
@@ -200,45 +228,10 @@ def build_rps_rotation(repo, days: int = 12, kind: str = "concept", level: int |
     if df is None or df.is_empty():
         return {"dates": [], "columns": {}, "concept_count": 0}
 
-    # 3. 把个股 symbol 映射到维度成员, 一只股票拆成多行(每个成员一行)
-    #    symbol 大写匹配(map_df 的 _sym_up 已大写)
-    df = df.with_columns(pl.col("symbol").str.to_uppercase().alias("_sym_up"))
-    joined = df.join(map_df, on="_sym_up", how="inner").drop("_sym_up")
-
-    if joined.is_empty():
+    aggregated = _aggregate_rotation_columns(df, map_df, kind, level)
+    if aggregated is None:
         return {"dates": [], "columns": {}, "concept_count": 0}
-
-    # 行业层级聚合: kind=industry 且指定 level 时, 把 "一级行业-二级行业-三级行业"
-    # 拆分取对应层级(level=2 → "二级行业"), 同级下多个三级会合并。
-    # 与 market_overview_builder._dimension_rank 的 level 口径完全一致。
-    if kind == "industry" and level is not None:
-        # polars: 按 "-" 拆分取第 level 段; 段数不足时取最后一段(兜底)
-        parts = pl.col(kind).str.split("-")
-        idx = pl.min_horizontal(pl.lit(level - 1), pl.col(kind).str.count_matches("-"))
-        joined = joined.with_columns(parts.list.get(idx).alias(kind))
-
-    # 4. 按 (date, <kind>) 聚合 avg change_pct —— 与 _dimension_rank 的简单平均口径一致
-    agg = joined.group_by(["date", kind]).agg(
-        pl.col("change_pct").mean().alias("avg_pct")
-    )
-    # 去掉 NaN/Null(停牌等无行情的成员日)
-    agg = agg.filter(pl.col("avg_pct").is_not_null() & pl.col("avg_pct").is_not_nan())
-
-    # 5. 每个日期内按 avg_pct 降序排, 再 group_by 把每组的 (成员, avg_pct)
-    #    收集成并行 list —— 一次 polars 操作拿到全部列, 避免 partition_by 的 tuple key 歧义
-    agg = agg.sort(["date", "avg_pct"], descending=[False, True])
-    grouped = agg.group_by("date", maintain_order=True).agg(
-        pl.col(kind), pl.col("avg_pct")
-    )
-    # 最新日期排最前
-    grouped = grouped.sort("date", descending=True)
-
-    columns: dict[str, list[list]] = {}
-    all_dates_sorted: list[str] = []
-    for row in grouped.iter_rows(named=True):
-        d_str = str(row["date"])
-        all_dates_sorted.append(d_str)
-        columns[d_str] = list(zip(row[kind], row["avg_pct"]))
+    all_dates_sorted, columns = aggregated
 
     full = {
         "dates": [str(d) for d in all_dates_sorted],

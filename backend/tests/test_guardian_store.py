@@ -1,4 +1,5 @@
 """守护档案存储测试: 幂等基线、复验滚动上限、状态转换与路径防护。"""
+
 from __future__ import annotations
 
 import json
@@ -44,9 +45,7 @@ def test_create_baseline_idempotent_keeps_history(tmp_path):
     store.append_check("mined_factor_abc", {"verdict": "healthy"})
     store.set_status("mined_factor_abc", "healthy")
 
-    again = store.create_baseline(
-        "mined_factor_abc", **_baseline_kwargs(metrics={"score": 9.9})
-    )
+    again = store.create_baseline("mined_factor_abc", **_baseline_kwargs(metrics={"score": 9.9}))
     assert again["baseline"]["metrics"]["score"] == 0.9  # 未覆盖
     assert again["status"] == "healthy"
     assert len(again["checks"]) == 1
@@ -55,11 +54,13 @@ def test_create_baseline_idempotent_keeps_history(tmp_path):
 def test_create_baseline_validates(tmp_path):
     store = GuardianStore(tmp_path)
     with pytest.raises(GuardianStoreValidationError):
-        store.create_baseline("s", kind="bogus", data_as_of="2026-01-09",
-                              objective="sharpe", metrics={})
+        store.create_baseline(
+            "s", kind="bogus", data_as_of="2026-01-09", objective="sharpe", metrics={}
+        )
     with pytest.raises(GuardianStoreValidationError):
-        store.create_baseline("s", kind="mining_gate", data_as_of="not-a-date",
-                              objective="sharpe", metrics={})
+        store.create_baseline(
+            "s", kind="mining_gate", data_as_of="not-a-date", objective="sharpe", metrics={}
+        )
 
 
 def test_unsafe_strategy_id_rejected(tmp_path):
@@ -77,7 +78,9 @@ def test_append_check_caps_at_52(tmp_path):
     store.create_baseline("mined_factor_abc", **_baseline_kwargs())
     for i in range(MAX_CHECKS + 10):
         store.append_check("mined_factor_abc", {"verdict": "healthy", "i": i})
-    checks = store.get("mined_factor_abc")["checks"]
+    baseline = store.get("mined_factor_abc")
+    assert baseline is not None
+    checks = baseline["checks"]
     assert len(checks) == MAX_CHECKS
     assert checks[0]["i"] == 10  # 最旧的被滚动裁掉
 

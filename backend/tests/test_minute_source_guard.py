@@ -1,6 +1,5 @@
 """历史分钟同步只因当前分钟源发生变化而停止。"""
 
-from contextlib import contextmanager
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -122,13 +121,19 @@ def test_yaml_stamp_tracks_minute_mapping_and_effective_auth(monkeypatch):
 def test_batch_waiting_for_write_lock_rechecks_source(tmp_path, monkeypatch):
     symbol = "600000.SH"
 
-    @contextmanager
-    def lock():
-        # 模拟拉取已返回、等待另一个写入释放仓库锁期间发生切源。
-        preferences.save({"minute_data_provider": "other"})
-        yield
-
-    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path), _write_lock=lock())
+    # 模拟拉取已返回、CK 落库前发生切源。
+    stamps = ["first", "second"]
+    monkeypatch.setattr(
+        kline_sync,
+        "minute_source_stamp",
+        lambda: stamps.pop(0) if len(stamps) > 1 else stamps[0],
+    )
+    writes = []
+    store = SimpleNamespace(
+        write_minute=lambda table, frame: writes.append(frame),
+        latest_minute_datetime=lambda table: None,
+    )
+    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path), storage=store)
     monkeypatch.setattr(
         kline_sync, "sync_minute_batch", lambda *_args, **_kw: pl.DataFrame({"symbol": [symbol]})
     )
@@ -143,7 +148,7 @@ def test_batch_waiting_for_write_lock_rechecks_source(tmp_path, monkeypatch):
             rpm=60,
             raw_basis=False,
         )
-    assert not list((tmp_path / "kline_minute").rglob("*.parquet"))
+    assert writes == []
 
 
 def test_mixed_assets_cannot_restart_with_new_source_between_groups(

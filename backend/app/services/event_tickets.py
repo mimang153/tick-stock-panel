@@ -10,6 +10,7 @@
 即使泄漏也只能订阅事件流, 不能调用任何 REST 端点。
 进程内存储 (单进程 uvicorn 场景), 重启清零无害。
 """
+
 from __future__ import annotations
 
 import secrets

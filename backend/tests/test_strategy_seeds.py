@@ -9,6 +9,7 @@
   - 删除后重启不复活;
   - 种入的文件能被引擎真实加载。
 """
+
 from __future__ import annotations
 
 from app.strategy.strategy_seeds import SEEDS_DIR, seed_missing_builtins

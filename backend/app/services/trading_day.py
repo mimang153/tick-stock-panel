@@ -27,7 +27,8 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, time as dt_time
+from datetime import datetime
+from datetime import time as dt_time
 
 from app.market_time import CN_TZ, cn_now
 from app.services.shared_work import SharedWork, WorkBusyError
@@ -40,9 +41,9 @@ _STALE_BUFFER_UNTIL = dt_time(9, 40)
 # 大盘蓝筹同日全部停牌 = 市场性事件, 与休市同处理无碍。
 _BASKET = ("000001.SZ", "600519.SH", "600036.SH", "601318.SH", "000651.SZ")
 
-_TTL_TRADING_S = 3600.0   # 交易日结论每小时复探 (跨日天然失效)
-_TTL_HOLIDAY_S = 1800.0   # 休市结论 30 分钟复探, 误判自愈上限
-_TTL_UNKNOWN_S = 300.0    # 未知结论 5 分钟后重试探测
+_TTL_TRADING_S = 3600.0  # 交易日结论每小时复探 (跨日天然失效)
+_TTL_HOLIDAY_S = 1800.0  # 休市结论 30 分钟复探, 误判自愈上限
+_TTL_UNKNOWN_S = 300.0  # 未知结论 5 分钟后重试探测
 
 _CACHE_LOCK = threading.Lock()
 _CACHE_EPOCH = 0
@@ -67,7 +68,9 @@ def cached_verdict(now: datetime | None = None) -> bool | None:
     if now.weekday() >= 5:
         return False
     with _CACHE_LOCK:
-        if _CACHE.day == now.date() and time.monotonic() - _CACHE.probed_at < _ttl_of(_CACHE.verdict):
+        if _CACHE.day == now.date() and time.monotonic() - _CACHE.probed_at < _ttl_of(
+            _CACHE.verdict
+        ):
             return _CACHE.verdict
     return None
 
@@ -107,7 +110,7 @@ def _probe_tickflow(now: datetime) -> bool | None:
 
         rows = get_client().quotes.get(symbols=list(_BASKET)) or []
         stamps = [r.get("timestamp") for r in rows if isinstance(r, dict)]
-        valid = [int(t) for t in stamps if isinstance(t, (int, float)) and t]
+        valid = [int(t) for t in stamps if isinstance(t, int | float) and t]
         if not valid:
             return None
         latest_day = datetime.fromtimestamp(max(valid) / 1000, tz=CN_TZ).date()
@@ -135,17 +138,17 @@ def is_trading_day(now: datetime | None = None) -> bool | None:
         # 「未知」(None) 也是一个结论, 同样按 TTL 缓存 —— 它正是 _TTL_UNKNOWN_S 要
         # 挡住的场景 (未配 fuyao 且 tickflow 不可用时, 轮询每拍都会重打一次探测)。
         # _CACHE.day 只在探测写回时设置, 因此「当天已探过」用它判定即可。
-        if (
-            _CACHE.day == now.date()
-            and (time.monotonic() - _CACHE.probed_at) < _ttl_of(_CACHE.verdict)
+        if _CACHE.day == now.date() and (time.monotonic() - _CACHE.probed_at) < _ttl_of(
+            _CACHE.verdict
         ):
             return _CACHE.verdict
 
     def probe():
         # A caller can reach single-flight just after another probe retired.
         with _CACHE_LOCK:
-            if (_CACHE.day == now.date()
-                    and time.monotonic() - _CACHE.probed_at < _ttl_of(_CACHE.verdict)):
+            if _CACHE.day == now.date() and time.monotonic() - _CACHE.probed_at < _ttl_of(
+                _CACHE.verdict
+            ):
                 return _CACHE.verdict
         verdict = _probe_fuyao(now)
         if verdict is None:

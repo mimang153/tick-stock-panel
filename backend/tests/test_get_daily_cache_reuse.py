@@ -4,6 +4,7 @@
 150 天扫描 + 全套指标重算, 新路径优先从预计算历史缓存裁剪。
 本测试证明: 同一份数据下两条路径输出逐列一致, 且缓存命中时不触发扫描。
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -19,7 +20,7 @@ SYM = "600001.SH"
 def _raw_frame(days: int = 80) -> pl.DataFrame:
     """构造 ~57 个交易日的 14 列形态数据 (复权价与原始价一致, 无除权)。"""
     base = date(2026, 4, 1)
-    rows = []
+    rows: list = []
     price = 10.0
     d = base
     while len(rows) < days:
@@ -29,15 +30,21 @@ def _raw_frame(days: int = 80) -> pl.DataFrame:
             high = max(open_, close) * 1.01
             low = min(open_, close) * 0.99
             price = close
-            rows.append({
-                "symbol": SYM, "date": d,
-                "open": round(open_, 4), "high": round(high, 4),
-                "low": round(low, 4), "close": round(close, 4),
-                "volume": 10000.0 + (len(rows) % 10) * 500.0,
-                "amount": 1.0e7,
-                "raw_close": round(close, 4), "raw_high": round(high, 4),
-                "raw_low": round(low, 4),
-            })
+            rows.append(
+                {
+                    "symbol": SYM,
+                    "date": d,
+                    "open": round(open_, 4),
+                    "high": round(high, 4),
+                    "low": round(low, 4),
+                    "close": round(close, 4),
+                    "volume": 10000.0 + (len(rows) % 10) * 500.0,
+                    "amount": 1.0e7,
+                    "raw_close": round(close, 4),
+                    "raw_high": round(high, 4),
+                    "raw_low": round(low, 4),
+                }
+            )
         d += timedelta(days=1)
     return pl.DataFrame(rows).sort(["symbol", "date"])
 

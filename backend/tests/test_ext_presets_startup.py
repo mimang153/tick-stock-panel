@@ -10,6 +10,7 @@ ensure_builtin_presets 的契约:
   - 用户自定义过 pull (URL 非出厂值) 或 description → 一律不碰
   - 失败只记 warning, 不阻断启动
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -40,8 +41,7 @@ def test_builtin_presets_ship_with_complete_pull() -> None:
         fanout = pull.fanout
         assert fanout, f"{preset.id} 缺少两级拉取配方"
         assert fanout["url"].startswith("https://"), f"{preset.id} fanout 缺少第二级 URL"
-        for key in ("param", "id_field", "member_id_field",
-                    "symbol_col", "name_col", "value_col"):
+        for key in ("param", "id_field", "member_id_field", "symbol_col", "name_col", "value_col"):
             assert fanout.get(key), f"{preset.id} fanout 缺少 {key}"
         assert fanout.get("separator"), f"{preset.id} fanout 缺少拼接符"
 
@@ -122,9 +122,7 @@ def test_ensure_builtin_presets_keeps_custom_user_pull(tmp_path: Path) -> None:
     config = store.get("ext_gn_ths")
     assert config is not None
 
-    config.pull = PullConfig(
-        url="https://example.com/my-own-concepts", enabled=True
-    )
+    config.pull = PullConfig(url="https://example.com/my-own-concepts", enabled=True)
     store.upsert(config)
 
     asyncio.run(ensure_builtin_presets(tmp_path))

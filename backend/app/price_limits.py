@@ -72,8 +72,8 @@ GEM_REGISTRATION_DATE = date(2020, 8, 24)
 STAR_REGISTRATION_DATE = date(2019, 7, 22)
 BJ_OPENING_DATE = date(2021, 11, 15)
 
-NO_LIMIT_WINDOW_TRADING_DAYS = 5      # 沪深主板/创业板/科创板
-NO_LIMIT_WINDOW_TRADING_DAYS_BJ = 1   # 北交所仅上市首日
+NO_LIMIT_WINDOW_TRADING_DAYS = 5  # 沪深主板/创业板/科创板
+NO_LIMIT_WINDOW_TRADING_DAYS_BJ = 1  # 北交所仅上市首日
 
 # 无交易日历可用时的保守日历天边际: 5 个交易日最坏跨 ~15 个日历天
 # (含国庆中秋连休), 1 个交易日跨 3 天。近似路径宁多标勿漏标 — 窗口外
@@ -99,7 +99,11 @@ def no_limit_window_days(symbol: str, listing_date: date | None) -> int:
 
 def no_limit_window_margin_days(symbol: str) -> int:
     """窗口的日历天安全边际 (北交所 3 天, 其余 15 天)。"""
-    return NO_LIMIT_CALENDAR_MARGIN_DAYS_BJ if symbol.endswith(".BJ") else NO_LIMIT_CALENDAR_MARGIN_DAYS
+    return (
+        NO_LIMIT_CALENDAR_MARGIN_DAYS_BJ
+        if symbol.endswith(".BJ")
+        else NO_LIMIT_CALENDAR_MARGIN_DAYS
+    )
 
 
 def parse_listing_date(value: object) -> date | None:
@@ -155,9 +159,12 @@ def polars_price_limit_pct(
     )
     is_non_main = (is_growth | is_star | is_beijing) & ~gem_pre_registration
     base = (
-        pl.when(gem_pre_registration).then(MAIN_BOARD_LIMIT)
-        .when(is_growth | is_star).then(GROWTH_BOARD_LIMIT)
-        .when(is_beijing).then(BEIJING_BOARD_LIMIT)
+        pl.when(gem_pre_registration)
+        .then(MAIN_BOARD_LIMIT)
+        .when(is_growth | is_star)
+        .then(GROWTH_BOARD_LIMIT)
+        .when(is_beijing)
+        .then(BEIJING_BOARD_LIMIT)
         .otherwise(MAIN_BOARD_LIMIT)
     )
     legacy_main_st = (
@@ -165,11 +172,7 @@ def polars_price_limit_pct(
         & ~is_non_main
         & (trade_date < pl.lit(MAIN_BOARD_ST_LIMIT_CHANGE_DATE))
     )
-    return (
-        pl.when(legacy_main_st).then(LEGACY_MAIN_BOARD_ST_LIMIT)
-        .otherwise(base)
-        .cast(pl.Float64)
-    )
+    return pl.when(legacy_main_st).then(LEGACY_MAIN_BOARD_ST_LIMIT).otherwise(base).cast(pl.Float64)
 
 
 def polars_is_risk_warning_name(name: pl.Expr) -> pl.Expr:
@@ -290,7 +293,5 @@ def numpy_limit_price(
     result = np.full(previous.shape, np.nan, dtype=np.float64)
     finite = np.isfinite(previous)
     cents = np.floor(previous[finite] * 100.0 + 0.5).astype(np.int64)
-    result[finite] = (
-        ((cents * numerator[finite] + 50) // 100).astype(np.float64) / 100.0
-    )
+    result[finite] = ((cents * numerator[finite] + 50) // 100).astype(np.float64) / 100.0
     return result

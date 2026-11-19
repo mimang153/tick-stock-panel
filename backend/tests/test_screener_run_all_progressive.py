@@ -1,4 +1,5 @@
 """run_all 渐进式返回的端点行为 — 快策略先返回、慢策略后台落缓存、搭车与旧路径兼容。"""
+
 from __future__ import annotations
 
 import time
@@ -34,7 +35,9 @@ class _FakeEngine:
     def get(self, sid: str):
         return SimpleNamespace(meta={})
 
-    def run_all(self, context, params_map=None, overrides_map=None, *, strategy_ids=None, parallel=True):
+    def run_all(
+        self, context, params_map=None, overrides_map=None, *, strategy_ids=None, parallel=True
+    ):
         out = {}
         for sid in strategy_ids or []:
             self.executed.append(sid)
@@ -110,9 +113,7 @@ def test_run_all_returns_fast_first_then_background_fills_cache(
     assert timings["slow_c"] > timings["fast_a"]
 
 
-def test_run_all_second_run_orders_by_recorded_timings(
-    monkeypatch, tmp_path, fast_first_return
-):
+def test_run_all_second_run_orders_by_recorded_timings(monkeypatch, tmp_path, fast_first_return):
     monkeypatch.setattr(screener_api, "ScreenerService", _FakeService)
     engine = _FakeEngine({"slow_a": 0.5, "fast_b": 0.01})
     body = {
@@ -154,9 +155,7 @@ def test_run_all_second_run_orders_by_recorded_timings(
     assert engine.executed == ["fast_b", "slow_a"]
 
 
-def test_run_all_same_key_piggybacks_running_execution(
-    monkeypatch, tmp_path, fast_first_return
-):
+def test_run_all_same_key_piggybacks_running_execution(monkeypatch, tmp_path, fast_first_return):
     engine = _FakeEngine({"fast_a": 0.02, "slow_c": 1.2})
     monkeypatch.setattr(screener_api, "ScreenerService", _FakeService)
     body = {
@@ -177,9 +176,7 @@ def test_run_all_same_key_piggybacks_running_execution(
     assert engine.executed.count("fast_a") == 1
 
 
-def test_run_all_job_level_error_without_results_is_500(
-    monkeypatch, tmp_path, fast_first_return
-):
+def test_run_all_job_level_error_without_results_is_500(monkeypatch, tmp_path, fast_first_return):
     """job 级失败 (如 context 构建崩溃) 且无任何结果 → 500, 语义不变。
 
     策略级失败 (engine.run_all 对单个 sid 抛错) 已改为逐策略隔离, 见
@@ -272,11 +269,16 @@ def test_run_all_progressive_builds_matrix_once_and_shares_it(
             self.matrix_builds += 1
             return {"fields": len(selected)}
 
-        def run_all(self, context, params_map=None, overrides_map=None, *, strategy_ids=None, parallel=True):
+        def run_all(
+            self, context, params_map=None, overrides_map=None, *, strategy_ids=None, parallel=True
+        ):
             self.seen_markets.append(context.market)
             return super().run_all(
-                context, params_map=params_map, overrides_map=overrides_map,
-                strategy_ids=strategy_ids, parallel=parallel,
+                context,
+                params_map=params_map,
+                overrides_map=overrides_map,
+                strategy_ids=strategy_ids,
+                parallel=parallel,
             )
 
     class _CtxService(_FakeService):
@@ -306,19 +308,22 @@ def test_run_all_progressive_builds_matrix_once_and_shares_it(
     assert len(engine.seen_markets) == 3
 
 
-def test_run_all_isolates_single_strategy_failure(
-    monkeypatch, tmp_path, fast_first_return
-):
+def test_run_all_isolates_single_strategy_failure(monkeypatch, tmp_path, fast_first_return):
     """单个策略执行崩溃只跳过它自己: 其余策略照常算完落缓存, 整批不失败。"""
 
     class _FlakyEngine(_FakeEngine):
-        def run_all(self, context, params_map=None, overrides_map=None, *, strategy_ids=None, parallel=True):
+        def run_all(
+            self, context, params_map=None, overrides_map=None, *, strategy_ids=None, parallel=True
+        ):
             for sid in strategy_ids or []:
                 if sid == "broken":
                     raise ValueError("boom: schema mismatch")
             return super().run_all(
-                context, params_map=params_map, overrides_map=overrides_map,
-                strategy_ids=strategy_ids, parallel=parallel,
+                context,
+                params_map=params_map,
+                overrides_map=overrides_map,
+                strategy_ids=strategy_ids,
+                parallel=parallel,
             )
 
     engine = _FlakyEngine({"ok_a": 0.01, "broken": 0.01, "ok_b": 0.5})
@@ -341,7 +346,9 @@ def test_run_all_isolates_single_strategy_failure(
     assert "boom: schema mismatch" in (resp["errors"] or {}).get("broken", "")
 
 
-def test_auto_ensure_reuses_completed_and_overlapping_batches(monkeypatch, tmp_path, fast_first_return):
+def test_auto_ensure_reuses_completed_and_overlapping_batches(
+    monkeypatch, tmp_path, fast_first_return
+):
     engine = _FakeEngine({"a": 0.01, "b": 0.01, "c": 0.01})
     monkeypatch.setattr(screener_api, "ScreenerService", _FakeService)
     request = _request(tmp_path, engine)
@@ -356,7 +363,9 @@ def test_auto_ensure_reuses_completed_and_overlapping_batches(monkeypatch, tmp_p
     assert set(engine.executed[-2:]) == {"a", "b"}
 
 
-def test_override_change_during_execution_cannot_publish_old_results(monkeypatch, tmp_path, fast_first_return):
+def test_override_change_during_execution_cannot_publish_old_results(
+    monkeypatch, tmp_path, fast_first_return
+):
     from app.strategy import config
 
     class ChangedEngine(_FakeEngine):
@@ -373,7 +382,9 @@ def test_override_change_during_execution_cannot_publish_old_results(monkeypatch
     assert not (strategy_cache.read_cache(tmp_path) or {}).get("results")
 
 
-def test_failed_cache_publication_does_not_report_strategy_result_available(monkeypatch, tmp_path, fast_first_return):
+def test_failed_cache_publication_does_not_report_strategy_result_available(
+    monkeypatch, tmp_path, fast_first_return
+):
     engine = _FakeEngine({"a": 0.01})
     monkeypatch.setattr(screener_api, "ScreenerService", _FakeService)
 
@@ -381,8 +392,14 @@ def test_failed_cache_publication_does_not_report_strategy_result_available(monk
         raise OSError("simulated disk failure")
 
     monkeypatch.setattr(strategy_cache, "write_cache", fail)
-    result = screener_api.run_all(_request(tmp_path, engine), {
-        "as_of": AS_OF, "strategy_ids": ["a"], "summary_only": True, "ensure": True,
-    })
+    result = screener_api.run_all(
+        _request(tmp_path, engine),
+        {
+            "as_of": AS_OF,
+            "strategy_ids": ["a"],
+            "summary_only": True,
+            "ensure": True,
+        },
+    )
     assert "a" not in result["results"]
     assert "a" in result["errors"]

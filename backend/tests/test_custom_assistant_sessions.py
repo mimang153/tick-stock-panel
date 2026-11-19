@@ -3,6 +3,7 @@
 契约: GET 空结构、PUT 保存往返、结构裁剪 (无 id 会话剔除 / 消息截尾 200 /
 会话上限 20)、损坏文件按空处理、API 挂载在 assistant 扩展路由下。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -30,8 +31,7 @@ def _session(sid: str, n_msgs: int = 1) -> dict:
         "title": f"会话{sid}",
         "createdAt": 1700000000000,
         "messages": [
-            {"id": f"m{i}", "role": "user", "content": f"hi {i}", "ts": i}
-            for i in range(n_msgs)
+            {"id": f"m{i}", "role": "user", "content": f"hi {i}", "ts": i} for i in range(n_msgs)
         ],
     }
 

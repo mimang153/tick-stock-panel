@@ -4,6 +4,7 @@
 超过 max 的候选值: 1~20 步长 7 展开成 [1,8,15,22], 22 又被参数自身的
 range 校验拒绝 —— 用户填的上限就是参数合法上限, 却直接报错扫不了。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -12,7 +13,14 @@ from app.backtest.optimizer import count_combinations, expand_param_grid
 
 PARAMS_META = [
     {"id": "min_boards", "type": "int", "default": 2, "min": 1, "max": 20, "step": 1},
-    {"id": "ma_proximity", "type": "float", "default": 0.02, "min": 0.01, "max": 0.50, "step": 0.005},
+    {
+        "id": "ma_proximity",
+        "type": "float",
+        "default": 0.02,
+        "min": 0.01,
+        "max": 0.50,
+        "step": 0.005,
+    },
 ]
 
 
@@ -44,10 +52,12 @@ def test_divisible_range_still_keeps_both_endpoints():
 
     float_meta = [{"id": "p", "type": "float", "default": 0.2, "min": 0.1, "max": 0.3, "step": 0.1}]
     float_values = sorted(
-        combo["p"] for combo in expand_param_grid(float_meta, {"p": {"min": 0.1, "max": 0.3, "step": 0.1}})
+        combo["p"]
+        for combo in expand_param_grid(float_meta, {"p": {"min": 0.1, "max": 0.3, "step": 0.1}})
     )
     assert float_values == [0.1, 0.2, 0.3]
 
-    assert count_combinations(
-        PARAMS_META, {"ma_proximity": {"min": 0.01, "max": 0.05, "step": 0.001}}
-    ) == 41
+    assert (
+        count_combinations(PARAMS_META, {"ma_proximity": {"min": 0.01, "max": 0.05, "step": 0.001}})
+        == 41
+    )

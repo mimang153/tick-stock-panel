@@ -17,6 +17,7 @@ fail-open: 缓存读写任何故障 (目录不可写 / parquet 损坏 / 超限) 
 哈希一次 (hash+sha256 ≈ 8ms/百万行, 远低于因子现算)。frame 指纹表用
 weakref 弱持有, 帧被回收后自动失效, 不阻止内存释放。
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -69,7 +70,9 @@ def invalidate(*, disk: bool = False) -> None:
         _lru.clear()
         _lru_bytes = 0
         _frame_digests.clear()
-    _stats.update({"lru_hit": 0, "disk_hit": 0, "miss": 0, "store": 0, "bypass_small": 0, "error": 0})
+    _stats.update(
+        {"lru_hit": 0, "disk_hit": 0, "miss": 0, "store": 0, "bypass_small": 0, "error": 0}
+    )
     if disk:
         import shutil
 

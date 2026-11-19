@@ -3,6 +3,7 @@
 因子接入规则 (P3): 条件可引用注册表因子 (虚拟/自定义/复合), 历史路径由
 materialize_factor_columns 复用评分物化管线补算, 与检验/评分同一条计算逻辑。
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -17,17 +18,19 @@ def _frame(n_days: int = 30) -> pl.DataFrame:
     """两标的收盘价缓涨; ma20 手工预置为 0.9 倍滚动均值 (保证乖离恒为正)。"""
     rows = []
     end = date(2026, 8, 31)
-    for symbol_id, base in (("A", 100.0), ("B", 50.0)):
-        for i in range(n_days):
-            rows.append({
+    rows.extend(
+        [
+            {
                 "symbol": symbol_id,
                 "date": end - timedelta(days=n_days - 1 - i),
                 "close": base * (1.0 + 0.001 * i),
-            })
-    df = pl.DataFrame(rows).sort(["symbol", "date"])
-    return df.with_columns(
-        (pl.col("close").rolling_mean(20).over("symbol") * 0.9).alias("ma20")
+            }
+            for symbol_id, base in (("A", 100.0), ("B", 50.0))
+            for i in range(n_days)
+        ]
     )
+    df = pl.DataFrame(rows).sort(["symbol", "date"])
+    return df.with_columns((pl.col("close").rolling_mean(20).over("symbol") * 0.9).alias("ma20"))
 
 
 def test_allowed_fields_union_registry() -> None:
@@ -43,12 +46,18 @@ def test_allowed_fields_union_registry() -> None:
 
 def test_validate_accepts_and_rejects_factor_fields() -> None:
     ok = {
-        "id": "t_bias_low", "name": "乖离超卖", "kind": "entry",
-        "conditions": [{"left": "ma20_bias", "op": "<", "right": "-0.05", "leftDays": 0, "rightDays": 0}],
+        "id": "t_bias_low",
+        "name": "乖离超卖",
+        "kind": "entry",
+        "conditions": [
+            {"left": "ma20_bias", "op": "<", "right": "-0.05", "leftDays": 0, "rightDays": 0}
+        ],
     }
     custom_signals.validate(ok)  # 不抛错即通过
     bad = {
-        "id": "t_bad", "name": "x", "kind": "entry",
+        "id": "t_bad",
+        "name": "x",
+        "kind": "entry",
         "conditions": [{"left": "not_a_field", "op": "<", "right": "1"}],
     }
     with pytest.raises(ValueError):
@@ -57,8 +66,13 @@ def test_validate_accepts_and_rejects_factor_fields() -> None:
 
 def test_materialize_factor_columns_and_inject() -> None:
     sig = {
-        "id": "bias_high", "name": "乖离偏高", "kind": "entry", "enabled": True,
-        "conditions": [{"left": "ma20_bias", "op": ">", "right": "0", "leftDays": 0, "rightDays": 0}],
+        "id": "bias_high",
+        "name": "乖离偏高",
+        "kind": "entry",
+        "enabled": True,
+        "conditions": [
+            {"left": "ma20_bias", "op": ">", "right": "0", "leftDays": 0, "rightDays": 0}
+        ],
     }
     exprs = custom_signals.build_expressions([sig])
     col = custom_signals.column_name("bias_high")
@@ -83,8 +97,13 @@ def test_materialize_factor_columns_and_inject() -> None:
 def test_materialize_skips_unknown_columns() -> None:
     """非注册表缺失列: 物化不处理不报错, 由 inject 缺列告警跳过。"""
     sig = {
-        "id": "t_unknown", "name": "x", "kind": "entry", "enabled": True,
-        "conditions": [{"left": "not_a_field", "op": "<", "right": "1", "leftDays": 0, "rightDays": 0}],
+        "id": "t_unknown",
+        "name": "x",
+        "kind": "entry",
+        "enabled": True,
+        "conditions": [
+            {"left": "not_a_field", "op": "<", "right": "1", "leftDays": 0, "rightDays": 0}
+        ],
     }
     exprs = custom_signals.build_expressions([sig])  # 编译不做白名单校验 (validate 负责)
     df = _frame()

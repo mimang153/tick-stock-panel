@@ -4,6 +4,7 @@ _intraday_chart_payload 用服务器本地 date.today() 读分钟K: 周末/节�
 行情快照停在最近交易日 (周五), 分钟分区却按「今天」去查 → 永远为空, 分时图不附。
 图的昨收基准线取自快照行, 分时序列也应取快照所在交易日。
 """
+
 from __future__ import annotations
 
 from datetime import date, datetime
@@ -32,27 +33,40 @@ class _SnapshotRepo:
 
     def get_minute(self, symbol, trade_date, asset_type="stock") -> pl.DataFrame:
         self.requested.append(trade_date)
-        return pl.DataFrame({
-            "datetime": [datetime.combine(trade_date, datetime.min.time()).replace(hour=9, minute=m) for m in (31, 32)],
-            "close": [1490.0, 1500.0],
-            "volume": [120.0, 80.0],
-        }) if trade_date in (_SNAPSHOT_DATE, date(2026, 9, 21)) else pl.DataFrame()
+        return (
+            pl.DataFrame(
+                {
+                    "datetime": [
+                        datetime.combine(trade_date, datetime.min.time()).replace(hour=9, minute=m)
+                        for m in (31, 32)
+                    ],
+                    "close": [1490.0, 1500.0],
+                    "volume": [120.0, 80.0],
+                }
+            )
+            if trade_date in (_SNAPSHOT_DATE, date(2026, 9, 21))
+            else pl.DataFrame()
+        )
 
 
 class _QuoteService:
     def get_quotes_compat(self) -> pl.DataFrame:
-        return pl.DataFrame({
-            "symbol": ["600519.SH"],
-            "close": [1500.0],
-            "prev_close": [1481.8],
-            "change_pct": [0.0123],
-        })
+        return pl.DataFrame(
+            {
+                "symbol": ["600519.SH"],
+                "close": [1500.0],
+                "prev_close": [1481.8],
+                "change_pct": [0.0123],
+            }
+        )
 
 
 async def test_chart_uses_snapshot_trade_date() -> None:
     repo = _SnapshotRepo(_SNAPSHOT_DATE)
     ctx = assistant_tools.ToolContext.build(repo=repo, quote_service=_QuoteService())
-    payload = await assistant_tools.execute_assistant_tool("get_stock_quote", {"symbols": ["600519.SH"]}, ctx)
+    payload = await assistant_tools.execute_assistant_tool(
+        "get_stock_quote", {"symbols": ["600519.SH"]}, ctx
+    )
 
     assert payload["ok"] is True
     assert repo.requested == [_SNAPSHOT_DATE]
@@ -62,11 +76,15 @@ async def test_chart_uses_snapshot_trade_date() -> None:
     assert chart["points"] == [["09:31", 1490.0, 120.0], ["09:32", 1500.0, 80.0]]
 
 
-async def test_chart_falls_back_to_beijing_today_without_snapshot_date(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_chart_falls_back_to_beijing_today_without_snapshot_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(assistant_tools, "cn_today", lambda: date(2026, 9, 21), raising=False)
     repo = _SnapshotRepo(None)
     ctx = assistant_tools.ToolContext.build(repo=repo, quote_service=_QuoteService())
-    payload = await assistant_tools.execute_assistant_tool("get_stock_quote", {"symbols": ["600519.SH"]}, ctx)
+    payload = await assistant_tools.execute_assistant_tool(
+        "get_stock_quote", {"symbols": ["600519.SH"]}, ctx
+    )
 
     assert repo.requested == [date(2026, 9, 21)]
     assert payload["result"]["charts"][0]["points"][0] == ["09:31", 1490.0, 120.0]

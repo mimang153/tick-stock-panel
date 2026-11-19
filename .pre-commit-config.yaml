@@ -51,7 +51,8 @@ repos:
       - id: backend-debug-statements
         name: 阻止调试残留 (后端 print/pdb/breakpoint)
         # \b 词边界避免 fingerprint( / sprint( 等标识符子串被误判为调试残留。
-        entry: bash -c 'if grep -rnE "\\bprint\\(|\\bpdb\\.|\\bbreakpoint\\(|\\bimport ipdb" "$@" 2>/dev/null; then echo "发现调试残留，请移除后提交"; exit 1; fi; exit 0'
+        # `_` 是 bash -c 的 $0 占位，避免吞掉第一个待检查文件。
+        entry: bash -c 'if grep -rnE "\\bprint\\(|\\bpdb\\.|\\bbreakpoint\\(|\\bimport ipdb" "$@" 2>/dev/null; then echo "发现调试残留，请移除后提交"; exit 1; fi; exit 0' _
         language: system
         files: '^backend/.*\.py$'
         # scripts 下 print 是有意的 CLI 输出, 不是调试残留
@@ -84,9 +85,8 @@ repos:
         files: '^backend/.*\.py$'
         pass_filenames: true
         types: [python]
-        # 阶段 4 已拆分原目录级/批量豁免文件，这里收敛为「仅未拆分的存量巨型文件」。
-        # strategy.py 为唯一仍 >1000 行的存量文件，按单文件显式豁免并登记为待重构债。
-        exclude: '^backend/app/backtest/strategy\.py$'
+        # QG-04 已把原 strategy.py / storage/store.py 真实拆分为同名包，
+        # 全部子模块 ≤1000 行；目录级/单文件豁免已全部移除。
 
       - id: backend-function-length
         name: 函数行数门禁 (后端, 单个函数/方法超 80 行拦住)
@@ -99,9 +99,8 @@ repos:
         files: '^backend/.*\.py$'
         pass_filenames: true
         types: [python]
-        # 与文件行数门禁一致：仅未拆分的 strategy.py 保留存量豁免，
-        # 其 7 个 >80 行函数已在整改计划登记为待重构债。
-        exclude: '^backend/app/backtest/strategy\.py$'
+        # QG-05 已真实拆分 strategy.py 全部函数至 ≤80 行，且文件已改为同名包；
+        # 原单文件豁免已移除。
 
   # ---------- 后端：注释覆盖率门禁（增量，双向区间） ----------
   - repo: local
@@ -126,7 +125,8 @@ repos:
     hooks:
       - id: backend-mypy
         name: mypy 类型检查 (后端)
-        entry: bash -c 'mypy --config-file backend/pyproject.toml "$@" 2>&1; code=$?; if [ $code -ne 0 ]; then echo "mypy 类型检查失败，请修复类型错误后重试"; fi; exit $code'
+        # `_` 是 bash -c 的 $0 占位；缺少它会让 mypy 漏检首个文件并在无参数时误报。
+        entry: bash -c 'mypy --config-file backend/pyproject.toml "$@" 2>&1; code=$?; if [ $code -ne 0 ]; then echo "mypy 类型检查失败，请修复类型错误后重试"; fi; exit $code' _
         language: system
         files: '^backend/\.*(app|tests)/.*\.py$'
         pass_filenames: true

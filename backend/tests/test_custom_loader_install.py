@@ -6,6 +6,7 @@ PATH 上的基础解释器 (如 conda base, 常为只读) → 装错环境 + exi
 修复: uv 命令显式传 `--python sys.executable` 锁定后端自身 venv, 与 pip 回退
 路径 (sys.executable -m pip) 的目标一致。
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -36,7 +37,8 @@ def _fake_python_plugin(monkeypatch, tmp_path):
     pdir = tmp_path / "baostock"
     pdir.mkdir()
     (pdir / "plugin.yaml").write_text(
-        "name: baostock\nruntime: python\nentry: p:provider\n", encoding="utf-8",
+        "name: baostock\nruntime: python\nentry: p:provider\n",
+        encoding="utf-8",
     )
     (pdir / "requirements.txt").write_text("baostock\n", encoding="utf-8")
     monkeypatch.setattr(loader, "plugins_dir", lambda: tmp_path)

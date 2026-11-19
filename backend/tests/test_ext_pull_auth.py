@@ -4,10 +4,12 @@
 注入与缺 Key fail-closed、_request_json 共用请求链 (标识头+鉴权)、
 api-key GET/PUT 端点的脱敏语义、删除配置时清理残留密钥。
 """
+
 from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -43,6 +45,7 @@ def _auth_config(auth: dict | None, **pull_kwargs) -> ExtConfig:
 # PullConfig.auth 序列化
 # ---------------------------------------------------------------------------
 
+
 def test_pull_config_auth_roundtrip() -> None:
     auth = {"type": "bearer", "header": "X-Api-Key", "param": "token"}
     pull = PullConfig.from_dict(PullConfig(url="https://x.test", auth=auth).to_dict())
@@ -58,6 +61,7 @@ def test_pull_config_without_auth_field_reads_as_none() -> None:
 # ---------------------------------------------------------------------------
 # _apply_auth 注入
 # ---------------------------------------------------------------------------
+
 
 def _seed_key(monkeypatch, key: str) -> None:
     monkeypatch.setattr("app.secrets_store.load", lambda: {ext_api_key_field("demo"): key})
@@ -75,14 +79,18 @@ def test_apply_auth_bearer_injects_header(monkeypatch) -> None:
 def test_apply_auth_header_uses_custom_name(monkeypatch) -> None:
     _seed_key(monkeypatch, "sk-12345678")
     headers: dict[str, str] = {}
-    ext_pull._apply_auth("demo", {"type": "header", "header": "X-Api-Key"}, "https://x.test/d", headers)
+    ext_pull._apply_auth(
+        "demo", {"type": "header", "header": "X-Api-Key"}, "https://x.test/d", headers
+    )
     assert headers["X-Api-Key"] == "sk-12345678"
 
 
 def test_apply_auth_query_appends_param_url_encoded(monkeypatch) -> None:
     _seed_key(monkeypatch, "sk+a&b=1")
     headers: dict[str, str] = {}
-    url = ext_pull._apply_auth("demo", {"type": "query", "param": "apikey"}, "https://x.test/d?page=1", headers)
+    url = ext_pull._apply_auth(
+        "demo", {"type": "query", "param": "apikey"}, "https://x.test/d?page=1", headers
+    )
     assert url == "https://x.test/d?page=1&apikey=sk%2Ba%26b%3D1"
     assert headers == {}
 
@@ -104,7 +112,10 @@ def test_apply_auth_rejects_hub_admin_session_cookie(monkeypatch) -> None:
     _seed_key(monkeypatch, "tickflow_hub_access=eyJleHAiOjE3OTI0OTAwMDB9.sig")
     with pytest.raises(ValueError) as err:
         ext_pull._apply_auth(
-            "demo", {"type": "header", "header": "Cookie"}, "https://x.test/d", {},
+            "demo",
+            {"type": "header", "header": "Cookie"},
+            "https://x.test/d",
+            {},
         )
     message = str(err.value)
     assert "会话 Cookie" in message
@@ -115,7 +126,10 @@ def test_apply_auth_rejects_session_cookie_even_when_mixed(monkeypatch) -> None:
     _seed_key(monkeypatch, "foo=1; tickflow_hub_access=abc.def; bar=2")
     with pytest.raises(ValueError):
         ext_pull._apply_auth(
-            "demo", {"type": "header", "header": "cookie"}, "https://x.test/d", {},
+            "demo",
+            {"type": "header", "header": "cookie"},
+            "https://x.test/d",
+            {},
         )
 
 
@@ -123,13 +137,16 @@ def test_apply_auth_allows_plain_cookie_header_value(monkeypatch) -> None:
     """非会话 Cookie 的普通 header 凭据不受影响。"""
     _seed_key(monkeypatch, "sk-12345678")
     headers: dict[str, str] = {}
-    ext_pull._apply_auth("demo", {"type": "header", "header": "Cookie"}, "https://x.test/d", headers)
+    ext_pull._apply_auth(
+        "demo", {"type": "header", "header": "Cookie"}, "https://x.test/d", headers
+    )
     assert headers["Cookie"] == "sk-12345678"
 
 
 # ---------------------------------------------------------------------------
 # _request_json 共用请求链 (标识头 + 鉴权 + UA 不被覆盖)
 # ---------------------------------------------------------------------------
+
 
 class _FakeResp:
     status_code = 200
@@ -169,9 +186,12 @@ def test_request_json_injects_auth_and_keeps_user_headers(monkeypatch) -> None:
         auth={"type": "bearer"},
         date_param="date",
     )
-    data = asyncio.run(ext_pull._request_json(pull, "demo", day=__import__("datetime").date(2026, 9, 1)))
+    data = asyncio.run(
+        ext_pull._request_json(pull, "demo", day=__import__("datetime").date(2026, 9, 1))
+    )
 
     assert data == [{"symbol": "600000.SH", "score": 1.0}]
+    assert _FakeClient.last is not None
     method, url, kwargs = _FakeClient.last
     assert method == "GET"
     assert url == "https://x.test/d?date=2026-09-01"
@@ -206,17 +226,30 @@ def test_request_json_surfaces_auth_rejection_with_actionable_message(monkeypatc
 # api-key 端点 + 删除清理
 # ---------------------------------------------------------------------------
 
-def _request(tmp_path) -> SimpleNamespace:
+
+def _request(tmp_path) -> Any:
+    """构造 duck-typed 的假 Request; 端点只读 request.app.state。"""
     state = SimpleNamespace(repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)))
     return SimpleNamespace(app=SimpleNamespace(state=state))
 
 
+def _pull(store: ExtConfigStore) -> PullConfig:
+    """读取测试配置里的 pull; 测试夹具保证 config 与 pull 均存在。"""
+    cfg = store.get("demo")
+    assert cfg is not None and cfg.pull is not None
+    return cfg.pull
+
+
 def _make_config(tmp_path) -> ExtConfigStore:
     store = ExtConfigStore(tmp_path)
-    store.upsert(ExtConfig(
-        id="demo", label="demo", mode="snapshot",
-        fields=[ExtField("symbol"), ExtField("score", "float")],
-    ))
+    store.upsert(
+        ExtConfig(
+            id="demo",
+            label="demo",
+            mode="snapshot",
+            fields=[ExtField("symbol"), ExtField("score", "float")],
+        )
+    )
     return store
 
 
@@ -224,7 +257,9 @@ def test_api_key_set_get_and_clear(monkeypatch, tmp_path) -> None:
     _make_config(tmp_path)
     req = _request(tmp_path)
     written: dict = {}
-    monkeypatch.setattr("app.secrets_store.save", lambda updates: written.update(updates) or updates)
+    monkeypatch.setattr(
+        "app.secrets_store.save", lambda updates: written.update(updates) or updates
+    )
     monkeypatch.setattr("app.secrets_store.load", lambda: written)
     monkeypatch.setattr(
         "app.secrets_store.clear",
@@ -260,19 +295,33 @@ def test_configure_pull_omitted_auth_preserves_existing(monkeypatch, tmp_path) -
     store = _make_config(tmp_path)
     req = _request(tmp_path)
 
-    body = PullConfigReq(url="https://x.test/d", auth=None)
+    body = PullConfigReq.model_validate({"url": "https://x.test/d", "auth": None})
     configure_pull(req, "demo", body)
-    assert store.get("demo").pull.auth is None
+    assert _pull(store).auth is None
 
     # 显式设置 bearer 后, 后续不带 auth 的保存不应清掉它
-    configure_pull(req, "demo", PullConfigReq(url="https://x.test/d", auth={"type": "bearer", "header": "X-Key"}))
-    configure_pull(req, "demo", PullConfigReq(url="https://x.test/d2"))
+    configure_pull(
+        req,
+        "demo",
+        PullConfigReq.model_validate(
+            {"url": "https://x.test/d", "auth": {"type": "bearer", "header": "X-Key"}}
+        ),
+    )
+    configure_pull(req, "demo", PullConfigReq.model_validate({"url": "https://x.test/d2"}))
     # model_dump 带全默认值 (param 对 bearer 无效但保留, from_dict 可原样读回)
-    assert store.get("demo").pull.auth == {"type": "bearer", "header": "X-Key", "param": "token"}
-    assert store.get("demo").pull.url == "https://x.test/d2"
+    assert _pull(store).auth == {"type": "bearer", "header": "X-Key", "param": "token"}
+    assert _pull(store).url == "https://x.test/d2"
 
-    configure_pull(req, "demo", PullConfigReq(url="https://x.test/d", auth={"type": "none"}))
-    assert store.get("demo").pull.auth == {"type": "none", "header": "Authorization", "param": "token"}
+    configure_pull(
+        req,
+        "demo",
+        PullConfigReq.model_validate({"url": "https://x.test/d", "auth": {"type": "none"}}),
+    )
+    assert _pull(store).auth == {
+        "type": "none",
+        "header": "Authorization",
+        "param": "token",
+    }
 
 
 def test_configure_pull_persists_pagination_fields(monkeypatch, tmp_path) -> None:
@@ -286,16 +335,22 @@ def test_configure_pull_persists_pagination_fields(monkeypatch, tmp_path) -> Non
     store = _make_config(tmp_path)
     req = _request(tmp_path)
 
-    configure_pull(req, "demo", PullConfigReq(
-        url="https://x.test/d",
-        page_param="page",
-        page_size_param="size",
-        page_size=100,
-        page_start=0,
-        max_pages=7,
-    ))
+    configure_pull(
+        req,
+        "demo",
+        PullConfigReq.model_validate(
+            {
+                "url": "https://x.test/d",
+                "page_param": "page",
+                "page_size_param": "size",
+                "page_size": 100,
+                "page_start": 0,
+                "max_pages": 7,
+            }
+        ),
+    )
 
-    pull = store.get("demo").pull
+    pull = _pull(store)
     assert (pull.page_param, pull.page_size_param, pull.page_size) == ("page", "size", 100)
     assert (pull.page_start, pull.max_pages) == (0, 7)
 
@@ -307,7 +362,12 @@ def test_delete_config_clears_residual_key(monkeypatch, tmp_path) -> None:
     req = _request(tmp_path)
     monkeypatch.setattr("app.api.ext_data._refresh_views", lambda request: None)
     cleared: list[str] = []
-    monkeypatch.setattr("app.secrets_store.clear", lambda *keys: cleared.extend(keys) or {})
+
+    def _clear(*keys):
+        cleared.extend(keys)
+        return {}
+
+    monkeypatch.setattr("app.secrets_store.clear", _clear)
 
     assert delete_config(req, "demo") == {"status": "deleted"}
     assert cleared == ["ext_demo_api_key"]
@@ -322,6 +382,7 @@ def test_get_ext_api_key_env_fallback(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 # 保存阶段拦截会话 Cookie (配置/Key 两处)
 # ---------------------------------------------------------------------------
+
 
 def test_configure_pull_rejects_session_cookie_key(tmp_path, monkeypatch) -> None:
     """保存拉取配置时, 已存的会话 Cookie 凭据必须被拒绝 (不能让坏配置继续跑)。"""
@@ -358,7 +419,9 @@ def test_configure_pull_rejects_session_cookie_key(tmp_path, monkeypatch) -> Non
         ext_api.configure_pull(
             request,
             "demo",
-            PullConfigReq(url="https://x.test/d", auth={"type": "header", "header": "Cookie"}),
+            PullConfigReq.model_validate(
+                {"url": "https://x.test/d", "auth": {"type": "header", "header": "Cookie"}}
+            ),
         )
     assert err.value.status_code == 400
     assert "API Key" in err.value.detail
@@ -382,7 +445,8 @@ def test_set_pull_api_key_rejects_session_cookie(tmp_path, monkeypatch) -> None:
 
     with pytest.raises(HTTPException) as err:
         ext_api.set_pull_api_key(
-            SimpleNamespace(), "demo",
+            SimpleNamespace(),
+            "demo",
             ApiKeyReq(key="tickflow_hub_access=eyJleHAiOjF9.sig"),
         )
     assert err.value.status_code == 400

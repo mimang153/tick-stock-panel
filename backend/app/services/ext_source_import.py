@@ -11,6 +11,7 @@
 仅源码/桌面部署可发起导入 (需要 frontend/node_modules 里的 esbuild);
 产物是标准页面插件, 全部署形态可用。
 """
+
 from __future__ import annotations
 
 import json
@@ -24,9 +25,22 @@ from app.config import settings
 
 # 与 frontend/src/extensions/runtime.tsx ICON_ALLOWLIST 的键逐字一致 (大小写敏感)
 _ICON_ALLOWLIST = [
-    "Activity", "BarChart3", "Bell", "BookOpen", "Brain", "Calendar",
-    "Database", "Globe", "LineChart", "PieChart", "Shield", "Sparkles",
-    "Star", "Table", "TrendingUp", "Zap",
+    "Activity",
+    "BarChart3",
+    "Bell",
+    "BookOpen",
+    "Brain",
+    "Calendar",
+    "Database",
+    "Globe",
+    "LineChart",
+    "PieChart",
+    "Shield",
+    "Sparkles",
+    "Star",
+    "Table",
+    "TrendingUp",
+    "Zap",
 ]
 
 _NS_RE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
@@ -99,14 +113,17 @@ def find_esbuild() -> Path | None:
     """
     root = frontend_root()
     candidates: list[Path] = [root / "node_modules" / ".bin" / "esbuild"]
-    candidates.extend(sorted((root / "node_modules" / ".pnpm").glob(
-        "@esbuild+*/node_modules/@esbuild/*/bin/esbuild")))
-    candidates.extend(sorted((root / "node_modules" / "@esbuild").glob(
-        "*/bin/esbuild")))
+    candidates.extend(
+        sorted(
+            (root / "node_modules" / ".pnpm").glob("@esbuild+*/node_modules/@esbuild/*/bin/esbuild")
+        )
+    )
+    candidates.extend(sorted((root / "node_modules" / "@esbuild").glob("*/bin/esbuild")))
     for c in candidates:
         if c.is_file():
             return c
     from shutil import which
+
     exe = which("esbuild")
     return Path(exe) if exe else None
 
@@ -128,10 +145,7 @@ def list_namespaces() -> list[str]:
     root = custom_root()
     if not root.is_dir():
         return []
-    return sorted(
-        d.name for d in root.iterdir()
-        if d.is_dir() and (d / "extension.tsx").is_file()
-    )
+    return sorted(d.name for d in root.iterdir() if d.is_dir() and (d / "extension.tsx").is_file())
 
 
 def compile_source(source_path: Path, pack_id_hint: str) -> tuple[bytes, str]:
@@ -148,7 +162,8 @@ def compile_source(source_path: Path, pack_id_hint: str) -> tuple[bytes, str]:
     esbuild = find_esbuild()
     if esbuild is None:
         raise SourceImportUnavailableError(
-            "当前部署没有 esbuild 工具链, 源码导入仅源码/桌面部署可用")
+            "当前部署没有 esbuild 工具链, 源码导入仅源码/桌面部署可用"
+        )
 
     root = frontend_root()
     try:
@@ -168,21 +183,24 @@ def compile_source(source_path: Path, pack_id_hint: str) -> tuple[bytes, str]:
             entry_source = source
         shim = tmp / "shim.tsx"
         shim.write_text(
-            _SHIM_TEMPLATE
-            .replace("__ENTRY__", json.dumps(str(entry_source)))
-            .replace("__ICONS__", json.dumps(_ICON_ALLOWLIST)),
+            _SHIM_TEMPLATE.replace("__ENTRY__", json.dumps(str(entry_source))).replace(
+                "__ICONS__", json.dumps(_ICON_ALLOWLIST)
+            ),
             encoding="utf-8",
         )
         out = tmp / "bundle.js"
         # 参数全部内部构造, esbuild 二进制来自本仓库 frontend/node_modules
         proc = subprocess.run(
             [
-                str(esbuild), str(shim),
-                "--bundle", "--format=esm", "--minify",
+                str(esbuild),
+                str(shim),
+                "--bundle",
+                "--format=esm",
+                "--minify",
                 "--jsx=automatic",
                 f"--outfile={out}",
                 f"--alias:@={root / 'src'}",
-                "--define:process.env.NODE_ENV=\"production\"",
+                '--define:process.env.NODE_ENV="production"',
                 "--loader:.css=empty",
                 "--log-level=error",
             ],
@@ -196,7 +214,8 @@ def compile_source(source_path: Path, pack_id_hint: str) -> tuple[bytes, str]:
         data = out.read_bytes()
         if len(data) > _MAX_BUNDLE_BYTES:
             raise SourceCompileError(
-                f"编译产物 {len(data) // 1024}KB 超过 {_MAX_BUNDLE_BYTES // (1024 * 1024)}MB 上限")
+                f"编译产物 {len(data) // 1024}KB 超过 {_MAX_BUNDLE_BYTES // (1024 * 1024)}MB 上限"
+            )
         return data, f"{source_path.name} ({len(data) // 1024}KB)"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

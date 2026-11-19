@@ -1,4 +1,5 @@
 """因子注册表 API — 因子库 (P1) + 公式校验/试算 (P2) + 自定义/复合因子 CRUD (P3)。"""
+
 from __future__ import annotations
 
 import contextlib
@@ -25,7 +26,9 @@ router = APIRouter(prefix="/api/factors", tags=["factors"])
 
 
 @router.get("")
-def list_factors(request: Request, asset_type: str | None = Query(default=None, pattern="^(stock|etf)$")) -> dict:
+def list_factors(
+    request: Request, asset_type: str | None = Query(default=None, pattern="^(stock|etf)$")
+) -> dict:
     """注册表因子列表; asset_type 过滤适用资产 (财务因子仅股票)。
 
     附带生命周期 status (draft/active/watch/retired, 仅盘上定义的自定义/复合
@@ -106,78 +109,120 @@ def _trial_panel(request: Request, compiled, asset_type: str, days: int) -> pl.D
     today = cn_today()
     names = sorted(set(compiled.dependencies).union(compiled.referenced_factors))
     config = FactorBatchConfig(
-        factor_names=names, symbols=None, start=today, end=today, asset_type=asset_type,
+        factor_names=names,
+        symbols=None,
+        start=today,
+        end=today,
+        asset_type=asset_type,
     )
     return FactorBacktestService(_get_engine(request))._load_factor_panel(
-        config, names, warmup_bars=compiled.warmup_bars + days,
+        config,
+        names,
+        warmup_bars=compiled.warmup_bars + days,
     )
 
 
-@router.post("/trial")
-def trial_formula(req: FormulaTrialRequest, request: Request) -> dict:
-    """公式试算: 最近 N 个交易日截面 Rank IC 快照 (复用回测面板与虚拟因子物化路径)。"""
-    compiled = (
-        compile_python_expression(req.formula) if req.lang == "python" else compile_formula(req.formula)
-    )
-    if not compiled.ok:
-        raise HTTPException(status_code=400, detail={"errors": [error.to_dict() for error in compiled.errors]})
-
-    panel = _trial_panel(request, compiled, req.asset_type, req.days)
-    if panel.is_empty():
-        raise HTTPException(status_code=400, detail="当前数据目录无可用历史数据, 无法试算")
-
+def _prepare_trial_frame(compiled, panel: pl.DataFrame) -> tuple[pl.DataFrame, int, int]:
     if compiled.frame_transform is None:
         raise HTTPException(status_code=500, detail="编译产物缺少帧变换")
     prepared = compiled.frame_transform(panel)
     if prepared is None:
         raise HTTPException(
             status_code=400,
-            detail={"errors": [{
-                "code": "E013", "message": "依赖列不可用: 面板缺少公式所需列",
-                "position": {"offset": 0, "line": 1},
-                "detail": {"missing": sorted((compiled.dependencies | compiled.referenced_factors) - set(panel.columns))},
-            }]},
+            detail={
+                "errors": [
+                    {
+                        "code": "E013",
+                        "message": "依赖列不可用: 面板缺少公式所需列",
+                        "position": {"offset": 0, "line": 1},
+                        "detail": {
+                            "missing": sorted(
+                                (compiled.dependencies | compiled.referenced_factors)
+                                - set(panel.columns)
+                            )
+                        },
+                    }
+                ]
+            },
         )
 
     total_rows = panel.height
     frame = (
-        prepared
-        .with_columns(
+        prepared.with_columns(
             (pl.col("close").shift(-1).over("symbol") / pl.col("close") - 1.0).alias("_next_return")
         )
         .filter(pl.col(FACTOR_COLUMN).is_not_null())
         .unique(subset=["symbol", "date"], keep="last")
         .sort(["symbol", "date"])
     )
-    non_null_rows = frame.height
-    if non_null_rows == 0:
-        return {
-            "ok": True, "n_dates": 0, "null_ratio": 1.0,
-            "ic_mean": None, "ic_std": None, "ir": None, "ic_win_rate": None,
-            "ic_series": [], "message": "试算区间内公式输出全为空 (检查预热窗口与数据范围)",
-        }
+    return frame, total_rows, frame.height
 
+
+def _trial_ic_frame(frame: pl.DataFrame, days: int) -> tuple[pl.DataFrame, list[dict]]:
     ic_frame = (
         frame.filter(pl.col("_next_return").is_not_null())
         .group_by("date")
         .agg(
-            pl.corr(pl.col(FACTOR_COLUMN).rank(method="average"), pl.col("_next_return").rank(method="average")).alias("ic"),
+            pl.corr(
+                pl.col(FACTOR_COLUMN).rank(method="average"),
+                pl.col("_next_return").rank(method="average"),
+            ).alias("ic"),
             pl.len().alias("n_symbols"),
         )
-        # 截面值全相同时 pl.corr 返回 NaN (非 null), 与 FactorBacktestService 同口径剔除
         .filter(pl.col("ic").is_not_null() & pl.col("ic").is_finite())
         .sort("date")
-        .tail(req.days)
+        .tail(days)
     )
     ic_series = [
         {"date": str(row["date"]), "ic": round(row["ic"], 4), "n_symbols": row["n_symbols"]}
         for row in ic_frame.to_dicts()
     ]
+    return ic_frame, ic_series
+
+
+@router.post("/trial")
+def trial_formula(req: FormulaTrialRequest, request: Request) -> dict:
+    """公式试算: 最近 N 个交易日截面 Rank IC 快照 (复用回测面板与虚拟因子物化路径)。"""
+    compiled = (
+        compile_python_expression(req.formula)
+        if req.lang == "python"
+        else compile_formula(req.formula)
+    )
+    if not compiled.ok:
+        raise HTTPException(
+            status_code=400, detail={"errors": [error.to_dict() for error in compiled.errors]}
+        )
+
+    panel = _trial_panel(request, compiled, req.asset_type, req.days)
+    if panel.is_empty():
+        raise HTTPException(status_code=400, detail="当前数据目录无可用历史数据, 无法试算")
+
+    frame, total_rows, non_null_rows = _prepare_trial_frame(compiled, panel)
+    if non_null_rows == 0:
+        return {
+            "ok": True,
+            "n_dates": 0,
+            "null_ratio": 1.0,
+            "ic_mean": None,
+            "ic_std": None,
+            "ir": None,
+            "ic_win_rate": None,
+            "ic_series": [],
+            "message": "试算区间内公式输出全为空 (检查预热窗口与数据范围)",
+        }
+
+    ic_frame, ic_series = _trial_ic_frame(frame, req.days)
     if ic_frame.is_empty():
         return {
-            "ok": True, "n_dates": 0, "null_ratio": round(1.0 - non_null_rows / max(total_rows, 1), 4),
-            "ic_mean": None, "ic_std": None, "ir": None, "ic_win_rate": None,
-            "ic_series": [], "message": "无有效 IC 截面 (需每期 ≥2 只标的)",
+            "ok": True,
+            "n_dates": 0,
+            "null_ratio": round(1.0 - non_null_rows / max(total_rows, 1), 4),
+            "ic_mean": None,
+            "ic_std": None,
+            "ir": None,
+            "ic_win_rate": None,
+            "ic_series": [],
+            "message": "无有效 IC 截面 (需每期 ≥2 只标的)",
         }
     stats = ic_frame.select(
         pl.col("ic").mean().alias("mean"),
@@ -239,7 +284,9 @@ def _data_dir(request: Request):
 
 
 def _slugify_id(label: str, prefix: str) -> str:
-    base = "".join(ch if ch.isascii() and (ch.isalnum() or ch == "_") else "_" for ch in label.lower())
+    base = "".join(
+        ch if ch.isascii() and (ch.isalnum() or ch == "_") else "_" for ch in label.lower()
+    )
     candidate = f"{prefix}_{base}".strip("_")[:44]
     import re
 
@@ -262,10 +309,14 @@ def _trial_nonempty(request: Request, formula: str, asset_type: str = "stock") -
     """保存前置校验: 公式在最近 40 个交易日有非空输出 (设计 §3.5, fail-closed)。"""
     compiled = compile_formula(formula)
     if not compiled.ok:
-        raise HTTPException(status_code=400, detail={"errors": [e.to_dict() for e in compiled.errors]})
+        raise HTTPException(
+            status_code=400, detail={"errors": [e.to_dict() for e in compiled.errors]}
+        )
     panel = _trial_panel(request, compiled, asset_type, 40)
     if panel.is_empty():
-        raise HTTPException(status_code=400, detail="当前无历史数据, 无法完成保存前试算 (fail-closed)")
+        raise HTTPException(
+            status_code=400, detail="当前无历史数据, 无法完成保存前试算 (fail-closed)"
+        )
     prepared = compiled.frame_transform(panel) if compiled.frame_transform else None
     if prepared is not None:
         recent = prepared["date"].unique().sort().tail(40)
@@ -356,20 +407,24 @@ def update_custom_factor(factor_id: str, req: CustomFactorUpdateRequest, request
     if target is None:
         raise HTTPException(status_code=404, detail=f"自定义因子不存在: {factor_id}")
     if str(target.get("kind", "custom")) != "custom":
-        raise HTTPException(status_code=400, detail=f"仅自定义因子支持公式编辑 (kind={target.get('kind')})")
+        raise HTTPException(
+            status_code=400, detail=f"仅自定义因子支持公式编辑 (kind={target.get('kind')})"
+        )
     formula_changed = str(target.get("formula")) != req.formula
     if formula_changed:
         _trial_nonempty(request, req.formula)
-    target.update({
-        "label": req.label,
-        "group": req.group,
-        "formula": req.formula,
-        "description": req.description,
-        "direction": req.direction,
-        "version": int(target.get("version", 1)) + 1,  # 版本提升 → 注册表允许覆盖
-        "status": "draft" if formula_changed else str(target.get("status", "draft")),
-        "updated_at": store._now(),
-    })
+    target.update(
+        {
+            "label": req.label,
+            "group": req.group,
+            "formula": req.formula,
+            "description": req.description,
+            "direction": req.direction,
+            "version": int(target.get("version", 1)) + 1,  # 版本提升 → 注册表允许覆盖
+            "status": "draft" if formula_changed else str(target.get("status", "draft")),
+            "updated_at": store._now(),
+        }
+    )
     try:
         store.register_definition(target)
     except ValueError as exc:
@@ -422,13 +477,17 @@ def _find_references(data_dir, factor_id: str) -> list[str]:
             continue
         spec = get_factor(str(definition.get("id")))
         members = definition.get("members")
-        if (isinstance(members, dict) and factor_id in members) or (spec and factor_id in spec.inputs):
+        if (isinstance(members, dict) and factor_id in members) or (
+            spec and factor_id in spec.inputs
+        ):
             references.append(f"custom_factors/{definition.get('id')}.json")
     return references
 
 
 @router.delete("/custom/{factor_id}")
-def delete_custom_factor(factor_id: str, request: Request, force: bool = Query(default=False)) -> dict:
+def delete_custom_factor(
+    factor_id: str, request: Request, force: bool = Query(default=False)
+) -> dict:
     """删除自定义/复合因子; 有引用时列出引用方并拒绝 (需 force)。"""
     data_dir = _data_dir(request)
     from app.factors.registry import get_factor
@@ -439,7 +498,10 @@ def delete_custom_factor(factor_id: str, request: Request, force: bool = Query(d
     if references and not force:
         raise HTTPException(
             status_code=409,
-            detail={"message": "该因子仍有引用, 拒绝删除 (可带 force=true 强制)", "references": references},
+            detail={
+                "message": "该因子仍有引用, 拒绝删除 (可带 force=true 强制)",
+                "references": references,
+            },
         )
     if get_factor(factor_id) is None and not store.delete_one(data_dir, factor_id):
         raise HTTPException(status_code=404, detail=f"因子不存在: {factor_id}")

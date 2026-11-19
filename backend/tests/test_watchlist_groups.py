@@ -1,4 +1,5 @@
 """自选分组持久化与 API 契约。"""
+
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -21,11 +22,13 @@ def test_historical_watchlist_is_read_as_ungrouped(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     path = tmp_path / "user_data" / "watchlist.parquet"
     path.parent.mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": ["600000.SH"],
-        "added_at": ["2026-08-08T10:00:00"],
-        "note": [""],
-    }).write_parquet(path)
+    pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "added_at": ["2026-08-08T10:00:00"],
+            "note": [""],
+        }
+    ).write_parquet(path)
 
     assert watchlist.list_symbols()[0]["group_ids"] == []
 
@@ -103,18 +106,14 @@ def test_reorder_groups_api(monkeypatch, tmp_path):
     assert [group["name"] for group in result["groups"]] == ["二", "一"]
 
     with pytest.raises(HTTPException) as exc_info:
-        watchlist_api.reorder_groups(
-            watchlist_api.GroupReorderRequest(ordered_ids=["missing"])
-        )
+        watchlist_api.reorder_groups(watchlist_api.GroupReorderRequest(ordered_ids=["missing"]))
     assert exc_info.value.status_code == 400
 
 
 def test_group_api_contract(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     request = _request()
-    created = watchlist_api.create_group(
-        watchlist_api.GroupNameRequest(name="中线", color="teal")
-    )
+    created = watchlist_api.create_group(watchlist_api.GroupNameRequest(name="中线", color="teal"))
     group_id = created["group"]["id"]
     assert created["group"]["color"] == "teal"
 
@@ -141,8 +140,7 @@ def test_historical_groups_default_to_sky(monkeypatch, tmp_path):
     path = tmp_path / "user_data" / "watchlist_groups.json"
     path.parent.mkdir(parents=True)
     path.write_text(
-        '[{"id":"legacy","name":"旧分组"},'
-        '{"id":"invalid","name":"未知颜色","color":"black"}]',
+        '[{"id":"legacy","name":"旧分组"},{"id":"invalid","name":"未知颜色","color":"black"}]',
         encoding="utf-8",
     )
 
@@ -175,9 +173,7 @@ def test_clear_group_moves_members_to_ungrouped(monkeypatch, tmp_path):
 def test_clear_group_api(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     request = _request()
-    created = watchlist_api.create_group(
-        watchlist_api.GroupNameRequest(name="中线", color="teal")
-    )
+    created = watchlist_api.create_group(watchlist_api.GroupNameRequest(name="中线", color="teal"))
     group_id = created["group"]["id"]
     watchlist.add("600000.SH", group_id=group_id)
     watchlist.add("000001.SZ", group_id=group_id)
@@ -203,7 +199,7 @@ def test_multi_group_membership(monkeypatch, tmp_path):
 
     rows = watchlist.add_to_group("600118.SH", gb["id"])
     got = next(r for r in rows if r["symbol"] == "600118.SH")
-    assert got["group_ids"] == [ga["id"], gb["id"]]      # 两组并存
+    assert got["group_ids"] == [ga["id"], gb["id"]]  # 两组并存
 
     # 重复加入幂等
     rows = watchlist.add_to_group("600118.SH", gb["id"])
@@ -252,7 +248,7 @@ def test_clear_group_strips_only_that_group(monkeypatch, tmp_path):
     rows = watchlist.clear_group(ga["id"])
     a = next(r for r in rows if r["symbol"] == "600000.SH")
     b = next(r for r in rows if r["symbol"] == "000001.SZ")
-    assert a["group_ids"] == [gb["id"]]   # 二组保留
+    assert a["group_ids"] == [gb["id"]]  # 二组保留
     assert b["group_ids"] == []
 
 
@@ -261,12 +257,14 @@ def test_legacy_single_group_id_migration(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     path = tmp_path / "user_data" / "watchlist.parquet"
     path.parent.mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": ["600000.SH", "000001.SZ"],
-        "added_at": ["2026-08-08T10:00:00"] * 2,
-        "note": ["", ""],
-        "group_id": ["g1", None],
-    }).write_parquet(path)
+    pl.DataFrame(
+        {
+            "symbol": ["600000.SH", "000001.SZ"],
+            "added_at": ["2026-08-08T10:00:00"] * 2,
+            "note": ["", ""],
+            "group_id": ["g1", None],
+        }
+    ).write_parquet(path)
 
     rows = watchlist.list_symbols()
     assert rows[0]["group_ids"] == ["g1"]
@@ -313,18 +311,28 @@ def test_transfer_api_checks_whole_selection_and_virtual_groups(monkeypatch, tmp
     watchlist.add("a", group_id=src)
     watchlist.add("b")
     with TestClient(app) as client:
+
         def post(group, target, symbols, action):
-            return client.post(f"/api/watchlist/groups/{group}/transfer", json={
-                "target_group_id": target, "symbols": symbols, "action": action,
-            })
+            return client.post(
+                f"/api/watchlist/groups/{group}/transfer",
+                json={
+                    "target_group_id": target,
+                    "symbols": symbols,
+                    "action": action,
+                },
+            )
 
         before = watchlist.list_symbols()
         revision = watchlist.revision()
         for args in [
-            (src, dst, ["a", "b"], "move"), (src, dst, ["a", "missing"], "copy"),
-            (src, src, ["a"], "move"), (src, "missing", ["a"], "copy"),
-            ("missing", dst, ["a"], "move"), ("all", dst, ["a"], "move"),
-            ("ungrouped", dst, ["b", "a"], "move"), (src, dst, [], "copy"),
+            (src, dst, ["a", "b"], "move"),
+            (src, dst, ["a", "missing"], "copy"),
+            (src, src, ["a"], "move"),
+            (src, "missing", ["a"], "copy"),
+            ("missing", dst, ["a"], "move"),
+            ("all", dst, ["a"], "move"),
+            ("ungrouped", dst, ["b", "a"], "move"),
+            (src, dst, [], "copy"),
             (src, dst, ["a"], "invalid"),
         ]:
             assert 400 <= post(*args).status_code < 500
@@ -333,4 +341,7 @@ def test_transfer_api_checks_whole_selection_and_virtual_groups(monkeypatch, tmp
         assert result.status_code == 200 and result.json()["changed"] == 1
         result = post("all", dst, ["a", "b"], "copy")
         assert result.status_code == 200 and result.json()["changed"] == 1
-        assert {r["symbol"]: r["group_ids"] for r in result.json()["symbols"]} == {"a": [src, dst], "b": [dst]}
+        assert {r["symbol"]: r["group_ids"] for r in result.json()["symbols"]} == {
+            "a": [src, dst],
+            "b": [dst],
+        }

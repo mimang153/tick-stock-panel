@@ -5,6 +5,7 @@ latest_sync_date 由 parquet 的 mtime 格式化而来, 前端 ExtDataStatCard �
 成 8 小时前, 而同一页拉取面板里的 pull.last_run(带时区的 ISO, 前端按浏览器
 时区渲染)显示的是正确时间 —— 一个页面两个时间对不上。
 """
+
 from __future__ import annotations
 
 import os

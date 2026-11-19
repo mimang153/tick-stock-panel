@@ -1,4 +1,5 @@
 """后台统计的去重、原子发布、TTL 和失效竞态回归。"""
+
 from __future__ import annotations
 
 import threading
@@ -45,7 +46,9 @@ def test_concurrent_requests_share_one_background_refresh():
         release.set()
         finish(cache)
     assert read(cache, loaders) == {
-        "daily": {"rows": 42}, "storage": {"total_size_mb": 1}, "stats_pending": False,
+        "daily": {"rows": 42},
+        "storage": {"total_size_mb": 1},
+        "stats_pending": False,
     }
     assert len(calls) == 1
 
@@ -69,13 +72,17 @@ def test_refresh_keeps_old_snapshot_until_whole_batch_is_ready():
         assert entered.wait(1)
         result = read(cache, loaders)
         assert result == {
-            "daily": {"rows": 1}, "storage": {"total_size_mb": 1}, "stats_pending": True,
+            "daily": {"rows": 1},
+            "storage": {"total_size_mb": 1},
+            "stats_pending": True,
         }
     finally:
         release.set()
         finish(cache)
     assert read(cache, loaders) == {
-        "daily": {"rows": 2}, "storage": {"total_size_mb": 2}, "stats_pending": False,
+        "daily": {"rows": 2},
+        "storage": {"total_size_mb": 2},
+        "stats_pending": False,
     }
 
 
@@ -137,7 +144,8 @@ def test_discard_stale_removes_old_counts_until_empty_snapshot_is_ready():
     finish(cache)
     cache.invalidate(discard_stale=True)
     assert read(cache, {"daily": lambda: None}, is_busy=lambda: True) == {
-        "daily": None, "stats_pending": True,
+        "daily": None,
+        "stats_pending": True,
     }
     read(cache, {"daily": lambda: None})
     finish(cache)
@@ -202,6 +210,7 @@ def test_thread_start_failure_does_not_break_status_or_prevent_retry(monkeypatch
     cache = DataStatusCache({"daily": 30})
     loaders = {"daily": lambda: {"rows": 1}}
     with monkeypatch.context() as patch:
+
         def fail_start(_thread):
             raise RuntimeError("injected thread failure")
 

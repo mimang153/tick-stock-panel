@@ -6,6 +6,7 @@ should run after 16:00 Asia/Shanghai unless --force is set (Stage A off-peak).
 
 Never prints API keys. Writes reports under reports/tickflow_pro_probe/.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -46,7 +47,9 @@ class TickFlowLike(Protocol):
     quotes: _QuotesNS
 
 
-def evaluate_gate(*, dry_run: bool, force: bool, has_key: bool, now: datetime | None = None) -> ProbeGate:
+def evaluate_gate(
+    *, dry_run: bool, force: bool, has_key: bool, now: datetime | None = None
+) -> ProbeGate:
     now = now or datetime.now(SHANGHAI)
     hour = now.hour
     if dry_run:
@@ -54,7 +57,9 @@ def evaluate_gate(*, dry_run: bool, force: bool, has_key: bool, now: datetime | 
     if not has_key:
         return ProbeGate(False, force, hour, False, False, "missing_TICKFLOW_API_KEY")
     if hour < OFFPEAK_HOUR and not force:
-        return ProbeGate(False, force, hour, True, False, f"before_{OFFPEAK_HOUR:02d}00_use_--force_or_wait")
+        return ProbeGate(
+            False, force, hour, True, False, f"before_{OFFPEAK_HOUR:02d}00_use_--force_or_wait"
+        )
     return ProbeGate(False, force, hour, True, True, "live_ok")
 
 
@@ -86,7 +91,7 @@ def _to_sample(raw: object) -> object:
     if hasattr(raw, "to_dict"):
         try:
             return _sanitize_sample(raw.to_dict())  # type: ignore[attr-defined]
-        except Exception:
+        except Exception:  # noqa: BLE001 - to_dict 失败回退通用序列化
             pass
     return _sanitize_sample(raw)
 
@@ -116,7 +121,9 @@ def run_dry_run(out_dir: Path) -> dict:
         # Gate-only success; does not prove SDK methods, network, or auth.
         "status": "DRY_RUN_OK",
     }
-    (out_dir / "probe_summary.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    (out_dir / "probe_summary.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    )
     (out_dir / "probe_summary.md").write_text(
         "# TickFlow Pro probe (dry-run)\n\n"
         f"- as_of: {report['as_of']}\n"
@@ -153,7 +160,7 @@ def run_live(
                 from app.secrets_store import get_tickflow_key  # type: ignore
 
                 key = (get_tickflow_key() or "").strip()
-            except Exception:
+            except Exception:  # noqa: BLE001 - 凭据环不可用时回退环境变量
                 key = ""
         if not key:
             raise SystemExit("missing TICKFLOW_API_KEY")
@@ -191,7 +198,9 @@ def run_live(
         "errors": errors,
         "status": "LIVE_PARTIAL" if errors else "LIVE_OK",
     }
-    (out_dir / "probe_summary.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    (out_dir / "probe_summary.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    )
     (out_dir / "probe_summary.md").write_text(
         "# TickFlow Pro probe (live)\n\n"
         f"- as_of: {report['as_of']}\n"
@@ -205,7 +214,9 @@ def run_live(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true", help="Call TickFlow APIs (needs key)")
-    parser.add_argument("--force", action="store_true", help="Allow live probe before 16:00 Asia/Shanghai")
+    parser.add_argument(
+        "--force", action="store_true", help="Allow live probe before 16:00 Asia/Shanghai"
+    )
     parser.add_argument(
         "--out",
         type=Path,

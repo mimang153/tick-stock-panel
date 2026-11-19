@@ -1,4 +1,9 @@
-"""Polars parquet helpers."""
+"""Polars parquet helpers.
+
+DAILY/ENRICHED_STORAGE_SCHEMA 是落盘列与类型的权威声明；scan_* 通过
+missing_columns/extra_columns 容忍历史分区的加减列，避免新增字段后旧数据不可读。
+"""
+
 from __future__ import annotations
 
 from typing import Any

@@ -3,6 +3,7 @@
 替代 daily_pipeline 直接调用两个调度函数的旧接线; 原入口
 (run_weekly_mining / run_daily_guardian) 保持独立可用, 便于单独触发与测试。
 """
+
 from __future__ import annotations
 
 import logging

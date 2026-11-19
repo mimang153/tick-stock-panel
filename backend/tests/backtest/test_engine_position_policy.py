@@ -1,8 +1,10 @@
 """自定义仓位策略引擎级 — 权重生效 / 预算缩放 / 运行期回退 / 双路径一致。"""
+
 from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import date, timedelta
+from typing import Any, cast
 
 import polars as pl
 import pytest
@@ -23,19 +25,21 @@ def _panel(
     for sym in symbols:
         for i in range(days):
             patch = overrides.get((sym, i), {})
-            rows.append({
-                "symbol": sym,
-                "name": sym,
-                "date": start + timedelta(days=i),
-                "open": patch.get("open", price),
-                "high": patch.get("high", price),
-                "low": patch.get("low", price),
-                "close": patch.get("close", price),
-                "volume": patch.get("volume", 100_000),
-                "score": patch.get("score", {"A": 4, "B": 3, "C": 2, "D": 1}.get(sym, 0)),
-                "signal_limit_up": False,
-                "signal_limit_down": False,
-            })
+            rows.append(
+                {
+                    "symbol": sym,
+                    "name": sym,
+                    "date": start + timedelta(days=i),
+                    "open": patch.get("open", price),
+                    "high": patch.get("high", price),
+                    "low": patch.get("low", price),
+                    "close": patch.get("close", price),
+                    "volume": patch.get("volume", 100_000),
+                    "score": patch.get("score", {"A": 4, "B": 3, "C": 2, "D": 1}.get(sym, 0)),
+                    "signal_limit_up": False,
+                    "signal_limit_down": False,
+                }
+            )
     return pl.DataFrame(rows).sort(["symbol", "date"])
 
 
@@ -49,7 +53,7 @@ def _mask(panel: pl.DataFrame, marks: set[tuple[str, int]]) -> pl.Series:
 
 
 def _engine() -> BacktestEngine:
-    return BacktestEngine(repo=None)  # simulate_portfolio 不访问 repo
+    return BacktestEngine(repo=cast(Any, None))  # simulate_portfolio 不访问 repo
 
 
 def _config(compute, *, params: dict | None = None, **kw) -> MatcherConfig:
@@ -146,25 +150,31 @@ def test_matrix_and_legacy_parity_with_policy() -> None:
             vol = (sum(x * x for x in rets) / max(len(rets), 1)) ** 0.5
             inv.append(1.0 / max(vol, 1e-9))
         total = sum(inv)
-        return PositionSizingResult(
-            weights=[v / total for v in inv], budget_scale=0.8
-        )
+        return PositionSizingResult(weights=[v / total for v in inv], budget_scale=0.8)
 
     start = date(2024, 1, 1)
     paths = {
-        "A": [10.0, 11.0, 12.0, 11.5, 12.2],   # 高波动
-        "B": [10.0, 10.2, 10.1, 10.3, 10.2],   # 低波动
+        "A": [10.0, 11.0, 12.0, 11.5, 12.2],  # 高波动
+        "B": [10.0, 10.2, 10.1, 10.3, 10.2],  # 低波动
     }
     rows = []
     for sym, closes in paths.items():
         for day, close in enumerate(closes):
-            rows.append({
-                "symbol": sym, "name": sym, "date": start + timedelta(days=day),
-                "open": close, "high": close * 1.01, "low": close * 0.99,
-                "close": close, "volume": 100_000,
-                "score": {"A": 4, "B": 3}[sym],
-                "signal_limit_up": False, "signal_limit_down": False,
-            })
+            rows.append(
+                {
+                    "symbol": sym,
+                    "name": sym,
+                    "date": start + timedelta(days=day),
+                    "open": close,
+                    "high": close * 1.01,
+                    "low": close * 0.99,
+                    "close": close,
+                    "volume": 100_000,
+                    "score": {"A": 4, "B": 3}[sym],
+                    "signal_limit_up": False,
+                    "signal_limit_down": False,
+                }
+            )
     panel = pl.DataFrame(rows).sort(["symbol", "date"])
     entries = _mask(panel, {("A", 0), ("B", 0)})
     exits = _mask(panel, set())

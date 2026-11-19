@@ -7,6 +7,7 @@
 快照来源与 /api/openapi.json?tier=a 完全同源: app.openapi() 的 paths
 逐 (method, path) 过 api_gateway.required_scope — 规则表是唯一源。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -98,7 +99,8 @@ def _collect_open_endpoints() -> set[str]:
     for path, ops in spec.get("paths", {}).items():
         for method in ops:
             if method in ("get", "post", "put", "delete", "patch") and api_gateway.required_scope(
-                method.upper(), path,
+                method.upper(),
+                path,
             ):
                 found.add(f"{method.upper()} {path}")
     return found

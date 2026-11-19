@@ -19,6 +19,7 @@
 若直接 OR(exit) 会产生"幽灵平仓"(B 把 A 选的仓位卖掉)。来源投影在合并器(撮合前)
 解决, 撮合层零改动。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -41,6 +42,30 @@ def _effective_weights(
     effective = [w for w, hit in zip(children_weights, hits_mask, strict=True) if hit]
     total = sum(effective)
     return effective, total
+
+
+def _per_child_norm_and_symbols(
+    results: list[StrategyResult],
+) -> tuple[list[dict[str, float]], list[set[str]]]:
+    """按子策略内部 score 降序排名生成归一 score, 并汇总原始 symbol 集合。"""
+    per_child_norm: list[dict[str, float]] = []
+    per_child_symbols: list[set[str]] = []
+    for res in results:
+        symbols = set(res.scores.keys())
+        per_child_symbols.append(symbols)
+        norm: dict[str, float] = {}
+        if symbols:
+            ordered = sorted(symbols, key=lambda s: res.scores[s], reverse=True)
+            count = len(ordered)
+            for rank, sym in enumerate(ordered, start=1):
+                norm[sym] = _NEUTRAL_NORM if count <= 1 else 1 - (rank - 1) / (count - 1)
+        else:
+            for row in res.rows:
+                sym = str(row.get("symbol"))
+                if sym and sym not in norm:
+                    norm[sym] = _NEUTRAL_NORM
+        per_child_norm.append(norm)
+    return per_child_norm, per_child_symbols
 
 
 def merge_results(
@@ -70,29 +95,7 @@ def merge_results(
 
     # 各子的 symbol → 排名归一 score。排名基于子策略内部的原始 score 降序。
     # norm∈[0,1], 最优标的=1。单候选或无 score 时用中性分。
-    per_child_norm: list[dict[str, float]] = []
-    per_child_symbols: list[set[str]] = []
-    for res in results:
-        symbols = set(res.scores.keys())
-        per_child_symbols.append(symbols)
-        norm: dict[str, float] = {}
-        if symbols:
-            ordered = sorted(symbols, key=lambda s: res.scores[s], reverse=True)
-            count = len(ordered)
-            for rank, sym in enumerate(ordered, start=1):
-                # 单候选无法排名, 必须用中性分: 当成"最优=1"会凭空抬高融合分,
-                # 而回测合并 (merge_signal_matrices 的 n <= 1 分支) 用的是中性分,
-                # 两条路径同一天同一标的会给出不同评分与排序。
-                norm[sym] = (
-                    _NEUTRAL_NORM if count <= 1 else 1 - (rank - 1) / (count - 1)
-                )
-        else:
-            # 子策略未产出 score: 命中即中性分, 不奖励也不惩罚。
-            for row in res.rows:
-                sym = str(row.get("symbol"))
-                if sym and sym not in norm:
-                    norm[sym] = _NEUTRAL_NORM
-        per_child_norm.append(norm)
+    per_child_norm, per_child_symbols = _per_child_norm_and_symbols(results)
 
     # 确定入围标的集合 + 各标的的命中子策略索引。
     universe: set[str] = set()
@@ -180,33 +183,50 @@ def merge_signal_matrices(
     """
     from app.backtest.matrix import make_signal_matrix
 
-    n_times, n_assets = shape
     n_children = len(sigs)
     if n_children == 0:
         return make_signal_matrix(shape)
 
-    # ── entry ──
     entries = [np.asarray(s.entry, dtype=bool) for s in sigs]
     entry_stack = np.stack(entries, axis=0)  # (n_children, n_times, n_assets)
+    merged_entry = _merged_entry_mask(entry_stack, n_children, merge_mode, min_confirm)
+    merged_exit = _merged_exit_mask(entries, sigs, shape, max_hold)
+    norm_scores = _normalized_child_scores(sigs, entries, shape)
+    merged_score = _blend_child_scores(norm_scores, entry_stack, children, merged_entry)
+    entry_codes, exit_codes, entry_signal_ids = _signal_codes(entries, children, shape)
+
+    return make_signal_matrix(
+        shape,
+        entry=merged_entry.astype(np.uint8),
+        exit=merged_exit.astype(np.uint8),
+        score=merged_score.astype(np.float32),
+        entry_signal_code=entry_codes,
+        exit_signal_code=exit_codes,
+        entry_signal_ids=entry_signal_ids,
+    )
+
+
+def _merged_entry_mask(entry_stack, n_children: int, merge_mode: str, min_confirm: int):
     if merge_mode == "intersect":
         effective_min = max(min_confirm, 1) if min_confirm and min_confirm > 0 else n_children
-        confirm_count = entry_stack.sum(axis=0)  # (n_times, n_assets)
-        merged_entry = confirm_count >= effective_min
-    else:  # union
-        merged_entry = entry_stack.any(axis=0)
+        return entry_stack.sum(axis=0) >= effective_min
+    return entry_stack.any(axis=0)
 
-    # ── exit 来源投影 ──
+
+def _merged_exit_mask(entries, sigs, shape: tuple[int, int], max_hold: int):
     # 每个子策略的 exit 仅在自己持仓窗口内生效, 不串平其他子的仓位。
     hold_masks = _hold_masks_from_entries(entries, max_hold)
     merged_exit = np.zeros(shape, dtype=bool)
     for i, s in enumerate(sigs):
         child_exit = np.asarray(s.exit, dtype=bool)
         merged_exit |= child_exit & hold_masks[i]
+    return merged_exit
 
-    # ── score 标准化排名加权 ──
+
+def _normalized_child_scores(sigs, entries, shape: tuple[int, int]):
+    n_times, n_assets = shape
+    n_children = len(sigs)
     # 对每个 (time, asset), 在命中的子策略间按权重加权各自的内部排名归一值。
-    weights = np.array([w for _, w in children], dtype=np.float64)
-    # 预计算每个子策略、每个 time 上 asset 的排名归一。
     norm_scores = np.zeros((n_children, n_times, n_assets), dtype=np.float64)
     for i, s in enumerate(sigs):
         raw = np.asarray(s.score, dtype=np.float64)
@@ -231,37 +251,28 @@ def merge_signal_matrices(
             order = np.argsort(-valid_vals, kind="stable")
             ranks = np.empty(n, dtype=np.float64)
             ranks[order] = np.arange(1, n + 1, dtype=np.float64)
-            normalized = 1 - (ranks - 1) / (n - 1)
-            norm_scores[i, t, valid_idx] = normalized
+            norm_scores[i, t, valid_idx] = 1 - (ranks - 1) / (n - 1)
+    return norm_scores
 
-    hit_mask = entry_stack  # (n_children, n_times, n_assets)
-    hit_weights = np.where(hit_mask, weights.reshape(-1, 1, 1), 0.0)
-    weight_sum = hit_weights.sum(axis=0)  # (n_times, n_assets)
+
+def _blend_child_scores(norm_scores, entry_stack, children, merged_entry):
+    weights = np.array([w for _, w in children], dtype=np.float64)
+    hit_weights = np.where(entry_stack, weights.reshape(-1, 1, 1), 0.0)
+    weight_sum = hit_weights.sum(axis=0)
     blended = (norm_scores * hit_weights).sum(axis=0)
     safe_sum = np.where(weight_sum > 0, weight_sum, 1.0)
     merged_score = np.where(merged_entry, blended / safe_sum, 0.0) * 100
-    merged_score = np.nan_to_num(merged_score, nan=0.0, posinf=0.0, neginf=0.0)
+    return np.nan_to_num(merged_score, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # ── entry_signal_code: 来源标记 ──
+
+def _signal_codes(entries, children, shape: tuple[int, int]):
     # code = 命中的第一个子策略索引; -1 表示无命中。归因用。
     entry_codes = np.full(shape, -1, dtype=np.int16)
-    for i in range(n_children):
+    for i in range(len(entries)):
         # 只给尚未标记的命中点打 code(第一个命中优先), 避免覆盖。
         untagged = (entry_codes == -1) & entries[i]
         entry_codes[untagged] = i
-
     # exit_signal_code 沿用 -1(无独立信号来源); 回测按 "signal" reason 归因即可。
     exit_codes = np.full(shape, -1, dtype=np.int16)
-
-    # entry_signal_ids 映射表: code i → "composite:child_id"
     entry_signal_ids = tuple(f"composite:{cid}" for cid, _ in children)
-
-    return make_signal_matrix(
-        shape,
-        entry=merged_entry.astype(np.uint8),
-        exit=merged_exit.astype(np.uint8),
-        score=merged_score.astype(np.float32),
-        entry_signal_code=entry_codes,
-        exit_signal_code=exit_codes,
-        entry_signal_ids=entry_signal_ids,
-    )
+    return entry_codes, exit_codes, entry_signal_ids

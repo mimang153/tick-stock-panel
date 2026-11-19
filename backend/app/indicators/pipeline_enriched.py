@@ -120,7 +120,6 @@ def _upsert_enriched_day(
     day_full = store.read_daily(_root._ENRICHED_TABLE, start=day, end=day)
     if day_full.is_empty():
         return
-    out.parent.mkdir(parents=True, exist_ok=True)
     publication.write_parquet(day_full.sort(["symbol"]), out)
 
 
@@ -140,6 +139,39 @@ def _pick_benchmark_pairs(df_idx: _root.pl.DataFrame, wanted: list[str]) -> list
     return pairs
 
 
+_BENCHMARK_CACHE_KEY = "benchmark:momentum:v1"
+
+
+def _benchmark_cache_backend():
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    return runtime.cache if runtime is not None else None
+
+
+def _read_benchmark_cache() -> _root.pl.DataFrame | None:
+    backend = _benchmark_cache_backend()
+    if backend is None:
+        return None
+    try:
+        return backend.get(_BENCHMARK_CACHE_KEY)
+    except Exception as exc:  # noqa: BLE001 - 缓存不可用时回退计算与进程内缓存
+        _root.logger.warning("读取基准动量缓存失败: %s", exc)
+        return None
+
+
+def _write_benchmark_cache(frame: _root.pl.DataFrame | None) -> None:
+    if frame is None:
+        return
+    backend = _benchmark_cache_backend()
+    if backend is None:
+        return
+    try:
+        backend.set(_BENCHMARK_CACHE_KEY, frame, ttl_s=int(_root._BENCHMARK_CACHE_TTL))
+    except Exception as exc:  # noqa: BLE001 - 缓存写入失败不影响主链路
+        _root.logger.warning("写入基准动量缓存失败: %s", exc)
+
+
 def load_benchmark_momentum(data_dir: _root.Path) -> _root.pl.DataFrame | None:
     """读取指数日K并计算基准动量；无数据时返回 None，按 data_dir 缓存。"""
     import time as _time
@@ -151,6 +183,10 @@ def load_benchmark_momentum(data_dir: _root.Path) -> _root.pl.DataFrame | None:
     cached = _root._benchmark_cache.get(key)
     if cached is not None and now - cached[0] < _root._BENCHMARK_CACHE_TTL:
         return cached[1]
+    shared = _read_benchmark_cache()
+    if shared is not None:
+        _root._benchmark_cache[key] = (now, shared)
+        return shared
 
     frame: _root.pl.DataFrame | None = None
     try:
@@ -214,6 +250,7 @@ def load_benchmark_momentum(data_dir: _root.Path) -> _root.pl.DataFrame | None:
         frame = None
 
     _root._benchmark_cache[key] = (now, frame)
+    _write_benchmark_cache(frame)
     return frame
 
 

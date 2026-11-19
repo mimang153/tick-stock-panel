@@ -1,6 +1,7 @@
 """daily-batch 混合资产分组测试。"""
-import json
+
 import datetime as _dt
+import json
 
 import polars as pl
 import pytest
@@ -16,7 +17,7 @@ def repo(tmp_path):
 def test_daily_batch_groups_index_symbols(repo, monkeypatch):
     from app.api import kline as kline_api
 
-    calls = {"stock_batch": [], "index": []}
+    calls: dict = {"stock_batch": [], "index": []}
 
     def fake_stock_batch(symbols, start, end, columns=None):
         calls["stock_batch"].append(list(symbols))
@@ -24,10 +25,17 @@ def test_daily_batch_groups_index_symbols(repo, monkeypatch):
 
     def fake_index_daily(symbol, start, end, columns=None):
         calls["index"].append(symbol)
-        return pl.DataFrame({
-            "symbol": [symbol], "date": [_dt.date(2026, 7, 24)],
-            "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [1],
-        })
+        return pl.DataFrame(
+            {
+                "symbol": [symbol],
+                "date": [_dt.date(2026, 7, 24)],
+                "open": [1.0],
+                "high": [1.0],
+                "low": [1.0],
+                "close": [1.0],
+                "volume": [1],
+            }
+        )
 
     monkeypatch.setattr(repo, "get_daily_batch", fake_stock_batch)
     monkeypatch.setattr(repo, "get_index_daily", fake_index_daily)
@@ -37,7 +45,9 @@ def test_daily_batch_groups_index_symbols(repo, monkeypatch):
     state = type("S", (), {"repo": repo})()
     req = type("R", (), {"app": type("A", (), {"state": state})()})()
 
-    out = json.loads(kline_api.get_daily_batch(req, {"symbols": ["600000.SH", "000001.SH"], "days": 12}).body)
+    out = json.loads(
+        kline_api.get_daily_batch(req, {"symbols": ["600000.SH", "000001.SH"], "days": 12}).body
+    )
     # 本 fixture 每只只回 1 行 (< days), 停牌回补会对不足额标的追加更宽窗口的读取;
     # 分流断言只看首次调用 (股票走批量、指数走逐只)。
     assert calls["stock_batch"][0] == ["600000.SH"]
@@ -63,10 +73,17 @@ def test_daily_batch_window_ends_on_beijing_today(repo, monkeypatch):
 
     def fake_stock_batch(symbols, start, end, columns=None):
         captured.append((start, end))
-        return pl.DataFrame({
-            "symbol": ["600000.SH"], "date": [_BJ],
-            "open": [10.0], "high": [10.6], "low": [9.9], "close": [10.6], "volume": [1.0],
-        })
+        return pl.DataFrame(
+            {
+                "symbol": ["600000.SH"],
+                "date": [_BJ],
+                "open": [10.0],
+                "high": [10.6],
+                "low": [9.9],
+                "close": [10.6],
+                "volume": [1.0],
+            }
+        )
 
     monkeypatch.setattr(kline_api, "cn_today", lambda: _BJ, raising=False)
     monkeypatch.setattr(repo, "get_daily_batch", fake_stock_batch)

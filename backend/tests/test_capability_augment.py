@@ -5,6 +5,7 @@
 某数据集的当前 provider 非 tickflow 且声明了该数据集 → grant 对应能力;
 取数路由仍按 preferences 分流, 不会误调 TickFlow。
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -13,11 +14,19 @@ from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 from app.tickflow.policy import _augment_custom_sources
 
 
-def _set_providers(monkeypatch, *, daily="tickflow", adj="tickflow",
-                   minute="tickflow", depth5="tickflow", financial="tickflow",
-                   full_minute="tickflow") -> None:
+def _set_providers(
+    monkeypatch,
+    *,
+    daily="tickflow",
+    adj="tickflow",
+    minute="tickflow",
+    depth5="tickflow",
+    financial="tickflow",
+    full_minute="tickflow",
+) -> None:
     """mock preferences 各数据集 provider getter。"""
     from app.services import preferences
+
     monkeypatch.setattr(preferences, "get_daily_data_provider", lambda: daily)
     monkeypatch.setattr(preferences, "get_adj_factor_provider", lambda: adj)
     monkeypatch.setattr(preferences, "get_minute_data_provider", lambda: minute)
@@ -104,8 +113,9 @@ def test_financial_custom_source_grants_financial(monkeypatch):
 
 def test_provider_active_but_dataset_not_declared_no_grant(monkeypatch):
     """provider 被选为当前源但未声明该数据集 → 不 grant (回退 TickFlow 语义)。"""
-    _set_providers(monkeypatch, daily="mock_src", minute="mock_src",
-                   adj="mock_src", financial="mock_src")
+    _set_providers(
+        monkeypatch, daily="mock_src", minute="mock_src", adj="mock_src", financial="mock_src"
+    )
     _set_datasets(monkeypatch, set())  # 什么都不声明
     capset = CapabilitySet()
     _augment_custom_sources(capset)

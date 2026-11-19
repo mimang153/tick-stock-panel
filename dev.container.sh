@@ -7,6 +7,7 @@
 #   ./dev.container.sh down          # 停止并移除容器(缓存与数据保留)
 #   ./dev.container.sh logs -f       # 跟踪日志
 #   ./dev.container.sh ck            # 进 ClickHouse client(库 tsp, 账号见 .env)
+#   ./dev.container.sh redis         # 检查宿主机 Redis 容器(等价于 ./redis-cache.sh check)
 #   ./dev.container.sh bash          # 进容器调试(其他命令原样透传)
 #
 # 文档: docs/dev-container.md
@@ -106,6 +107,15 @@ case "${1:-up}" in
     shift
     exec docker compose -f "$COMPOSE_FILE" exec -T clickhouse \
       sh -c 'exec clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --database "$CLICKHOUSE_DATABASE" "$@"' sh "$@"
+    ;;
+  redis)
+    shift
+    exec "$ROOT/redis-cache.sh" "${@:-check}"
+    ;;
+  pg)
+    # PostgreSQL 账户事务层容器（DES-005），复用宿主 pg_dev.sh
+    shift
+    exec "$ROOT/pg_dev.sh" "${@:-check}"
     ;;
   bash|sh)
     shift

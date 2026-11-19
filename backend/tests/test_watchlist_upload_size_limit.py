@@ -4,9 +4,11 @@
 内存之后生效, 与 ext_data 上传修复 (issue #204) 前的问题同类。_read_upload_capped
 分块读取, 越过上限即拒绝(400), 内存占用不超过上限 + 一块。纯逻辑, 不需真实数据源。
 """
+
 from __future__ import annotations
 
 import io
+from typing import Any, cast
 
 import pytest
 from fastapi import HTTPException
@@ -35,20 +37,20 @@ def _upload(stream: io.BytesIO) -> UploadFile:
 
 async def test_under_limit_returns_full_content():
     data = "code,name\n600519.SH,贵州茅台\n".encode()
-    got = await _read_upload_capped(_upload(io.BytesIO(data)), 1024, "too large")
+    got = await _read_upload_capped(cast(Any, _upload(io.BytesIO(data))), 1024, "too large")
     assert got == data
 
 
 async def test_at_limit_is_allowed():
     data = b"x" * 64
-    got = await _read_upload_capped(_upload(io.BytesIO(data)), 64, "too large")
+    got = await _read_upload_capped(cast(Any, _upload(io.BytesIO(data))), 64, "too large")
     assert got == data
 
 
 async def test_over_limit_raises_400_with_the_message_the_endpoint_passes():
     data = b"x" * 200
     with pytest.raises(HTTPException) as exc:
-        await _read_upload_capped(_upload(io.BytesIO(data)), 64, "文件过大")
+        await _read_upload_capped(cast(Any, _upload(io.BytesIO(data))), 64, "文件过大")
     assert exc.value.status_code == 400
     assert exc.value.detail == "文件过大"
 
@@ -58,10 +60,10 @@ async def test_over_limit_stops_reading_at_the_first_chunk_past_the_cap(monkeypa
     monkeypatch.setattr(watchlist_api, "_UPLOAD_CHUNK_BYTES", 16)
     stream = _CountingStream(b"x" * 64)
     with pytest.raises(HTTPException):
-        await _read_upload_capped(_upload(stream), 24, "too large")
+        await _read_upload_capped(cast(Any, _upload(stream)), 24, "too large")
     assert stream.consumed == 32
 
 
 async def test_empty_upload_returns_empty_bytes():
-    got = await _read_upload_capped(_upload(io.BytesIO(b"")), 64, "too large")
+    got = await _read_upload_capped(cast(Any, _upload(io.BytesIO(b""))), 64, "too large")
     assert got == b""

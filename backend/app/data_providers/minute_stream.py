@@ -1,4 +1,5 @@
 """分钟源的流式兼容与请求节流;不在业务同步层拆分标的。"""
+
 from __future__ import annotations
 
 import threading
@@ -19,7 +20,9 @@ class RequestPacer:
         self._lock = threading.Lock()
         self._next: dict[str, float] = {}
 
-    def wait(self, scope: str, rpm: int | None, checkpoint: Callable[[], None] | None = None) -> None:
+    def wait(
+        self, scope: str, rpm: int | None, checkpoint: Callable[[], None] | None = None
+    ) -> None:
         if not rpm or rpm <= 0:
             return
         with self._lock:
@@ -42,12 +45,21 @@ class LegacyMinuteAdapter:
         return getattr(self._provider, name)
 
     def iter_minute(
-        self, symbols: list[str], start_time: datetime | None, end_time: datetime | None,
-        asset_type: AssetType = "stock", freq: str = "1m", on_chunk_done=None,
+        self,
+        symbols: list[str],
+        start_time: datetime | None,
+        end_time: datetime | None,
+        asset_type: AssetType = "stock",
+        freq: str = "1m",
+        on_chunk_done=None,
     ) -> Iterator[pl.DataFrame]:
         frame = self._provider.get_minute(
-            symbols, start_time=start_time, end_time=end_time, asset_type=asset_type,
-            freq=freq, on_chunk_done=on_chunk_done,
+            symbols,
+            start_time=start_time,
+            end_time=end_time,
+            asset_type=asset_type,
+            freq=freq,
+            on_chunk_done=on_chunk_done,
         )
         if not isinstance(frame, pl.DataFrame):
             # 旧入口允许 None 空结果或 pandas 帧,保留原归一行为。

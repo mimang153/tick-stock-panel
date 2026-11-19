@@ -5,6 +5,7 @@ provider 可选类属性 minute_history_days 声明 1 分钟历史深度(交易�
 - 未声明 / 走 tickflow → None (深历史)
 preferences GET 带出该字段, 前端分时档位据此收窄 (浅源默认 5日, 深源默认 20日)。
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace

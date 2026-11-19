@@ -1,4 +1,5 @@
 """自动策略实验室战报: 守护 + 挖掘 + 名额的聚合只读视图 (P3)。"""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -14,6 +15,7 @@ router = APIRouter(prefix="/api/backtest/lab", tags=["backtest"])
 
 
 def _project_mining_run(store: Any, manifest: dict[str, Any]) -> dict[str, Any]:
+    """把挖掘任务 manifest 与摘要投影为战报字段。"""
     summary = store.read_summary(str(manifest["run_id"]))
     return {
         "run_id": manifest.get("run_id"),
@@ -31,14 +33,14 @@ def _project_mining_run(store: Any, manifest: dict[str, Any]) -> dict[str, Any]:
 
 @router.get("/report")
 def get_report(request: Request) -> dict[str, Any]:
+    """聚合守护、挖掘与名额状态，返回只读战报。"""
     data_dir = request.app.state.repo.store.data_dir
     engine = getattr(request.app.state, "strategy_engine", None)
     if engine is None:
         raise HTTPException(status_code=503, detail="strategy engine is unavailable")
 
     guardian_manager = getattr(request.app.state, "guardian_manager", None)
-    guardian: dict[str, Any] = {"profiles": 0, "by_status": {}, "alerts": 0,
-                                "last_run": None}
+    guardian: dict[str, Any] = {"profiles": 0, "by_status": {}, "alerts": 0, "last_run": None}
     try:
         from app.services.guardian_store import GuardianStore
 
@@ -53,6 +55,7 @@ def get_report(request: Request) -> dict[str, Any]:
         by_status[status] = by_status.get(status, 0) + 1
         checks = profile.get("checks") or []
         streak = 0
+        # 连续 watch 两次及以上才计入告警，避免单次抖动误报
         for check in reversed(checks):
             if check.get("verdict") == "watch" and not check.get("error"):
                 streak += 1
@@ -64,9 +67,7 @@ def get_report(request: Request) -> dict[str, Any]:
     if guardian_manager is not None:
         try:
             runs = guardian_manager.store.list_runs(limit=5)
-            guardian["last_run"] = (
-                _project_guardian_run(runs[0]) if runs else None
-            )
+            guardian["last_run"] = _project_guardian_run(runs[0]) if runs else None
         except MiningRunStoreError:
             guardian["last_run"] = None
 
@@ -75,7 +76,9 @@ def get_report(request: Request) -> dict[str, Any]:
     if mining_manager is not None:
         try:
             runs = mining_manager.store.list_runs(limit=5)
-            mining["last_run"] = _project_mining_run(mining_manager.store, runs[0]) if runs else None
+            mining["last_run"] = (
+                _project_mining_run(mining_manager.store, runs[0]) if runs else None
+            )
         except (MiningRunStoreError, ValueError):
             mining["last_run"] = None
 
@@ -107,6 +110,7 @@ def get_report(request: Request) -> dict[str, Any]:
 
 
 def _project_guardian_run(manifest: dict[str, Any]) -> dict[str, Any]:
+    """把守护任务 manifest 投影为战报字段。"""
     return {
         "run_id": manifest.get("run_id"),
         "status": manifest.get("status"),

@@ -4,9 +4,11 @@
 现在超时进配置, 默认 30 与旧行为完全一致; 拉取 (_request_json) 与
 URL 探测 (detect-url) 都读它。老 config.json 无该字段 → 默认 30, 手改非法值 → 归一 30。
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -14,6 +16,7 @@ from app.services import ext_pull
 from app.services.ext_data import PullConfig
 
 # ── 模型: 默认值 / 序列化 / 非法值归一 ──────────────────────────────
+
 
 def test_timeout_defaults_to_30_and_roundtrips():
     assert PullConfig().timeout_seconds == 30
@@ -36,6 +39,7 @@ def test_timeout_invalid_values_normalized_to_30(bad):
 
 
 # ── 拉取路径: _request_json 把配置超时传给 httpx ─────────────────────
+
 
 class _FakeResponse:
     def raise_for_status(self):
@@ -69,7 +73,7 @@ async def test_request_json_uses_configured_timeout(monkeypatch):
     monkeypatch.setattr(ext_pull.httpx, "AsyncClient", _FakeClient)
 
     pull = PullConfig(url="https://x", timeout_seconds=90)
-    await ext_pull._request_json(pull, "cfg1")
+    await ext_pull._request_json(cast(Any, pull), "cfg1")
     assert _FakeClient.request_timeout == 90
 
 
@@ -78,14 +82,20 @@ async def test_request_json_defaults_to_30_without_attr(monkeypatch):
 
     # 测试用的简化 pull 对象没有 timeout_seconds 属性 → 兜底 30
     pull = SimpleNamespace(
-        url="https://x", date_param=None, date_format="iso", headers=None,
-        method="GET", body=None, auth=None,
+        url="https://x",
+        date_param=None,
+        date_format="iso",
+        headers=None,
+        method="GET",
+        body=None,
+        auth=None,
     )
-    await ext_pull._request_json(pull, "cfg1")
+    await ext_pull._request_json(cast(Any, pull), "cfg1")
     assert _FakeClient.request_timeout == 30
 
 
 # ── 探测路径: detect-url 请求体带 timeout_seconds ───────────────────
+
 
 async def test_detect_url_uses_request_timeout(monkeypatch):
     import httpx
@@ -94,9 +104,13 @@ async def test_detect_url_uses_request_timeout(monkeypatch):
 
     monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
 
-    resp = await ext_api.detect_url(ext_api.DetectUrlReq(
-        url="https://x", response_path="items", timeout_seconds=120,
-    ))
+    resp = await ext_api.detect_url(
+        ext_api.DetectUrlReq(
+            url="https://x",
+            response_path="items",
+            timeout_seconds=120,
+        )
+    )
     assert _FakeClient.last_timeout == 120
     assert resp["status"] == "ok"
 
@@ -108,5 +122,7 @@ async def test_detect_url_timeout_defaults_to_30(monkeypatch):
 
     monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
 
-    await ext_api.detect_url(ext_api.DetectUrlReq(url="https://x", response_path="items"))
+    await ext_api.detect_url(
+        ext_api.DetectUrlReq.model_validate({"url": "https://x", "response_path": "items"})
+    )
     assert _FakeClient.last_timeout == 30

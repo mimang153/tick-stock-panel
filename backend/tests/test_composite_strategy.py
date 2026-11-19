@@ -10,6 +10,7 @@
 子策略用 polars_expr 后端(返回 True)以便用轻量 DataFrame 验证合并逻辑,
 不依赖 matrix_native 的矩阵加载。回测矩阵路径在 M2 单独测试。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -46,9 +47,7 @@ def _composite_code(
     min_confirm: int = 0,
 ) -> str:
     """生成一个声明式 composite 策略文件。"""
-    children_repr = ", ".join(
-        f'{{"strategy_id": "{cid}", "weight": {w}}}' for cid, w in children
-    )
+    children_repr = ", ".join(f'{{"strategy_id": "{cid}", "weight": {w}}}' for cid, w in children)
     ats = asset_types or ["stock"]
     ats_repr = ", ".join(f'"{a}"' for a in ats)
     params = (
@@ -126,12 +125,8 @@ def test_nested_composite_rejected(tmp_path):
     child_dir.mkdir(parents=True)
     comp_dir.mkdir(parents=True)
     (child_dir / "leaf.py").write_text(_filter_strategy_code("leaf"), encoding="utf-8")
-    (comp_dir / "inner.py").write_text(
-        _composite_code("inner", [("leaf", 1.0)]), encoding="utf-8"
-    )
-    (comp_dir / "outer.py").write_text(
-        _composite_code("outer", [("inner", 1.0)]), encoding="utf-8"
-    )
+    (comp_dir / "inner.py").write_text(_composite_code("inner", [("leaf", 1.0)]), encoding="utf-8")
+    (comp_dir / "outer.py").write_text(_composite_code("outer", [("inner", 1.0)]), encoding="utf-8")
 
     engine = StrategyEngine(strategy_dirs=[child_dir, comp_dir])
 
@@ -148,9 +143,7 @@ def test_composite_asset_type_mismatch_rejected(tmp_path):
     comp_dir = tmp_path / "strategies" / "composite"
     child_dir.mkdir(parents=True)
     comp_dir.mkdir(parents=True)
-    (child_dir / "etf_child.py").write_text(
-        _filter_strategy_code("etf_child"), encoding="utf-8"
-    )
+    (child_dir / "etf_child.py").write_text(_filter_strategy_code("etf_child"), encoding="utf-8")
     # 子策略是 stock(默认), composite 声明 etf
     (comp_dir / "mismatched.py").write_text(
         _composite_code("mismatched", [("etf_child", 1.0)], asset_types=["etf"]),
@@ -201,9 +194,7 @@ def test_composite_exceeds_child_limit_rejected(tmp_path):
     for i in range(MAX_COMPOSITE_CHILDREN + 1):
         (child_dir / f"c{i}.py").write_text(_filter_strategy_code(f"c{i}"), encoding="utf-8")
     children = [(f"c{i}", 1.0) for i in range(MAX_COMPOSITE_CHILDREN + 1)]
-    (comp_dir / "too_many.py").write_text(
-        _composite_code("too_many", children), encoding="utf-8"
-    )
+    (comp_dir / "too_many.py").write_text(_composite_code("too_many", children), encoding="utf-8")
 
     engine = StrategyEngine(strategy_dirs=[child_dir, comp_dir])
 
@@ -255,11 +246,13 @@ def test_find_dependents_locates_referencing_composites(tmp_path):
 
 def _stock_panel(symbols: list[str], scores: list[float]) -> pl.DataFrame:
     """构造一个含 close 列(用于 scoring)的轻量 panel。"""
-    return pl.DataFrame({
-        "symbol": symbols,
-        "date": [date(2026, 1, 2)] * len(symbols),
-        "close": scores,
-    })
+    return pl.DataFrame(
+        {
+            "symbol": symbols,
+            "date": [date(2026, 1, 2)] * len(symbols),
+            "close": scores,
+        }
+    )
 
 
 def test_composite_union_merge_combines_children(tmp_path):
@@ -291,9 +284,7 @@ def test_composite_union_merge_combines_children(tmp_path):
     )
 
     # 禁用基础过滤(测试 panel 无 amount 等列); composite 会把 basic_filter 透传给子策略
-    result = engine.run(
-        "union_blend", context, overrides={"basic_filter": {"enabled": False}}
-    )
+    result = engine.run("union_blend", context, overrides={"basic_filter": {"enabled": False}})
 
     symbols = {row["symbol"] for row in result.rows}
     assert symbols == {"000001.SZ", "600000.SH"}
@@ -338,9 +329,7 @@ def test_composite_intersect_requires_min_confirm(tmp_path):
         current=_stock_panel(["000001.SZ", "600000.SH"], [10.0, 20.0]),
     )
 
-    result = engine.run(
-        "intersect_blend", context, overrides={"basic_filter": {"enabled": False}}
-    )
+    result = engine.run("intersect_blend", context, overrides={"basic_filter": {"enabled": False}})
 
     # 只有 000001 同时被两个子策略命中
     symbols = {row["symbol"] for row in result.rows}
@@ -412,9 +401,7 @@ def test_composite_single_candidate_child_matches_backtest_merge():
 
     as_of = date(2026, 1, 2)
     child_a = StrategyResult(as_of=as_of, strategy_id="a", scores={"X": 7.0})
-    child_b = StrategyResult(
-        as_of=as_of, strategy_id="b", scores={"X": 1.0, "Y": 3.0, "Z": 2.0}
-    )
+    child_b = StrategyResult(as_of=as_of, strategy_id="b", scores={"X": 1.0, "Y": 3.0, "Z": 2.0})
     merged = composite_mod.merge_results(
         [child_a, child_b], [1.0, 1.0], "union", 0, as_of=as_of, strategy_id="blend"
     )
@@ -452,9 +439,7 @@ def test_composite_empty_children_returns_empty(tmp_path):
     from app.strategy import composite as composite_mod
 
     as_of = date(2026, 1, 2)
-    merged = composite_mod.merge_results(
-        [], [], "union", 0, as_of=as_of, strategy_id="empty"
-    )
+    merged = composite_mod.merge_results([], [], "union", 0, as_of=as_of, strategy_id="empty")
     assert merged.total == 0
     assert merged.scores == {}
 

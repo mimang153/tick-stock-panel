@@ -1,7 +1,9 @@
 """策略守护纯逻辑测试: 判定状态机、退化计算与窗口规划。"""
+
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import Any, cast
 
 import pytest
 
@@ -62,7 +64,7 @@ class TestSoftFloor:
 
 class TestEvaluateCheck:
     def _run(self, **overrides):
-        params = dict(
+        params: dict[str, Any] = dict(
             objective="sharpe",
             baseline_score=2.0,
             baseline_n_trades=300,
@@ -189,7 +191,7 @@ class TestWindowPlanning:
 class TestConsecutiveWatch:
     def test_counts_trailing_watch(self):
         checks = [{"verdict": "healthy"}, {"verdict": "watch"}, {"verdict": "watch"}]
-        assert consecutive_watch(checks) == 2
+        assert consecutive_watch(cast(Any, checks)) == 2
 
     def test_stops_at_error(self):
         checks = [
@@ -197,7 +199,7 @@ class TestConsecutiveWatch:
             {"verdict": "watch", "error": "boom"},
             {"verdict": "watch"},
         ]
-        assert consecutive_watch(checks) == 1
+        assert consecutive_watch(cast(Any, checks)) == 1
 
     def test_empty(self):
         assert consecutive_watch([]) == 0
@@ -209,7 +211,7 @@ class TestGateWorstFold:
     def _gate(self, **overrides):
         from app.backtest.mining import evaluate_candidate_gate
 
-        params = dict(
+        params: dict[str, Any] = dict(
             confidence="high",
             valid_folds=3,
             positive_fold_ratio=1.0,

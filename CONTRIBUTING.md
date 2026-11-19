@@ -240,6 +240,7 @@ Execute the minimum sufficient verification based on the scope of the change. Th
 | Frontend components or pages | `pnpm build`, plus manual checks of loading, empty, error, switching, and realtime refresh states |
 | Frontend and backend contract changes together | Targeted backend tests + frontend build + corresponding page integration check |
 | Files, Docker, or cross-platform logic | Normal path, permission/capability-missing, and target-unavailable failure paths |
+| S4 multi-worker (startup hooks / shared backends / account writes) | `test_coordination_once.py` (redis SET NX cross-worker single-shot), `test_paper_pg.py::test_concurrent_fills_cash_not_overwritten` (real multi-process fill), `test_paper_multiworker.py` (two API instances); plus `API_WORKERS=2` smoke with four backends=redis |
 
 Common commands:
 

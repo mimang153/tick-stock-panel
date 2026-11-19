@@ -5,6 +5,7 @@
 几乎一直为空("暂无数据")。轮动只读涨跌幅, 应退回内存历史缓存, 并用当日
 实时缓存覆盖今天的行。
 """
+
 from __future__ import annotations
 
 import types

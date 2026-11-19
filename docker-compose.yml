@@ -27,6 +27,18 @@ services:
       - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-tsp}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-tsp}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-tsp123456}
+      # S4 四后端默认 redis（跨 worker 共享）；容器间不能用 localhost，统一走
+      # host.docker.internal 访问宿主机 Redis。离线调试才改 memory。
+      - CACHE_BACKEND=${CACHE_BACKEND:-redis}
+      - CACHE_REDIS_URL=${CACHE_REDIS_URL_CONTAINER:-redis://host.docker.internal:6379/0}
+      - CACHE_REDIS_PREFIX=${CACHE_REDIS_PREFIX:-tickflow:cache:}
+      - EVENT_BUS_BACKEND=${EVENT_BUS_BACKEND:-redis}
+      - EVENT_BUS_REDIS_URL=${EVENT_BUS_REDIS_URL_CONTAINER:-redis://host.docker.internal:6379/0}
+      - COORDINATION_BACKEND=${COORDINATION_BACKEND:-redis}
+      - COORDINATION_REDIS_URL=${COORDINATION_REDIS_URL_CONTAINER:-redis://host.docker.internal:6379/0}
+      - MINING_STORE_BACKEND=${MINING_STORE_BACKEND:-redis}
+      # PostgreSQL 账户事务层(DES-005; 复用宿主机 pg_dev.sh 容器, 走 host gateway)。
+      - PAPER_PG_URL=${PAPER_PG_URL_CONTAINER:-postgresql://tsp:123456@host.docker.internal:5432/tsp_dev}
       # 将主机 Codex Desktop 的 loopback local-access 端点映射到 Docker host gateway。
       - CODEX_DOCKER_HOST=host.docker.internal
     depends_on:

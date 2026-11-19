@@ -8,6 +8,7 @@
 - override 改 min_close=100 → 只选 close>100 的标的
 验证 composite(引用该子策略)在有 override_loader 时使用 override 后的阈值。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -47,11 +48,13 @@ EXECUTION_BACKEND = "composite"
 
 
 def _panel() -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": ["LOW.SZ", "HIGH.SH"],
-        "date": [date(2026, 1, 2)] * 2,
-        "close": [10.0, 200.0],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["LOW.SZ", "HIGH.SH"],
+            "date": [date(2026, 1, 2)] * 2,
+            "close": [10.0, 200.0],
+        }
+    )
 
 
 def test_composite_child_uses_default_params_without_loader(tmp_path):
@@ -61,11 +64,15 @@ def test_composite_child_uses_default_params_without_loader(tmp_path):
     custom_dir.mkdir(parents=True)
     comp_dir.mkdir(parents=True)
     (custom_dir / "thresh.py").write_text(_param_filter_code("thresh"), encoding="utf-8")
-    (comp_dir / "composite_blend.py").write_text(_composite_code("composite_blend", "thresh"), encoding="utf-8")
+    (comp_dir / "composite_blend.py").write_text(
+        _composite_code("composite_blend", "thresh"), encoding="utf-8"
+    )
 
     engine = StrategyEngine(strategy_dirs=[custom_dir, comp_dir])  # 无 override_loader
     ctx = StrategyDataContext(
-        asset_type="stock", timeframe="1d", as_of=date(2026, 1, 2),
+        asset_type="stock",
+        timeframe="1d",
+        as_of=date(2026, 1, 2),
         current=_panel(),
     )
     result = engine.run("composite_blend", ctx, overrides={"basic_filter": {"enabled": False}})
@@ -80,7 +87,9 @@ def test_composite_child_uses_override_params_with_loader(tmp_path):
     custom_dir.mkdir(parents=True)
     comp_dir.mkdir(parents=True)
     (custom_dir / "thresh.py").write_text(_param_filter_code("thresh"), encoding="utf-8")
-    (comp_dir / "composite_blend.py").write_text(_composite_code("composite_blend", "thresh"), encoding="utf-8")
+    (comp_dir / "composite_blend.py").write_text(
+        _composite_code("composite_blend", "thresh"), encoding="utf-8"
+    )
 
     # override_loader 返回 thresh 的 override: min_close=100
     overrides_store = {"thresh": {"params": {"min_close": 100}}}
@@ -89,7 +98,9 @@ def test_composite_child_uses_override_params_with_loader(tmp_path):
         override_loader=lambda sid: overrides_store.get(sid, {}),
     )
     ctx = StrategyDataContext(
-        asset_type="stock", timeframe="1d", as_of=date(2026, 1, 2),
+        asset_type="stock",
+        timeframe="1d",
+        as_of=date(2026, 1, 2),
         current=_panel(),
     )
     result = engine.run("composite_blend", ctx, overrides={"basic_filter": {"enabled": False}})
@@ -106,7 +117,9 @@ def test_composite_child_override_loader_failure_is_safe(tmp_path):
     custom_dir.mkdir(parents=True)
     comp_dir.mkdir(parents=True)
     (custom_dir / "thresh.py").write_text(_param_filter_code("thresh"), encoding="utf-8")
-    (comp_dir / "composite_blend.py").write_text(_composite_code("composite_blend", "thresh"), encoding="utf-8")
+    (comp_dir / "composite_blend.py").write_text(
+        _composite_code("composite_blend", "thresh"), encoding="utf-8"
+    )
 
     def bad_loader(sid: str) -> dict:
         raise OSError("disk error")
@@ -116,7 +129,9 @@ def test_composite_child_override_loader_failure_is_safe(tmp_path):
         override_loader=bad_loader,
     )
     ctx = StrategyDataContext(
-        asset_type="stock", timeframe="1d", as_of=date(2026, 1, 2),
+        asset_type="stock",
+        timeframe="1d",
+        as_of=date(2026, 1, 2),
         current=_panel(),
     )
     # loader 抛异常应被捕获, 用默认参数跑(全选), 不报错

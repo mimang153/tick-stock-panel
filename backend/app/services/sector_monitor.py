@@ -1,4 +1,9 @@
-"""板块监控目标目录与实时聚合快照。"""
+"""板块监控目标目录与实时聚合快照。
+
+从已落盘的板块成分与行情派生轻量快照, 不触发联网取数; 目标目录按来源字段
+识别概念/行业维度并生成稳定 key, 供前端订阅与规则引擎引用。
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -13,7 +18,6 @@ from typing import Any
 
 import polars as pl
 
-from app.services import preferences
 from app.services.ext_data import ExtConfig, ExtConfigStore
 from app.services.index_const import CORE_INDEX_NAMES as CORE_INDICES
 
@@ -26,6 +30,7 @@ _WINDOW_TOLERANCE_SECONDS = 90
 
 
 def _finite(value: Any) -> float | None:
+    """把任意数值转为有限 float; 非法/NaN/无穷一律返回 None。"""
     if value is None:
         return None
     try:
@@ -36,6 +41,7 @@ def _finite(value: Any) -> float | None:
 
 
 def _dimension_kind(field_name: str, field_label: str) -> str | None:
+    """按字段名与标签识别板块维度是概念/题材还是行业, 无法识别返回 None。"""
     text = f"{field_name} {field_label}".lower()
     if any(word in text for word in ("概念", "题材", "concept", "theme")):
         return "concept"
@@ -45,6 +51,7 @@ def _dimension_kind(field_name: str, field_label: str) -> str | None:
 
 
 def _target_key(kind: str, source_id: str, field: str, value: str, level: int | None) -> str:
+    """为板块目标生成稳定短 key, 避免把用户可见名称塞进字典键。"""
     raw = f"{kind}\0{source_id}\0{field}\0{level or 0}\0{value}"
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
     return f"{kind}:{digest}"
@@ -61,7 +68,9 @@ class SectorMonitorService:
         # 即拿到配套的 (catalog, targets_by_key, members_by_key), 不会出现
         # 分离字段交错下的混合视图。
         self._view: tuple[
-            dict[str, list[dict]], dict[str, dict], dict[str, set[str]],
+            dict[str, list[dict]],
+            dict[str, dict],
+            dict[str, set[str]],
         ] = ({kind: [] for kind in SECTOR_KINDS}, {}, {})
         self._history: dict[str, deque[tuple[float, float]]] = {}
         self._history_day: str | None = None
@@ -77,7 +86,11 @@ class SectorMonitorService:
     def missing_target_keys(self, targets: list[dict]) -> list[str]:
         self._ensure_catalog()
         _, targets_by_key, _ = self._view
-        return [str(target.get("key") or "") for target in targets if target.get("key") not in targets_by_key]
+        return [
+            str(target.get("key") or "")
+            for target in targets
+            if target.get("key") not in targets_by_key
+        ]
 
     def unavailable_target_keys(self, targets: list[dict]) -> list[str]:
         self._ensure_catalog()
@@ -128,20 +141,12 @@ class SectorMonitorService:
                     history.popleft()
 
             snapshot["window_changes"] = {
-                window: self._window_change(history, now, window, change_pct)
-                for window in windows
+                window: self._window_change(history, now, window, change_pct) for window in windows
             }
             snapshots[key] = snapshot
         return snapshots
 
-    def _ensure_catalog(self) -> None:
-        signature = self._data_signature()
-        if signature == self._catalog_signature:
-            return
-        catalog = {kind: [] for kind in SECTOR_KINDS}
-        targets_by_key: dict[str, dict] = {}
-        members_by_key: dict[str, set[str]] = {}
-
+    def _index_names(self) -> dict[str, str]:
         index_names = dict(CORE_INDICES)
         try:
             indices = self._repo.get_index_instruments()
@@ -152,23 +157,16 @@ class SectorMonitorService:
                     symbol = str(row.get("symbol") or "").strip().upper()
                     if symbol:
                         index_names[symbol] = str(row.get("name") or symbol)
-        except Exception:
+        except Exception:  # noqa: BLE001 - 指数名称只是展示增强,解析失败时退回代码本身
             pass
+        return index_names
 
-        # 指数标的恒可实时监控: quote_service 对核心四只 + 启用规则标的显式拉取
-        for symbol, name in sorted(index_names.items()):
-            target = {
-                "key": f"index:{symbol}",
-                "kind": "index",
-                "name": name,
-                "symbol": symbol,
-                "available": True,
-                "member_count": 1,
-            }
-            catalog["index"].append(target)
-            targets_by_key[target["key"]] = target
-        catalog["index"].sort(key=lambda item: (not item["available"], item["symbol"]))
-
+    def _collect_dimension_targets(
+        self,
+        catalog: dict[str, list[dict]],
+        targets_by_key: dict[str, dict],
+        members_by_key: dict[str, set[str]],
+    ) -> None:
         for config in ExtConfigStore(self._data_dir).load_all():
             df = self._read_ext_dataframe(config)
             if df.is_empty():
@@ -185,7 +183,11 @@ class SectorMonitorService:
                     if not symbol:
                         continue
                     for raw_value in self._dimension_values(row.get(field.name)):
-                        paths = self._industry_paths(raw_value) if kind == "industry" else [(raw_value, None, raw_value)]
+                        paths = (
+                            self._industry_paths(raw_value)
+                            if kind == "industry"
+                            else [(raw_value, None, raw_value)]
+                        )
                         for value, level, name in paths:
                             key = _target_key(kind, config.id, field.name, value, level)
                             members_by_key.setdefault(key, set()).add(symbol)
@@ -204,10 +206,35 @@ class SectorMonitorService:
                                 targets_by_key[key] = target
                                 catalog[kind].append(target)
 
+    def _ensure_catalog(self) -> None:
+        signature = self._data_signature()
+        if signature == self._catalog_signature:
+            return
+        catalog: dict[str, list[dict[str, Any]]] = {kind: [] for kind in SECTOR_KINDS}
+        targets_by_key: dict[str, dict] = {}
+        members_by_key: dict[str, set[str]] = {}
+
+        for symbol, name in sorted(self._index_names().items()):
+            target: dict[str, Any] = {
+                "key": f"index:{symbol}",
+                "kind": "index",
+                "name": name,
+                "symbol": symbol,
+                "available": True,
+                "member_count": 1,
+            }
+            catalog["index"].append(target)
+            targets_by_key[target["key"]] = target
+        catalog["index"].sort(key=lambda item: (not item["available"], item["symbol"]))
+
+        self._collect_dimension_targets(catalog, targets_by_key, members_by_key)
+
         for kind in ("concept", "industry"):
             for target in catalog[kind]:
                 target["member_count"] = len(members_by_key.get(target["key"], set()))
-            catalog[kind].sort(key=lambda item: (item.get("level") or 0, item["name"], item["value"]))
+            catalog[kind].sort(
+                key=lambda item: (item.get("level") or 0, item["name"], item["value"])
+            )
 
         with self._catalog_lock:
             if self._catalog_signature == signature:
@@ -252,9 +279,11 @@ class SectorMonitorService:
     @staticmethod
     def _symbol_column(config: ExtConfig, df: pl.DataFrame) -> str | None:
         candidates = ["symbol", "code", "股票代码", "代码"]
-        for mapping in (config.symbol_map, config.code_map):
-            if isinstance(mapping, dict) and mapping.get("type") == "mapped":
-                candidates.append(str(mapping.get("col") or ""))
+        candidates.extend(
+            str(mapping.get("col") or "")
+            for mapping in (config.symbol_map, config.code_map)
+            if isinstance(mapping, dict) and mapping.get("type") == "mapped"
+        )
         return next((column for column in candidates if column in df.columns), None)
 
     @staticmethod
@@ -340,7 +369,9 @@ class SectorMonitorService:
                 "symbol": leader.get("symbol"),
                 "name": leader.get("name"),
                 "change_pct": leader.get("change_pct"),
-            } if leader else None,
+            }
+            if leader
+            else None,
         }
 
     @staticmethod

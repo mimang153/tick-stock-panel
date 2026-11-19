@@ -1,4 +1,8 @@
-"""Shared static checks for trusted, externally installed source packages."""
+"""Shared static checks for trusted, externally installed source packages.
+
+校验 ZIP 成员路径、大小与依赖声明, 供扩展包与数据源插件安装前共用。
+"""
+
 from __future__ import annotations
 
 import importlib.metadata
@@ -20,14 +24,40 @@ MAX_EXPANDED = 80 * 1024 * 1024
 SOURCE_SUFFIXES = {".py", ".yaml", ".yml", ".json", ".txt", ".md", ".csv"}
 
 
+def _validate_archive_member(name: str, parts: tuple[str, ...], reserved: set[str]) -> None:
+    """校验 ZIP 成员路径: 禁绝对路径、盘符、回溯段与保留设备名。"""
+    if (
+        not parts
+        or name.startswith("/")
+        or "\\" in name
+        or ":" in name
+        or any(
+            p in (".", "..") or p.endswith((".", " ")) or p.split(".")[0].upper() in reserved
+            for p in parts
+        )
+        or PurePosixPath(name).as_posix() != name.rstrip("/")
+    ):
+        raise ValueError("插件包包含非法路径")
+
+
 def read_code_archive(data: bytes, *, frontend: bool = False) -> dict[str, bytes]:
+    """解压并校验源码包成员(路径/后缀/大小/总量), 返回相对路径到字节的映射。"""
     if len(data) > MAX_UPLOAD:
         raise ValueError("插件包超过 20 MiB")
     files: dict[str, bytes] = {}
     folded: set[str] = set()
     total = 0
-    suffixes = SOURCE_SUFFIXES | ({".js", ".mjs", ".css", ".svg", ".png", ".jpg", ".webp"} if frontend else set())
-    reserved = {"CON", "PRN", "AUX", "NUL", *[f"COM{i}" for i in range(10)], *[f"LPT{i}" for i in range(10)]}
+    suffixes = SOURCE_SUFFIXES | (
+        {".js", ".mjs", ".css", ".svg", ".png", ".jpg", ".webp"} if frontend else set()
+    )
+    reserved = {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *[f"COM{i}" for i in range(10)],
+        *[f"LPT{i}" for i in range(10)],
+    }
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             if len(archive.infolist()) > 1000:
@@ -35,10 +65,7 @@ def read_code_archive(data: bytes, *, frontend: bool = False) -> dict[str, bytes
             for info in archive.infolist():
                 name = info.filename
                 parts = PurePosixPath(name).parts
-                if (not parts or name.startswith("/") or "\\" in name or ":" in name
-                        or any(p in (".", "..") or p.endswith((".", " ")) or p.split(".")[0].upper() in reserved for p in parts)
-                        or PurePosixPath(name).as_posix() != name.rstrip("/")):
-                    raise ValueError("插件包包含非法路径")
+                _validate_archive_member(name, parts, reserved)
                 if stat.S_IFMT(info.external_attr >> 16) not in (0, stat.S_IFREG, stat.S_IFDIR):
                     raise ValueError("插件包不允许符号链接或特殊文件")
                 key = name.casefold().rstrip("/")
@@ -64,8 +91,12 @@ def read_code_archive(data: bytes, *, frontend: bool = False) -> dict[str, bytes
 
 
 def compatibility(doc: dict) -> list[str]:
+    """列出扩展清单对当前 app/python/platform 的不兼容项, 空列表表示可安装。"""
     errors = []
-    for field, current in (("requires_app", __version__), ("requires_python", platform.python_version())):
+    for field, current in (
+        ("requires_app", __version__),
+        ("requires_python", platform.python_version()),
+    ):
         if doc.get(field) and Version(current) not in SpecifierSet(str(doc[field])):
             errors.append(f"{field}: 需要 {doc[field]}，当前 {current}")
     platforms = doc.get("platforms", ["any"])

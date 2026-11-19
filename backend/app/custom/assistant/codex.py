@@ -1,4 +1,5 @@
 """把核心 Codex 工具轮次转换为助手的流事件；工具仍由助手确认并执行。"""
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
@@ -14,6 +15,7 @@ async def stream_codex_round(
     temperature: float | None = 0.3,
     timeout: float = 240.0,
 ) -> AsyncIterator[dict[str, Any]]:
+    """执行一轮 Codex 工具调用并把结果转换为助手的流事件。"""
     message = await run_message_once(messages, tools, timeout=timeout)
     calls = [
         {"id": call.id, "name": call.function.name, "arguments": call.function.arguments}
@@ -21,4 +23,8 @@ async def stream_codex_round(
     ]
     if message.content:
         yield {"type": "text", "delta": message.content}
-    yield {"type": "round_end", "tool_calls": calls, "finish_reason": "tool_calls" if calls else "stop"}
+    yield {
+        "type": "round_end",
+        "tool_calls": calls,
+        "finish_reason": "tool_calls" if calls else "stop",
+    }

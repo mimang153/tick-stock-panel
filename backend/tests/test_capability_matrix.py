@@ -8,7 +8,10 @@
 偏好指向未知源时的回退形态。全部用假插件/自定义源,
 不依赖真实网络与本地 data/ 目录。
 """
+
 from __future__ import annotations
+
+from typing import Any, cast
 
 from app.data_providers import custom as custom_sources
 from app.data_providers.capabilities import CAPABILITY_REGISTRY, build_capability_matrix
@@ -40,7 +43,13 @@ def test_registry_covers_all_routing_fields():
     assert sorted(routable) == sorted(DEFAULT_CURRENT)
     assert len(set(routable)) == len(routable)
     assert {c["id"] for c in CAPABILITY_REGISTRY} == {
-        "realtime", "daily", "minute", "full_minute", "depth5", "adj_factor", "financial",
+        "realtime",
+        "daily",
+        "minute",
+        "full_minute",
+        "depth5",
+        "adj_factor",
+        "financial",
     }
     full_minute = next(c for c in CAPABILITY_REGISTRY if c["id"] == "full_minute")
     assert full_minute["field"] == "full_minute_data_provider"
@@ -72,10 +81,20 @@ def test_candidates_only_available_unready_goes_pending(monkeypatch):
     _fake_sources(
         monkeypatch,
         [
-            {"name": "fuyao", "display_name": "fuyao", "datasets": ["realtime"],
-             "available": True, "status": "ok"},
-            {"name": "sdk", "display_name": "SDK", "datasets": ["daily", "minute"],
-             "available": False, "status": "依赖未安装"},
+            {
+                "name": "fuyao",
+                "display_name": "fuyao",
+                "datasets": ["realtime"],
+                "available": True,
+                "status": "ok",
+            },
+            {
+                "name": "sdk",
+                "display_name": "SDK",
+                "datasets": ["daily", "minute"],
+                "available": False,
+                "status": "依赖未安装",
+            },
         ],
         [{"name": "myhttp", "display_name": "MyHTTP", "datasets": ["financial", "realtime"]}],
     )
@@ -130,10 +149,20 @@ def test_usable_follows_effective_provider(monkeypatch):
     _fake_sources(
         monkeypatch,
         [
-            {"name": "fuyao", "display_name": "fuyao", "datasets": ["realtime", "minute"],
-             "available": True, "status": "ok"},
-            {"name": "sdk", "display_name": "SDK", "datasets": ["daily", "adj_factor", "minute"],
-             "available": False, "status": "依赖未安装"},
+            {
+                "name": "fuyao",
+                "display_name": "fuyao",
+                "datasets": ["realtime", "minute"],
+                "available": True,
+                "status": "ok",
+            },
+            {
+                "name": "sdk",
+                "display_name": "SDK",
+                "datasets": ["daily", "adj_factor", "minute"],
+                "available": False,
+                "status": "依赖未安装",
+            },
         ],
     )
     caps = _by_id(
@@ -157,7 +186,8 @@ def test_usable_follows_effective_provider(monkeypatch):
     # 除权显式路由到未就绪 sdk → 不可用 (有 tickflow 候选也不算, 日K不受影响)
     caps = _by_id(
         build_capability_matrix(
-            dict(DEFAULT_CURRENT, adj_factor_provider="sdk"), tickflow_tier="expert",
+            dict(DEFAULT_CURRENT, adj_factor_provider="sdk"),
+            tickflow_tier="expert",
         ),
     )
     assert [c["name"] for c in caps["adj_factor"]["candidates"]] == ["tickflow"]
@@ -170,7 +200,7 @@ def test_unknown_or_empty_tier_fails_closed(monkeypatch):
     """未知档 (探测缺失) 与空档按 none 处理: 仅全档位能力 (日K) 保留 TickFlow。"""
     _fake_sources(monkeypatch, [])
     for tier in ("", "unknown", None):
-        matrix = build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier=tier)
+        matrix = build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier=cast(Any, tier))
         caps = _by_id(matrix)
         assert [c["name"] for c in caps["daily"]["candidates"]] == ["tickflow"]
         assert caps["realtime"]["tf_available"] is False
@@ -186,13 +216,21 @@ def test_adj_factor_routes_independently(monkeypatch):
     """
     _fake_sources(
         monkeypatch,
-        [{"name": "sdk", "display_name": "SDK", "datasets": ["adj_factor"],
-          "available": True, "status": "ok"}],
+        [
+            {
+                "name": "sdk",
+                "display_name": "SDK",
+                "datasets": ["adj_factor"],
+                "available": True,
+                "status": "ok",
+            }
+        ],
     )
     # 日K走 tickflow, 除权显式走 sdk → 互不影响 (TickFlow none 档下插件照常可用)
     caps = _by_id(
         build_capability_matrix(
-            dict(DEFAULT_CURRENT, adj_factor_provider="sdk"), tickflow_tier="none",
+            dict(DEFAULT_CURRENT, adj_factor_provider="sdk"),
+            tickflow_tier="none",
         ),
     )
     adj = caps["adj_factor"]
@@ -206,8 +244,15 @@ def test_depth5_capability_semantics(monkeypatch):
     """五档可独立路由到声明 depth5 的插件, 不受 TickFlow 档位限制。"""
     _fake_sources(
         monkeypatch,
-        [{"name": "depth_src", "display_name": "Depth", "datasets": ["depth5"],
-          "available": True, "status": "ok"}],
+        [
+            {
+                "name": "depth_src",
+                "display_name": "Depth",
+                "datasets": ["depth5"],
+                "available": True,
+                "status": "ok",
+            }
+        ],
     )
     # pro 档: TickFlow 进候选, 默认路由 tickflow → usable
     cap = _by_id(build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="pro"))["depth5"]
@@ -228,7 +273,8 @@ def test_unknown_current_display_falls_back_to_name(monkeypatch):
     _fake_sources(monkeypatch, [])
     caps = _by_id(
         build_capability_matrix(
-            dict(DEFAULT_CURRENT, realtime_data_provider="ghost"), tickflow_tier="expert",
+            dict(DEFAULT_CURRENT, realtime_data_provider="ghost"),
+            tickflow_tier="expert",
         ),
     )
     assert caps["realtime"]["current"] == "ghost"
@@ -333,9 +379,12 @@ def test_api_endpoint_full_minute_usable_follows_preference(monkeypatch):
         [{"name": "eltdx", "display_name": "ELTDX", "datasets": ["full_minute"]}],
     )
     for name in (
-        "get_realtime_data_provider", "get_daily_data_provider",
-        "get_minute_data_provider", "get_depth5_data_provider",
-        "get_adj_factor_provider", "get_financial_provider",
+        "get_realtime_data_provider",
+        "get_daily_data_provider",
+        "get_minute_data_provider",
+        "get_depth5_data_provider",
+        "get_adj_factor_provider",
+        "get_financial_provider",
     ):
         monkeypatch.setattr(preferences, name, lambda: "tickflow")
     monkeypatch.setattr(preferences, "get_full_minute_data_provider", lambda: "eltdx")

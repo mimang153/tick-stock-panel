@@ -4,6 +4,7 @@
 commit 撞车后快照被 fail-closed 丢弃; 丢弃后必须以新世代重建而非把
 缓存长期留冷。仅 warmup 线程重试, 同步/懒加载路径保持单次 (不阻塞 HTTP)。
 """
+
 from __future__ import annotations
 
 from app.enriched_generation import EnrichedGenerationUnavailableError

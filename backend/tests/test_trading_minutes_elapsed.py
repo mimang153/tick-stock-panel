@@ -5,6 +5,7 @@ compute_enriched_today 用 `time_factor = 240 / elapsed_minutes` 把盘中的部
 否则手动刷新一次行情就会把全市场量比放大 240/已过分钟数 倍, 「放量」
 (vol_ratio_5d >= 2) 整片误触发。
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone

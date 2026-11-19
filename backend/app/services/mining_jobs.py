@@ -1,4 +1,9 @@
-"""Persistent metadata and bounded event storage for mining runs."""
+"""Persistent metadata and bounded event storage for mining runs.
+
+Runs are keyed by a signature derived from the canonicalized request plus a
+data fingerprint, so identical computation is deduplicated across restarts.
+Events are appended to a bounded log for progress polling.
+"""
 
 from __future__ import annotations
 
@@ -85,14 +90,20 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
 
 
 class MiningRunStoreError(RuntimeError):
+    """挖掘运行存储读写失败。"""
+
     pass
 
 
 class MiningRunValidationError(MiningRunStoreError, ValueError):
+    """运行记录/清单校验失败(字段缺失、路径越界等)。"""
+
     pass
 
 
 class InvalidMiningStatusTransitionError(MiningRunStoreError):
+    """运行状态流转不符合允许的状态机。"""
+
     pass
 
 
@@ -131,9 +142,7 @@ class MiningRunStore:
             data_dir = settings.data_dir
         if not _NAMESPACE_PATTERN.fullmatch(namespace):
             raise MiningRunValidationError(f"unsupported run store namespace: {namespace!r}")
-        self.runs_root = (
-            (Path(data_dir).resolve() / "research" / namespace / "runs").resolve()
-        )
+        self.runs_root = (Path(data_dir).resolve() / "research" / namespace / "runs").resolve()
         self.runs_root.mkdir(parents=True, exist_ok=True)
 
     def create(
@@ -460,12 +469,14 @@ class MiningRunStore:
         status = value.get("status", "queued")
         if status not in RUN_STATUSES:
             raise MiningRunStoreError(f"invalid status in manifest for run {run_id}")
-        raw_request = value.get("request") if isinstance(value.get("request"), dict) else {}
+        request_value = value.get("request")
+        raw_request = request_value if isinstance(request_value, dict) else {}
         data_fingerprint = value.get("data_fingerprint")
         signature = value.get("run_signature")
         if not isinstance(signature, str) or not signature:
             signature = compute_run_signature(raw_request, data_fingerprint)
-        raw_artifacts = value.get("artifacts") if isinstance(value.get("artifacts"), dict) else {}
+        artifacts_value = value.get("artifacts")
+        raw_artifacts = artifacts_value if isinstance(artifacts_value, dict) else {}
         artifacts: dict[str, str] = {}
         run_dir = self._run_dir(run_id)
         for name, raw_path in raw_artifacts.items():
@@ -553,7 +564,7 @@ class MiningRunStore:
 
 
 def _canonicalize_json_value(value: Any) -> Any:
-    if value is None or isinstance(value, (str, bool, int)):
+    if value is None or isinstance(value, str | bool | int):
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
@@ -561,7 +572,7 @@ def _canonicalize_json_value(value: Any) -> Any:
         return value
     if isinstance(value, Enum):
         return _canonicalize_json_value(value.value)
-    if isinstance(value, (datetime, date)):
+    if isinstance(value, datetime | date):
         return value.isoformat()
     if isinstance(value, Path):
         return str(value)
@@ -572,9 +583,9 @@ def _canonicalize_json_value(value: Any) -> Any:
                 raise MiningRunValidationError("JSON mapping keys must be strings")
             result[key] = _canonicalize_json_value(item)
         return {key: result[key] for key in sorted(result)}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return [_canonicalize_json_value(item) for item in value]
-    if isinstance(value, (set, frozenset)):
+    if isinstance(value, set | frozenset):
         items = [_canonicalize_json_value(item) for item in value]
         return sorted(
             items,
@@ -616,6 +627,23 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def get_run_store(
+    data_dir: Path | str | None = None, *, namespace: str = "mining"
+) -> MiningRunStore:
+    """按配置返回 mining run store；redis 模式返回接口兼容的 Redis 实现（方案 C）。
+
+    返回类型标注为 ``MiningRunStore`` 是结构性兼容声明：Redis 实现未继承该类，
+    但公开方法签名一致，调用方通过依赖注入使用，无需感知具体后端。
+    """
+    from app.config import settings
+
+    if settings.mining_store_backend == "redis":
+        from app.services.mining_run_store_redis import RedisMiningRunStore
+
+        return cast("MiningRunStore", RedisMiningRunStore(data_dir, namespace=namespace))
+    return MiningRunStore(data_dir, namespace=namespace)
 
 
 def _manifest_sort_key(manifest: dict[str, Any]) -> tuple[str, str]:

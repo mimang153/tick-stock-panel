@@ -1,4 +1,5 @@
 """Generic HTTP provider for custom market data sources."""
+
 from __future__ import annotations
 
 import logging
@@ -7,7 +8,7 @@ import time
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import polars as pl
@@ -124,7 +125,9 @@ class GenericHTTPProvider:
             targets = list(cfg.field_map.values())
             dup_targets = sorted({t for t in targets if targets.count(t) > 1})
             if dup_targets:
-                errors.append(f"{dataset}: duplicate mapped target fields: {', '.join(dup_targets)}")
+                errors.append(
+                    f"{dataset}: duplicate mapped target fields: {', '.join(dup_targets)}"
+                )
             if cfg.pct_unit is not None:
                 if dataset != "realtime":
                     errors.append(f"{dataset}: pct_unit 仅用于 realtime 数据集")
@@ -137,13 +140,12 @@ class GenericHTTPProvider:
                     request_params.extend(
                         name for name in (cfg.asset_type_param, cfg.freq_param) if name
                     )
-                duplicates = sorted({
-                    name for name in request_params if request_params.count(name) > 1
-                })
+                duplicates = sorted(
+                    {name for name in request_params if request_params.count(name) > 1}
+                )
                 if duplicates:
                     errors.append(
-                        f"{dataset}: duplicate request parameter names: "
-                        f"{', '.join(duplicates)}"
+                        f"{dataset}: duplicate request parameter names: {', '.join(duplicates)}"
                     )
         return errors
 
@@ -169,7 +171,7 @@ class GenericHTTPProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: str = "stock",  # noqa: ARG002
+        asset_type: str = "stock",
         on_chunk_done=None,
     ) -> pl.DataFrame:
         cfg = self._dataset("daily")
@@ -188,7 +190,10 @@ class GenericHTTPProvider:
                 failed.extend(chunk)
                 logger.warning(
                     "custom daily: batch %d/%d failed (%d symbols), skipped: %s",
-                    i + 1, len(chunks), len(chunk), e,
+                    i + 1,
+                    len(chunks),
+                    len(chunk),
+                    e,
                 )
                 if on_chunk_done:
                     on_chunk_done(i + 1, len(chunks))
@@ -202,7 +207,9 @@ class GenericHTTPProvider:
         if failed:
             logger.warning(
                 "custom daily: %d/%d symbols missing due to batch failures: %s",
-                len(failed), len(symbols), ", ".join(failed[:20]),
+                len(failed),
+                len(symbols),
+                ", ".join(failed[:20]),
             )
         return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
@@ -211,7 +218,7 @@ class GenericHTTPProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: str = "stock",  # noqa: ARG002
+        asset_type: str = "stock",
         on_chunk_done=None,
     ) -> pl.DataFrame:
         cfg = self._dataset("adj_factor")
@@ -228,7 +235,10 @@ class GenericHTTPProvider:
                 failed.extend(chunk)
                 logger.warning(
                     "custom adj_factor: batch %d/%d failed (%d symbols), skipped: %s",
-                    i + 1, len(chunks), len(chunk), e,
+                    i + 1,
+                    len(chunks),
+                    len(chunk),
+                    e,
                 )
                 if on_chunk_done:
                     on_chunk_done(i + 1, len(chunks))
@@ -242,7 +252,9 @@ class GenericHTTPProvider:
         if failed:
             logger.warning(
                 "custom adj_factor: %d/%d symbols missing due to batch failures: %s",
-                len(failed), len(symbols), ", ".join(failed[:20]),
+                len(failed),
+                len(symbols),
+                ", ".join(failed[:20]),
             )
         return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
@@ -273,7 +285,10 @@ class GenericHTTPProvider:
             except Exception as e:  # noqa: BLE001
                 logger.warning(
                     "custom depth5: batch %d/%d failed (%d symbols), skipped: %s",
-                    i + 1, len(chunks), len(chunk), e,
+                    i + 1,
+                    len(chunks),
+                    len(chunk),
+                    e,
                 )
                 continue
             df = self._mapped_frame(cfg, rows)
@@ -307,22 +322,35 @@ class GenericHTTPProvider:
         配置的参数名注入请求 (GET → params, POST → body), 用于上游需区分
         stock/ETF/index 或固定频率的场景。
         """
-        frames = list(self.iter_minute(symbols, start_time, end_time, asset_type, freq, on_chunk_done))
+        frames = list(
+            self.iter_minute(symbols, start_time, end_time, asset_type, freq, on_chunk_done)
+        )
         parts = [frame for frame in frames if not frame.is_empty()]
         return pl.concat(parts, how="diagonal_relaxed") if parts else pl.DataFrame()
 
     def iter_minute(
-        self, symbols: list[str], start_time: datetime | None, end_time: datetime | None,
-        asset_type: AssetType = "stock", freq: str = "1m", on_chunk_done=None,
+        self,
+        symbols: list[str],
+        start_time: datetime | None,
+        end_time: datetime | None,
+        asset_type: AssetType = "stock",
+        freq: str = "1m",
+        on_chunk_done=None,
     ) -> Iterator[pl.DataFrame]:
         yield from self._iter_minute_dataset(
-            "minute", symbols, start_time, end_time, asset_type, freq, on_chunk_done,
+            "minute",
+            symbols,
+            start_time,
+            end_time,
+            asset_type,
+            freq,
+            on_chunk_done,
         )
 
     def get_intraday_batch(
         self,
         symbols: list[str],
-        count: int = 300,  # noqa: ARG002 — 与插件契约对齐, YAML 源按时间窗口取全天
+        count: int = 300,
         asset_type: AssetType = "stock",
     ) -> pl.DataFrame:
         """全量分钟修复轮: 按当日窗口批量拉取 full_minute 数据集 (chunked + rpm 限速)。
@@ -336,7 +364,13 @@ class GenericHTTPProvider:
         end = cn_now().replace(tzinfo=None)
         start = end.replace(hour=0, minute=0, second=0, microsecond=0)
         return self._fetch_minute_dataset(
-            "full_minute", symbols, start, end, asset_type, "1m", None,
+            "full_minute",
+            symbols,
+            start,
+            end,
+            asset_type,
+            "1m",
+            None,
         )
 
     def _fetch_minute_dataset(
@@ -349,14 +383,30 @@ class GenericHTTPProvider:
         freq: str = "1m",
         on_chunk_done: Callable[[int, int], None] | None = None,
     ) -> pl.DataFrame:
-        parts = [df for df in self._iter_minute_dataset(
-            ds_name, symbols, start_time, end_time, asset_type, freq, on_chunk_done,
-        ) if not df.is_empty()]
+        parts = [
+            df
+            for df in self._iter_minute_dataset(
+                ds_name,
+                symbols,
+                start_time,
+                end_time,
+                asset_type,
+                freq,
+                on_chunk_done,
+            )
+            if not df.is_empty()
+        ]
         return pl.concat(parts, how="diagonal_relaxed") if parts else pl.DataFrame()
 
     def _iter_minute_dataset(
-        self, ds_name: str, symbols: list[str], start_time: datetime | None,
-        end_time: datetime | None, asset_type: AssetType, freq: str, on_chunk_done,
+        self,
+        ds_name: str,
+        symbols: list[str],
+        start_time: datetime | None,
+        end_time: datetime | None,
+        asset_type: AssetType,
+        freq: str,
+        on_chunk_done,
     ) -> Iterator[pl.DataFrame]:
         if not symbols:
             return
@@ -368,15 +418,26 @@ class GenericHTTPProvider:
             override[cfg.freq_param] = freq
         chunks = chunked(symbols, cfg.batch)
         for i, chunk in enumerate(chunks):
-            self._minute_pacer.wait(ds_name, cfg.rpm,
-                                    (lambda cur=i: on_chunk_done(cur, len(chunks))) if on_chunk_done else None)
+            self._minute_pacer.wait(
+                ds_name,
+                cfg.rpm,
+                cast(Callable[[], None], lambda cur=i: on_chunk_done(cur, len(chunks)))
+                if on_chunk_done
+                else None,
+            )
             try:
                 rows = self._request_rows(
-                    cfg, symbols=chunk, start_time=start_time, end_time=end_time,
-                    override_params=override or None, override_body=override or None,
+                    cfg,
+                    symbols=chunk,
+                    start_time=start_time,
+                    end_time=end_time,
+                    override_params=override or None,
+                    override_body=override or None,
                 )
             except Exception as exc:  # history failures must reach the task
-                raise ProviderRequestError(f"自定义源 {self.name} 分钟请求失败: {type(exc).__name__}") from exc
+                raise ProviderRequestError(
+                    f"自定义源 {self.name} 分钟请求失败: {type(exc).__name__}"
+                ) from exc
             df = self._mapped_frame(cfg, rows)
             df = self._normalize_minute(df)
             yield df
@@ -406,8 +467,10 @@ class GenericHTTPProvider:
                 extra_params["latest"] = latest_only
                 extra_body["latest"] = latest_only
             rows = self._request_rows(
-                cfg, symbols=chunk,
-                override_params=extra_params, override_body=extra_body,
+                cfg,
+                symbols=chunk,
+                override_params=extra_params,
+                override_body=extra_body,
             )
             df = self._mapped_frame(cfg, rows)
             if not df.is_empty():
@@ -432,7 +495,11 @@ class GenericHTTPProvider:
         for col in ("open", "high", "low", "close", "volume", "amount"):
             if col in df.columns:
                 df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False))
-        keep = [c for c in ("symbol", "datetime", "open", "high", "low", "close", "volume", "amount") if c in df.columns]
+        keep = [
+            c
+            for c in ("symbol", "datetime", "open", "high", "low", "close", "volume", "amount")
+            if c in df.columns
+        ]
         return df.select(keep) if keep else pl.DataFrame()
 
     _DATETIME_STR_FORMATS = (
@@ -450,7 +517,8 @@ class GenericHTTPProvider:
             try:
                 return (
                     s.str.to_datetime(strict=False, format=fmt)
-                    if fmt else s.str.to_datetime(strict=False)
+                    if fmt
+                    else s.str.to_datetime(strict=False)
                 )
             except Exception:  # noqa: BLE001 — 该格式不适用, 换下一个
                 continue
@@ -467,7 +535,7 @@ class GenericHTTPProvider:
             rows = self._request_rows(cfg, symbols=test_symbols)
         elif dataset == "financial":
             # 财务测试取 metrics 表: 与生产 get_financials("metrics") 同口径
-            override = {**cfg.params, "table": "metrics"}
+            override: dict[str, Any] = {**cfg.params, "table": "metrics"}
             rows = self._request_rows(
                 cfg,
                 symbols=test_symbols,
@@ -475,7 +543,7 @@ class GenericHTTPProvider:
                 override_body={**cfg.body, "table": "metrics"},
             )
         elif dataset in {"minute", "full_minute"}:
-            override: dict[str, Any] = {}
+            override = {}
             if cfg.asset_type_param:
                 override[cfg.asset_type_param] = "stock"
             if cfg.freq_param:
@@ -509,7 +577,9 @@ class GenericHTTPProvider:
     def _dataset(self, name: str) -> DatasetConfig:
         cfg = self.config.datasets.get(name)
         if not cfg:
-            raise ValueError(f"Custom data source '{self.name}' does not configure dataset '{name}'")
+            raise ValueError(
+                f"Custom data source '{self.name}' does not configure dataset '{name}'"
+            )
         return cfg
 
     def _mapped_frame(self, cfg: DatasetConfig, rows: list[dict]) -> pl.DataFrame:
@@ -575,11 +645,11 @@ class GenericHTTPProvider:
 
 
 def _normalize_depth_levels(value: Any) -> list[list[float]]:
-    if not isinstance(value, (list, tuple)):
+    if not isinstance(value, list | tuple):
         return []
     levels: list[list[float]] = []
     for item in value:
-        if not isinstance(item, (list, tuple)) or len(item) < 2:
+        if not isinstance(item, list | tuple) or len(item) < 2:
             continue
         try:
             levels.append([float(item[0]), float(item[1])])
@@ -594,7 +664,11 @@ def _token_from_env(name: str | None) -> str | None:
     token = os.getenv(name)
     if token:
         return token
-    candidates = [settings.data_dir.parent / ".env", Path.cwd() / ".env", Path.cwd().parent / ".env"]
+    candidates = [
+        settings.data_dir.parent / ".env",
+        Path.cwd() / ".env",
+        Path.cwd().parent / ".env",
+    ]
     env_path = next((path for path in candidates if path.exists()), None)
     if env_path is None:
         return None

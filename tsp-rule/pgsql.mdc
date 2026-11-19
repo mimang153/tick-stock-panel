@@ -1,0 +1,68 @@
+---
+description: "PostgreSQL 关系库规范：库表 id 主键 + 四审计字段 + 表/字段注释、事务写入组、参数化 SQL、连接与迁移契约（tsp 项目资金类 OLTP 状态专用）"
+globs: backend/app/**/*.py, backend/tests/**/*.py, backend/app/storage/schema*.py, docs/v1.0.1/design/*.md
+alwaysApply: false
+---
+# PostgreSQL（关系库）规范
+
+> 定位：项目引入 PG 仅用于**资金类 OLTP 状态**（当前为模拟盘账户，见 DES-005）。
+> CK 继续作为分析型数据权威、Redis 作为可重建协调态权威，三者职责边界见 DES-004 §2.3。
+> 本文是软规约，在 PR 复审时人工核对（无自动门禁）；与 `clickhouse.mdc`/`redis.mdc` 并列。
+
+## 适用范围
+
+- 关系库中承载业务状态的表（当前：模拟盘账户 6 表，DES-005 §3）。
+- ClickHouse 表沿用 `clickhouse.mdc` 的五审计列规范，**不在本文范围**；不要把 CK 的 `ORDER BY` 去重键思路套到 PG。
+
+## 库表设计（强制，每张业务表必须满足）
+
+| 约束 | 要求 |
+|------|------|
+| 主键 | 必须有 `id` 列作为主键（`TEXT PRIMARY KEY`，UUID4 hex）；业务唯一键用 `UNIQUE` 约束表达，**不得直接用作主键** |
+| 创建人/时间 | 必须有 `created_by`（创建人/操作来源，`TEXT NOT NULL`）与 `created_at`（创建时间，`TIMESTAMPTZ NOT NULL`） |
+| 更新人/时间 | 必须有 `updated_by`（更新人/操作来源，`TEXT NOT NULL`）与 `updated_at`（更新时间，`TIMESTAMPTZ NOT NULL`） |
+| 表注释 | 必须有 `COMMENT ON TABLE`，写明表用途、粒度与关键写入语义 |
+| 字段注释 | 每个字段必须有 `COMMENT ON COLUMN`，说明含义/单位/取值；`UNIQUE` 约束需说明业务键组成 |
+| 审计字段取值 | 单密码模式无用户身份时，`created_by`/`updated_by` 记操作来源（`api`/`scheduler`/`paper_watch`/`pipeline`/`system`），不强行造 user_id；将来引入用户体系再扩展 |
+| 金额/数量 | 金额用 `NUMERIC`（如 `NUMERIC(18,2)`），**禁用 `FLOAT`/`DOUBLE`**（浮点误差会算错账）；数量用 `BIGINT`，费率用 `NUMERIC(10,6)` |
+| 时间类型 | 一律 `TIMESTAMPTZ`（带时区），交易日另用 `DATE`；禁用无时区的 `TIMESTAMP` |
+
+理由：统一 `id` 主键与审计字段便于追踪变更来源、支持乐观并发与增量同步；注释保证 schema 自解释，降低多存储（CK/Redis/PG）并存维护成本；精确数值类型是资金正确性的底线。
+
+## 连接与配置（架构约束）
+
+- **业务代码严禁直接持有 PG 连接对象或跨模块拼 SQL**；读写经统一 storage 门面（如 `app/storage/` 下的关系库门面 / `get_paper_store()` 工厂），业务只依赖门面与 `paper_store_backend` 开关。
+- 连接配置走 `.env`（如 `PAPER_PG_DSN`），不硬编码；`paper_store_backend=file|relational` 默认 `file`（离线兼容），切 `relational` 才连 PG。
+- 后端启动不强制连 PG（与 CK 的 fail-closed 不同）：`file` 后端可完全离线；`relational` 后端启动连不上则 fail-closed，不进半可用态。
+- 连接池生命周期跟随应用 lifespan；退出时正确关闭。
+
+## 事务与并发（核心）
+
+- **一次业务状态变更 = 一个事务**：相关多表写入（如成交的 fill/order/account/positions/nav）必须在同一事务内完成，禁止拆成多次自动提交。
+- **行锁粒度按业务隔离键**：账户状态用 `SELECT ... FOR UPDATE` 锁账户行（account 粒度），不同账户可并行、同账户串行；不要用全局锁。
+- **派生值必须在同一事务快照内计算**：现金/持仓是 fill 的派生值，必须在事务内读台账 → 计算 → 写回，禁止在事务外用过期快照算再写。
+- **重放纯函数不改口径**：`replay_positions()` 等业务纯函数本体保持，只把数据源从文件换成事务内 SELECT；`file`/`relational` 双后端重放结果必须逐字段一致。
+- 事务失败必须回滚；禁止吞异常后继续提交（会留下"fill 写了但 cash 没改"的中间态）。
+
+## SQL 与安全
+
+- **一律参数化绑定**，禁止字符串拼接 SQL（防注入）；值通过驱动参数传入。
+- 动态排序/列名需白名单校验，不接受前端原样字符串。
+- UPSERT 用 `INSERT ... ON CONFLICT (业务键) DO UPDATE`，并更新 `updated_by`/`updated_at`；不得用 `ON CONFLICT DO NOTHING` 静默丢更新（除非业务明确幂等）。
+
+## Schema 迁移
+
+- DDL 变更走迁移脚本（Alembic 或项目约定脚本），版本化、可回滚；禁止手改生产库。
+- 新增表/字段必须同步补表注释与字段注释，与本文 §库表设计一致后方可合并。
+- 一次性迁入（如文件 → PG）须有：全量导入脚本 + 重放一致性校验 + 备份回滚路径；校验全绿才切换 `paper_store_backend`，不做无校验的在线切换。
+
+## 测试
+
+- 现有业务用例必须在 `file` 与 `relational` 双后端各跑一遍，重放结果逐字段一致。
+- 必须覆盖**多进程并发写同一业务键**（当前 paper 测试仅同进程线程并发，不足以证明跨 worker 正确）。
+- 必须覆盖事务中途失败回滚、唯一约束冲突、`ON CONFLICT` 更新审计字段。
+- 测试库用独立 database/schema，结束统一清理；不得污染生产/开发库。
+
+## 应用实例
+
+- 模拟盘账户 6 表（`paper_account` / `paper_fill` / `paper_order` / `paper_position` / `paper_auto_rule` / `paper_nav`）：[`DES-005`](../docs/v1.0.1/design/DES-005-paper-account-transaction-store.md) §3，2026-11-19 引入 PG 时按本文设计（待实现）。

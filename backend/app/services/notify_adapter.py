@@ -11,6 +11,7 @@
 设计: 失败静默降级, 绝不因通知失败阻断告警主流程 (落盘 / SSE 推送)。
      通知去重不在本层做, 复用 MonitorRuleEngine 的 cooldown 逻辑。
 """
+
 from __future__ import annotations
 
 import logging
@@ -111,10 +112,8 @@ def _notify_osascript(title: str, message: str) -> bool:
     # 转义双引号, 避免 AppleScript 注入
     safe_title = title.replace('"', '\\"')
     safe_msg = message.replace('"', '\\"')
-    script = (
-        f'display notification "{safe_msg}" with title "{safe_title}"'
-    )
-    result = subprocess.run(  # noqa: S603, S607
+    script = f'display notification "{safe_msg}" with title "{safe_title}"'
+    result = subprocess.run(
         ["osascript", "-e", script],
         capture_output=True,
         timeout=5,
@@ -128,7 +127,7 @@ def _notify_notify_send(title: str, message: str, icon: Path | None) -> bool:
     if icon and Path(icon).exists():
         args.extend(["--icon", str(icon)])
     args.append(message)
-    result = subprocess.run(  # noqa: S603
+    result = subprocess.run(
         args,
         capture_output=True,
         timeout=5,

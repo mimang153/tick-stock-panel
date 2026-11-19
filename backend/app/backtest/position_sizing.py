@@ -17,6 +17,7 @@
 本模块零引擎依赖: dataclass 契约 + 校验 + 合成冒烟, 独立单测; 模拟盘
 将来复用同一契约 (api_version 供破坏性演化, 见 secondary-development §8)。
 """
+
 from __future__ import annotations
 
 import math
@@ -91,20 +92,16 @@ class PositionSizingResult:
 ComputeFn = Callable[[PositionSizingContext], PositionSizingResult]
 
 
-def normalize_result(
-    result: PositionSizingResult, n_selected: int
-) -> tuple[list[float], float]:
+def normalize_result(result: PositionSizingResult, n_selected: int) -> tuple[list[float], float]:
     """校验并归一化 compute 输出; 非法即抛 ValueError (中文, 面向用户)。
 
     weights 只取相对比例 (归一化到和=1), 用户不必关心量纲;
     budget_scale 钳制到 (0, 1] — 只能缩预算, 不能放大。
     """
     if not isinstance(result, PositionSizingResult):
-        raise ValueError(
-            f"compute 必须返回 PositionSizingResult, 得到 {type(result).__name__}"
-        )
+        raise ValueError(f"compute 必须返回 PositionSizingResult, 得到 {type(result).__name__}")
     raw = result.weights
-    if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
+    if isinstance(raw, str | bytes) or not isinstance(raw, Sequence):
         raise ValueError("weights 必须是数值序列 (list/tuple)")
     if len(raw) != n_selected:
         raise ValueError(f"weights 长度必须等于候选数 {n_selected}, 得到 {len(raw)}")
@@ -142,9 +139,7 @@ def synthetic_context(n_candidates: int = 3) -> PositionSizingContext:
     if n_candidates < 1:
         raise ValueError("n_candidates 必须 ≥ 1")
     scores = [0.9 - 0.1 * i for i in range(n_candidates)]
-    selected = tuple(
-        Candidate(symbol=f"SMOKE{i:02d}", score=s) for i, s in enumerate(scores)
-    )
+    selected = tuple(Candidate(symbol=f"SMOKE{i:02d}", score=s) for i, s in enumerate(scores))
     step = 0.011
     returns: dict[str, list[float]] = {}
     for i in range(n_candidates):
@@ -157,8 +152,14 @@ def synthetic_context(n_candidates: int = 3) -> PositionSizingContext:
     trades = tuple(
         TradeSnapshot(symbol=f"T{i:02d}", pnl_pct=p, duration=5 + i, exit_reason=r)
         for i, (p, r) in enumerate(
-            [(0.05, "signal"), (-0.02, "stop_loss"), (0.08, "signal"),
-             (-0.01, "max_hold"), (0.03, "signal"), (0.06, "trailing_stop")]
+            [
+                (0.05, "signal"),
+                (-0.02, "stop_loss"),
+                (0.08, "signal"),
+                (-0.01, "max_hold"),
+                (0.03, "signal"),
+                (0.06, "trailing_stop"),
+            ]
         )
     )
     return PositionSizingContext(
@@ -181,7 +182,12 @@ def smoke_compute(compute: ComputeFn) -> dict:
     try:
         result = compute(ctx)
     except Exception as e:  # noqa: BLE001 — 用户代码, 任何异常都要转成可读问题
-        return {"ok": False, "issues": [f"compute 执行失败: {type(e).__name__}: {e}"], "weights": [], "budget_scale": 0.0}
+        return {
+            "ok": False,
+            "issues": [f"compute 执行失败: {type(e).__name__}: {e}"],
+            "weights": [],
+            "budget_scale": 0.0,
+        }
     try:
         weights, scale = normalize_result(result, len(ctx.selected))
     except ValueError as e:

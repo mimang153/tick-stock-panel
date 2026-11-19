@@ -10,9 +10,11 @@ Docker 部署时轮询窗口与真实交易时段完全错开」。
 
 判据不依赖跑测试的机器在哪个时区: 固定一个北京时刻, 断言窗口按它判断。
 """
+
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Any, cast
 
 import pytest
 
@@ -77,7 +79,7 @@ async def test_default_landing_date_is_the_beijing_date(at_beijing, monkeypatch)
     monkeypatch.setattr(ext_pull, "fetch_rows_for_date", fake_fetch)
     monkeypatch.setattr(ext_pull, "rows_to_parquet", fake_write)
 
-    written, day_str = await ext_pull.fetch_and_ingest(object(), "/tmp")
+    written, day_str = await ext_pull.fetch_and_ingest(cast(Any, object()), "/tmp")
 
     assert written == 1
     assert seen["fetched"] == date(2026, 3, 2)
@@ -97,7 +99,7 @@ async def test_an_explicit_target_date_still_wins(at_beijing, monkeypatch) -> No
     monkeypatch.setattr(ext_pull, "fetch_rows_for_date", fake_fetch)
     monkeypatch.setattr(ext_pull, "rows_to_parquet", lambda *a, **k: 1)
 
-    _, day_str = await ext_pull.fetch_and_ingest(object(), "/tmp", date(2026, 1, 5))
+    _, day_str = await ext_pull.fetch_and_ingest(cast(Any, object()), "/tmp", date(2026, 1, 5))
 
     assert seen["fetched"] == date(2026, 1, 5)
     assert day_str == "2026-01-05"

@@ -14,10 +14,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 
@@ -636,10 +638,36 @@ def run_regime_batch(repo, start: date, end: date) -> pl.DataFrame:
 # ───────────────────────── 持久化(upsert) ─────────────────────────
 
 REGIME_DIR = "regime_history"
+REGIME_TABLE = "regime_history"
 
 
 def regime_path(data_dir: Path) -> Path:
     return data_dir / REGIME_DIR / "part.parquet"
+
+
+def _ck_store() -> Any | None:
+    """显式 storage 存在时返回 store，否则退回本地 parquet 离线兼容。"""
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    return runtime.store if runtime is not None else None
+
+
+def _to_ck_rows(rows: pl.DataFrame) -> pl.DataFrame:
+    """整行序列化为 payload_json；date 独立列供按日覆盖/删除。"""
+    payload = [json.dumps(rec, ensure_ascii=False, default=str) for rec in rows.to_dicts()]
+    return pl.DataFrame({"date": rows["date"], "payload_json": payload})
+
+
+def _from_ck_rows(ck_rows: pl.DataFrame) -> pl.DataFrame:
+    """payload_json 还原为时序帧；date 从字符串恢复为 Date 类型。"""
+    if ck_rows.is_empty() or "payload_json" not in ck_rows.columns:
+        return pl.DataFrame()
+    records = [json.loads(s) for s in ck_rows["payload_json"].to_list()]
+    out = pl.DataFrame(records)
+    if "date" in out.columns and out.schema.get("date") == pl.String:
+        out = out.with_columns(pl.col("date").str.to_date(strict=False))
+    return out
 
 
 # (path, mtime_ns, size) 签名缓存 — regime 三个端点每请求各读一次全量 parquet,
@@ -649,8 +677,11 @@ _REGIME_HISTORY_SIG: tuple[str, int, int] | None = None
 
 
 def load_regime_history(data_dir: Path) -> pl.DataFrame:
-    """读取全部 regime 时序; 不存在返回空 DataFrame (带 mtime 签名缓存)。"""
+    """读取全部 regime 时序；在线读 CK，离线回退本地 parquet（mtime 签名缓存）。"""
     global _REGIME_HISTORY_CACHE, _REGIME_HISTORY_SIG
+    store = _ck_store()
+    if store is not None:
+        return _from_ck_rows(store.read_regime())
     p = regime_path(data_dir)
     try:
         sig = (str(p), p.stat().st_mtime_ns, p.stat().st_size)
@@ -691,12 +722,26 @@ def refresh_phase_labels(data_dir: Path, *, start: date | None = None) -> int:
             [df.filter(pl.col("date") < start), labeled.filter(pl.col("date") >= start)],
             how="diagonal_relaxed",
         ).sort("date")
+    store = _ck_store()
+    if store is not None:
+        store.replace_regime(
+            start=labeled["date"].min(), end=labeled["date"].max(), rows=_to_ck_rows(labeled)
+        )
+        return labeled.height
     atomic_write_parquet(labeled, regime_path(data_dir))
     return labeled.height
 
 
 def replace_regime_range(data_dir: Path, start: date, end: date, new_rows: pl.DataFrame) -> None:
     """历史修正允许删除已不再存在的统计行, 不保留旧的假结果。"""
+    store = _ck_store()
+    if store is not None:
+        store.replace_regime(
+            start=start,
+            end=end,
+            rows=_to_ck_rows(new_rows) if not new_rows.is_empty() else new_rows,
+        )
+        return
     old = load_regime_history(data_dir)
     kept = old.filter(~pl.col("date").is_between(start, end)) if not old.is_empty() else old
     combined = pl.concat([kept, new_rows], how="diagonal_relaxed").sort("date")
@@ -711,6 +756,10 @@ def upsert_regime_history(data_dir: Path, new_rows: pl.DataFrame) -> None:
     concat 前给旧数据补缺失列(null), 让旧 parquet 首次重写时自动迁移到新 schema。
     """
     if new_rows.is_empty() or "date" not in new_rows.columns:
+        return
+    store = _ck_store()
+    if store is not None:
+        store.upsert_regime(_to_ck_rows(new_rows))
         return
     p = regime_path(data_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -756,6 +805,10 @@ def detect_stale_dates(data_dir: Path, repo) -> list[date]:
     用 mtime 比对: enriched 分区 parquet 的 mtime > regime parquet 的 mtime
     → 该日 enriched 更新过, regime 需重算。
     """
+    # CK-only 下没有分区 mtime 可比：enriched 覆写由重算流程显式触发 regime
+    # 重算，stale 检测仅保留给离线 parquet 兼容路径。
+    if _ck_store() is not None:
+        return []
     regime_p = regime_path(data_dir)
     if not regime_p.exists():
         return []
@@ -837,7 +890,11 @@ def compute_regime_incremental(repo, data_dir: Path, *, today: date | None = Non
 
 
 def enriched_date_set(repo) -> set[date]:
-    """扫描 kline_daily_enriched 分区目录, 返回所有已有日期集合。"""
+    """返回 enriched 已有日期集合：在线从 CK 取，离线兼容旧分区目录。"""
+    storage = getattr(repo, "storage", None)
+    if storage is not None:
+        store = storage.store if hasattr(storage, "store") else storage
+        return set(store.list_daily_dates("kline_daily_enriched"))
     enriched_dir = repo.store.data_dir / "kline_daily_enriched"
     dates: set[date] = set()
     if not enriched_dir.exists():

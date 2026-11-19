@@ -140,7 +140,7 @@ def test_discovery_registers_old_partition_and_retry_keeps_narrow_scope(env):
     for path, content in before_raw.items():
         if path.parent.name != f"date={OLD}":
             assert path.read_bytes() == content
-    corrected = pl.read_parquet(env.root / env.raw_dir / f"date={OLD}/part.parquet")
+    corrected = env.ck.read_daily(env.raw_dir, start=OLD, end=OLD)
     assert corrected.filter(pl.col("symbol") == env.symbol)["close"].item() == 10.0
     assert corrected.filter(pl.col("symbol") == env.other)["close"].item() == 20.0
 
@@ -263,7 +263,7 @@ def test_cancel_after_raw_repair_retries_only_indicator_calculation(env, monkeyp
     assert env.calls == [(env.asset, OLD, [env.symbol])]
 
 
-def test_discovery_after_an_earlier_batch_write_keeps_publication_blocked(env, monkeypatch):
+def test_discovery_after_an_earlier_batch_write_keeps_ck_generation_unready(env, monkeypatch):
     issue = data_integrity.IntegrityIssue(RECENT, env.raw_dir, "invalid", symbols=(env.other,))
     daily_health.record_scan(env.root, [issue], assets=[], start=RECENT, end=RECENT)
     daily_health.record_scan(env.root, [], assets=[env.asset], start=RECENT, end=RECENT)
@@ -280,7 +280,7 @@ def test_discovery_after_an_earlier_batch_write_keeps_publication_blocked(env, m
     initial = report(env)
     with pytest.raises(ValueError, match="2026-08-31"):
         integrity_check.run_repair(env.repo, object(), initial["id"])
-    assert pipeline.enriched_publication_incomplete(env.root, env.asset)
+    assert not env.ck.current_generation(env.asset)
     pending = integrity_check.latest_report(env.root)
     assert pending is not None
     assert next(i for i in pending["issues"] if i["date"] == OLD.isoformat())["symbols"] == [
@@ -290,5 +290,5 @@ def test_discovery_after_an_earlier_batch_write_keeps_publication_blocked(env, m
         daily_health.assert_usable(env.root, env.asset)
     assert pending is not None
     assert integrity_check.run_repair(env.repo, object(), pending["id"])["status"] == "clean"
-    assert not pipeline.enriched_publication_incomplete(env.root, env.asset)
+    assert env.ck.current_generation(env.asset)["state"] == "ready"
     assert env.calls == [(env.asset, OLD, [env.other])]

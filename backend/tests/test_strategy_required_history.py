@@ -5,9 +5,11 @@ strategy.lookback_days 回退到 1, required_history_bars 返回 1,
 build_strategy_context 因此跳过加载历史 (history_bars > 1 不成立),
 engine.run 对 filter_history 策略报 "requires history data"。
 """
+
 import dataclasses
 from datetime import date
 from types import SimpleNamespace
+from typing import Any, cast
 
 import polars as pl
 import pytest
@@ -94,7 +96,7 @@ def test_build_strategy_context_loads_history_for_param_lookback(tmp_path, monke
         _filter_history_strategy("custom_window", lookback_days=1, param_default=22)
     )
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
-    svc = ScreenerService(repo)
+    svc = ScreenerService(cast(Any, repo))
 
     captured: dict[str, int] = {}
 
@@ -159,11 +161,13 @@ def test_run_ok_when_custom_signal_column_present():
         timeframe="1d",
         as_of=target,
         current=None,
-        history=pl.DataFrame({
-            "symbol": ["A", "B"],
-            "date": [target, target],
-            "csg_oversold_macd_about_to_golden": [True, False],
-        }),
+        history=pl.DataFrame(
+            {
+                "symbol": ["A", "B"],
+                "date": [target, target],
+                "csg_oversold_macd_about_to_golden": [True, False],
+            }
+        ),
     )
 
     result = engine.run(sid, context)

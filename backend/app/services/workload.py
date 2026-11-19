@@ -1,4 +1,5 @@
 """Bounded process-local counters; labels never contain request parameters or credentials."""
+
 from __future__ import annotations
 
 import copy
@@ -7,21 +8,40 @@ import threading
 import time
 from collections import OrderedDict, deque
 
-_GROUPS = frozenset({
-    "http.screener", "http.kline", "http.overview", "http.watchlist", "http.backtest",
-    "strategy.batch", "strategy.unit", "strategy.single", "screener.custom", "minute.pull", "minute.single", "minute.sync",
-    "daily.prepare", "backtest.task", "market.calendar",
-})
-_EVENTS = frozenset({"request", "executed", "completed", "shared", "cache_hit", "rejected", "failed"})
+_GROUPS = frozenset(
+    {
+        "http.screener",
+        "http.kline",
+        "http.overview",
+        "http.watchlist",
+        "http.backtest",
+        "strategy.batch",
+        "strategy.unit",
+        "strategy.single",
+        "screener.custom",
+        "minute.pull",
+        "minute.single",
+        "minute.sync",
+        "daily.prepare",
+        "backtest.task",
+        "market.calendar",
+    }
+)
+_EVENTS = frozenset(
+    {"request", "executed", "completed", "shared", "cache_hit", "rejected", "failed"}
+)
 
 
 class WorkloadStats:
+    """进程内按 group/event 计数与耗时统计; 标签不含请求参数或凭据。"""
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._started = time.monotonic()
         self._groups: dict[str, dict[str, float | int]] = {}
 
     def record(self, group: str, event: str, *, elapsed_s: float = 0) -> None:
+        """累加一次事件计数与耗时; 非白名单 group/event 静默忽略。"""
         if group not in _GROUPS or event not in _EVENTS:
             return
         milliseconds = max(0.0, elapsed_s * 1000)
@@ -34,7 +54,10 @@ class WorkloadStats:
 
     def snapshot(self) -> dict:
         with self._lock:
-            return {"uptime_s": time.monotonic() - self._started, "groups": copy.deepcopy(self._groups)}
+            return {
+                "uptime_s": time.monotonic() - self._started,
+                "groups": copy.deepcopy(self._groups),
+            }
 
 
 workload = WorkloadStats()

@@ -8,6 +8,7 @@
 
 复用 test_strategy_code_save.py 的 SimpleNamespace 构造模式。
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -30,12 +31,12 @@ def _filter_code(strategy_id: str) -> str:
         f'{{"id": "{strategy_id}", "name": "{strategy_id}", '
         '"asset_types": ["stock"], "timeframes": ["1d"]}'
     )
-    return f'''import polars as pl
+    return f"""import polars as pl
 META = {meta}
 EXECUTION_BACKEND = "polars_expr"
 def filter(df, params):
     return pl.lit(True)
-'''
+"""
 
 
 def _setup_engine(tmp_path):
@@ -69,9 +70,12 @@ def _composite_req(sid, children, **kw):
 
 def test_render_composite_code_contains_children_and_backend():
     code = _render_composite_code(
-        "composite_blend", "我的叠加", "描述",
+        "composite_blend",
+        "我的叠加",
+        "描述",
         [{"strategy_id": "child_a", "weight": 0.4}, {"strategy_id": "child_b", "weight": 0.6}],
-        "union", 0,
+        "union",
+        0,
     )
     assert 'EXECUTION_BACKEND = "composite"' in code
     assert "composite_blend" in code
@@ -105,18 +109,14 @@ def test_save_composite_rejects_missing_composite_prefix(tmp_path):
     engine.reload()
 
     with pytest.raises(ValueError, match="composite_"):
-        _save_composite_strategy(
-            _composite_req("bad_prefix", [("child_a", 1.0)]), request
-        )
+        _save_composite_strategy(_composite_req("bad_prefix", [("child_a", 1.0)]), request)
 
 
 def test_save_composite_rejects_missing_child(tmp_path):
     _engine, request, _, _ = _setup_engine(tmp_path)
 
     with pytest.raises(ValueError, match="不存在"):
-        _save_composite_strategy(
-            _composite_req("composite_blend", [("ghost", 1.0)]), request
-        )
+        _save_composite_strategy(_composite_req("composite_blend", [("ghost", 1.0)]), request)
 
 
 def test_save_composite_rejects_nested_composite(tmp_path):
@@ -124,9 +124,7 @@ def test_save_composite_rejects_nested_composite(tmp_path):
     (custom_dir / "leaf.py").write_text(_filter_code("leaf"), encoding="utf-8")
     engine.reload()
     # 先创建一个合法 composite
-    _save_composite_strategy(
-        _composite_req("composite_inner", [("leaf", 1.0)]), request
-    )
+    _save_composite_strategy(_composite_req("composite_inner", [("leaf", 1.0)]), request)
 
     with pytest.raises(ValueError, match="嵌套"):
         _save_composite_strategy(
@@ -139,9 +137,7 @@ def test_save_composite_update_mode(tmp_path):
     (custom_dir / "child_a.py").write_text(_filter_code("child_a"), encoding="utf-8")
     (custom_dir / "child_b.py").write_text(_filter_code("child_b"), encoding="utf-8")
     engine.reload()
-    _save_composite_strategy(
-        _composite_req("composite_blend", [("child_a", 1.0)]), request
-    )
+    _save_composite_strategy(_composite_req("composite_blend", [("child_a", 1.0)]), request)
 
     # 更新: 改子策略
     result = _save_composite_strategy(
@@ -156,13 +152,13 @@ def test_save_composite_update_mode(tmp_path):
 def test_save_composite_update_rejects_non_composite(tmp_path):
     engine, request, custom_dir, _ = _setup_engine(tmp_path)
     # 一个普通(polars_expr)策略, 用 composite_ 前缀以通过 id 校验进入后续检查
-    (custom_dir / "composite_plain.py").write_text(_filter_code("composite_plain"), encoding="utf-8")
+    (custom_dir / "composite_plain.py").write_text(
+        _filter_code("composite_plain"), encoding="utf-8"
+    )
     engine.reload()
 
     with pytest.raises(ValueError, match="不是叠加策略"):
-        _save_composite_strategy(
-            _composite_req("composite_plain", [], mode="update"), request
-        )
+        _save_composite_strategy(_composite_req("composite_plain", [], mode="update"), request)
 
 
 # ───────────────────────── _strategy_detail ─────────────────────────
@@ -201,9 +197,7 @@ def test_delete_referenced_child_blocked(tmp_path):
     engine, request, custom_dir, _ = _setup_engine(tmp_path)
     (custom_dir / "child_a.py").write_text(_filter_code("child_a"), encoding="utf-8")
     engine.reload()
-    _save_composite_strategy(
-        _composite_req("composite_blend", [("child_a", 1.0)]), request
-    )
+    _save_composite_strategy(_composite_req("composite_blend", [("child_a", 1.0)]), request)
 
     # 直接调端点函数(delete_strategy 需要 request)
     from app.api.strategy import delete_strategy
@@ -219,9 +213,7 @@ def test_delete_composite_itself_succeeds(tmp_path):
     engine, request, custom_dir, _ = _setup_engine(tmp_path)
     (custom_dir / "child_a.py").write_text(_filter_code("child_a"), encoding="utf-8")
     engine.reload()
-    _save_composite_strategy(
-        _composite_req("composite_blend", [("child_a", 1.0)]), request
-    )
+    _save_composite_strategy(_composite_req("composite_blend", [("child_a", 1.0)]), request)
 
     from app.api.strategy import delete_strategy
 

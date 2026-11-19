@@ -15,6 +15,7 @@ lambda/推导式/下划线开头属性), 再在 {ctx, pl} + 空 builtins 的命�
 三档编译层: T1 DSL (最强受限, 一切可静态分析) < 本层 T2 (表达式级自由,
 依赖可追踪) < T3 自由 Python 策略 (现状保留, 第三方导入成真时再子进程)。
 """
+
 from __future__ import annotations
 
 import ast
@@ -22,6 +23,7 @@ import logging
 import textwrap
 from dataclasses import dataclass, field
 from functools import lru_cache
+from typing import Any, cast
 
 import polars as pl
 
@@ -34,22 +36,50 @@ _MAX_STATEMENTS = 30
 
 # 文法白名单: 表达式节点 (方法链/算术/比较/三元/切片常量)
 _ALLOWED_EXPR_NODES = (
-    ast.Expression, ast.Expr, ast.Assign, ast.Name, ast.Attribute, ast.Call,
-    ast.BinOp, ast.UnaryOp, ast.BoolOp, ast.Compare, ast.IfExp,
-    ast.Constant, ast.Tuple, ast.List, ast.Subscript, ast.Slice,
+    ast.Expression,
+    ast.Expr,
+    ast.Assign,
+    ast.Name,
+    ast.Attribute,
+    ast.Call,
+    ast.BinOp,
+    ast.UnaryOp,
+    ast.BoolOp,
+    ast.Compare,
+    ast.IfExp,
+    ast.Constant,
+    ast.Tuple,
+    ast.List,
+    ast.Subscript,
+    ast.Slice,
 )
 # 会被调度任意 Python 回调或触发 IO 的 polars 面 — 一律拒绝。
-_FORBIDDEN_ATTRS = frozenset({
-    "map_batches", "map_elements", "apply", "reinterpret",
-    "rolling_apply", "cumulative_eval",
-})
+_FORBIDDEN_ATTRS = frozenset(
+    {
+        "map_batches",
+        "map_elements",
+        "apply",
+        "reinterpret",
+        "rolling_apply",
+        "cumulative_eval",
+    }
+)
 _FORBIDDEN_PL_PREFIXES = ("read_", "scan_")
 _ROOT_NAMES = frozenset({"ctx", "pl"})
 # 窗口调用 → warmup 推断 (span=2/alpha-1 由 alpha 折算)
-_WINDOW_METHODS = frozenset({
-    "rolling_min", "rolling_max", "rolling_mean", "rolling_sum",
-    "rolling_std", "rolling_var", "rolling_median", "rolling_quantile", "rolling_skew",
-})
+_WINDOW_METHODS = frozenset(
+    {
+        "rolling_min",
+        "rolling_max",
+        "rolling_mean",
+        "rolling_sum",
+        "rolling_std",
+        "rolling_var",
+        "rolling_median",
+        "rolling_quantile",
+        "rolling_skew",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -89,85 +119,182 @@ class _Ctx:
         return pl.col(name)
 
 
+def _window_method_span(node: ast.Call) -> float | None:
+    """rolling.* 的窗口参数: 位置参数优先, window_size= 关键字覆盖。"""
+    span: float | None = None
+    if (
+        node.args
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, int | float)
+    ):
+        span = float(node.args[0].value)
+    for kw in node.keywords:
+        if kw.arg == "window_size" and isinstance(kw.value, ast.Constant):
+            span = float(cast(Any, kw.value.value))
+    return span
+
+
+def _lag_span(node: ast.Call) -> float | None:
+    """shift/diff/pct_change 的正整数滞后。"""
+    lag = next((kw.value for kw in node.keywords if kw.arg == "n"), None)
+    if lag is None:
+        lag = node.args[0] if node.args else ast.Constant(1)
+    if isinstance(lag, ast.Constant) and isinstance(lag.value, int) and lag.value > 0:
+        return lag.value
+    return None
+
+
+def _ewm_span(node: ast.Call) -> float | None:
+    """ewm_mean 的 span 或 alpha 折算 (2/alpha - 1)。"""
+    span: float | None = None
+    for kw in node.keywords:
+        if kw.arg == "span" and isinstance(kw.value, ast.Constant):
+            span = float(cast(Any, kw.value.value))
+        elif kw.arg == "alpha" and isinstance(kw.value, ast.Constant):
+            alpha = float(cast(Any, kw.value.value))
+            span = 2.0 / alpha - 1.0 if 0 < alpha <= 1 else None
+    return span
+
+
+def _call_warmup(node: ast.Call) -> float | None:
+    """单个调用的预热窗口常量; 非窗口调用返回 None。"""
+    func = node.func
+    name = func.attr if isinstance(func, ast.Attribute) else ""
+    if name in _WINDOW_METHODS:
+        return _window_method_span(node)
+    if name in {"shift", "diff", "pct_change"}:
+        return _lag_span(node)
+    if name == "ewm_mean":
+        return _ewm_span(node)
+    return None
+
+
 def _window_warmup(tree: ast.Module) -> int:
     """窗口调用常量的保守求和 (rolling 的 N + ewm 的 span/alpha 折算)。"""
     total = 0
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = func.attr if isinstance(func, ast.Attribute) else ""
-        span: float | None = None
-        if name in _WINDOW_METHODS:
-            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, (int, float)):
-                span = float(node.args[0].value)
-            for kw in node.keywords:
-                if kw.arg == "window_size" and isinstance(kw.value, ast.Constant):
-                    span = float(kw.value.value)
-        elif name in {"shift", "diff", "pct_change"}:
-            lag = next((kw.value for kw in node.keywords if kw.arg == "n"), None)
-            if lag is None:
-                lag = node.args[0] if node.args else ast.Constant(1)
-            if isinstance(lag, ast.Constant) and isinstance(lag.value, int) and lag.value > 0:
-                span = lag.value
-        elif name == "ewm_mean":
-            for kw in node.keywords:
-                if kw.arg == "span" and isinstance(kw.value, ast.Constant):
-                    span = float(kw.value.value)
-                elif kw.arg == "alpha" and isinstance(kw.value, ast.Constant):
-                    alpha = float(kw.value.value)
-                    span = 2.0 / alpha - 1.0 if 0 < alpha <= 1 else None
-        if span is not None:
-            total += max(int(span), 1)
+        if isinstance(node, ast.Call):
+            span = _call_warmup(node)
+            if span is not None:
+                total += max(int(span), 1)
     return total
 
 
+def _attribute_error(node: ast.Attribute) -> DslError | None:
+    if node.attr.startswith("_"):
+        return DslError("E205", f"禁止访问下划线属性: {node.attr}")
+    if node.attr in _FORBIDDEN_ATTRS:
+        return DslError("E206", f"禁止调用会执行任意回调的方法: {node.attr}")
+    if (
+        isinstance(node.value, ast.Name)
+        and node.value.id == "pl"
+        and node.attr.startswith(_FORBIDDEN_PL_PREFIXES)
+    ):
+        return DslError("E207", f"禁止 IO 类调用: pl.{node.attr}")
+    return None
+
+
+def _name_error(node: ast.Name, assigned: set[str]) -> DslError | None:
+    if (
+        node.id not in assigned
+        and node.id not in _ROOT_NAMES
+        and node.id not in ("True", "False", "None")
+    ):
+        return DslError("E208", f"未定义的名字 (只允许 ctx/pl 与已赋值变量): {node.id}")
+    return None
+
+
+def _node_error(node: ast.AST, assigned: set[str]) -> DslError | None:
+    if isinstance(node, ast.Attribute):
+        return _attribute_error(node)
+    if isinstance(node, ast.Name):
+        return _name_error(node, assigned)
+    if isinstance(
+        node,
+        ast.Lambda
+        | ast.FunctionDef
+        | ast.AsyncFunctionDef
+        | ast.ClassDef
+        | ast.Import
+        | ast.ImportFrom
+        | ast.For
+        | ast.While
+        | ast.With
+        | ast.Try
+        | ast.ListComp
+        | ast.SetComp
+        | ast.DictComp
+        | ast.GeneratorExp
+        | ast.Yield
+        | ast.YieldFrom,
+    ):
+        return DslError("E209", f"不允许的语法: {type(node).__name__}")
+    if not isinstance(
+        node,
+        (
+            *_ALLOWED_EXPR_NODES,
+            ast.Load,
+            ast.Store,
+            ast.operator,
+            ast.unaryop,
+            ast.boolop,
+            ast.cmpop,
+            ast.mod,
+            ast.expr_context,
+            ast.keyword,
+        ),
+    ):
+        return DslError("E210", f"不允许的表达式节点: {type(node).__name__}")
+    return None
+
+
 def _validate_grammar(tree: ast.Module) -> list[DslError]:
-    errors: list[DslError] = []
     if len(tree.body) == 0:
         return [DslError("E201", "表达式为空")]
     if len(tree.body) > _MAX_STATEMENTS:
         return [DslError("E202", f"语句数超限 (>{_MAX_STATEMENTS})")]
+    errors: list[DslError] = []
     assigned: set[str] = set()
     for stmt in tree.body:
         if isinstance(stmt, ast.Assign):
             for target in stmt.targets:
-                if not isinstance(target, ast.Name) or not target.id.isidentifier() or target.id.startswith("_"):
+                if (
+                    not isinstance(target, ast.Name)
+                    or not target.id.isidentifier()
+                    or target.id.startswith("_")
+                ):
                     errors.append(DslError("E203", "赋值目标必须是简单变量名 (非下划线开头)"))
                 else:
                     assigned.add(target.id)
         elif not isinstance(stmt, ast.Expr):
-            errors.append(DslError("E204", f"只允许赋值与表达式语句, 不允许: {type(stmt).__name__}"))
+            errors.append(
+                DslError("E204", f"只允许赋值与表达式语句, 不允许: {type(stmt).__name__}")
+            )
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute):
-            if node.attr.startswith("_"):
-                errors.append(DslError("E205", f"禁止访问下划线属性: {node.attr}"))
-            elif node.attr in _FORBIDDEN_ATTRS:
-                errors.append(DslError("E206", f"禁止调用会执行任意回调的方法: {node.attr}"))
-            elif isinstance(node.value, ast.Name) and node.value.id == "pl" and node.attr.startswith(_FORBIDDEN_PL_PREFIXES):
-                errors.append(DslError("E207", f"禁止 IO 类调用: pl.{node.attr}"))
-        elif isinstance(node, ast.Name):
-            if node.id not in assigned and node.id not in _ROOT_NAMES and node.id not in ("True", "False", "None"):
-                errors.append(DslError("E208", f"未定义的名字 (只允许 ctx/pl 与已赋值变量): {node.id}"))
-        elif isinstance(node, ast.Lambda | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
-                        | ast.Import | ast.ImportFrom | ast.For | ast.While | ast.With | ast.Try
-                        | ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp | ast.Yield | ast.YieldFrom):
-            errors.append(DslError("E209", f"不允许的语法: {type(node).__name__}"))
-        elif not isinstance(node, (*_ALLOWED_EXPR_NODES, ast.Load, ast.Store, ast.operator, ast.unaryop, ast.boolop, ast.cmpop, ast.mod, ast.expr_context, ast.keyword)):
-            errors.append(DslError("E210", f"不允许的表达式节点: {type(node).__name__}"))
+        error = _node_error(node, assigned)
+        if error is not None:
+            errors.append(error)
     return errors
 
 
 def compile_python_expression(source: str) -> CompiledPyExpr:
     """编译 T2 表达式; 永不抛异常, 失败以 errors 表达 (fail-closed)。"""
     if not isinstance(source, str) or not source.strip():
-        return CompiledPyExpr(ok=False, errors=[DslError("E201", "表达式为空")], formula_text=source or "")
+        return CompiledPyExpr(
+            ok=False, errors=[DslError("E201", "表达式为空")], formula_text=source or ""
+        )
     if len(source) > _MAX_SOURCE_CHARS:
-        return CompiledPyExpr(ok=False, errors=[DslError("E202", f"源码超长 (>{_MAX_SOURCE_CHARS} 字符)")], formula_text=source)
+        return CompiledPyExpr(
+            ok=False,
+            errors=[DslError("E202", f"源码超长 (>{_MAX_SOURCE_CHARS} 字符)")],
+            formula_text=source,
+        )
     try:
         tree = ast.parse(textwrap.dedent(source), mode="exec")
     except SyntaxError as e:
-        return CompiledPyExpr(ok=False, errors=[DslError("E201", f"语法错误: {e.msg}")], formula_text=source)
+        return CompiledPyExpr(
+            ok=False, errors=[DslError("E201", f"语法错误: {e.msg}")], formula_text=source
+        )
 
     errors = _validate_grammar(tree)
     if errors:
@@ -183,7 +310,11 @@ def compile_python_expression(source: str) -> CompiledPyExpr:
             result_node = stmt.targets[0]
             break
     if result_node is None:
-        return CompiledPyExpr(ok=False, errors=[DslError("E211", "缺少结果表达式 (末尾裸表达式或赋值)")], formula_text=source)
+        return CompiledPyExpr(
+            ok=False,
+            errors=[DslError("E211", "缺少结果表达式 (末尾裸表达式或赋值)")],
+            formula_text=source,
+        )
 
     ctx = _Ctx()
     namespace = {"ctx": ctx, "pl": pl, "__builtins__": {}}
@@ -191,12 +322,24 @@ def compile_python_expression(source: str) -> CompiledPyExpr:
     try:
         exec(compile(padded, "<t2-factor>", "exec"), namespace)  # 文法白名单已过 + 空 builtins
     except Exception as e:  # noqa: BLE001 — 用户表达式求值失败统一转为编译错误
-        return CompiledPyExpr(ok=False, errors=[DslError("E212", f"求值失败: {type(e).__name__}: {e}")], formula_text=source)
+        return CompiledPyExpr(
+            ok=False,
+            errors=[DslError("E212", f"求值失败: {type(e).__name__}: {e}")],
+            formula_text=source,
+        )
     result = namespace.get("__t2_result__")
     if not isinstance(result, pl.Expr):
-        return CompiledPyExpr(ok=False, errors=[DslError("E213", "结果必须是单个 Polars 表达式 (pl.Expr)")], formula_text=source)
+        return CompiledPyExpr(
+            ok=False,
+            errors=[DslError("E213", "结果必须是单个 Polars 表达式 (pl.Expr)")],
+            formula_text=source,
+        )
     if not ctx.columns:
-        return CompiledPyExpr(ok=False, errors=[DslError("E214", "至少通过 ctx.col 引用一个输入列")], formula_text=source)
+        return CompiledPyExpr(
+            ok=False,
+            errors=[DslError("E214", "至少通过 ctx.col 引用一个输入列")],
+            formula_text=source,
+        )
 
     # 引用名里命中注册表因子 id 的, 单列为 referenced_factors (成员须先物化)
     from app.factors.registry import factor_warmup_bars, get_factor
@@ -223,4 +366,6 @@ def compile_python_expression_cached(source: str) -> CompiledPyExpr:
     from app.factors.registry import registry_cache_revision
 
     revision = registry_cache_revision()
-    return compile_python_expression(source) if revision is None else _compile_cached(source, revision)
+    return (
+        compile_python_expression(source) if revision is None else _compile_cached(source, revision)
+    )

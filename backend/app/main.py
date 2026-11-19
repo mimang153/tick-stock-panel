@@ -131,6 +131,25 @@ def _lifespan_data_core(app: FastAPI) -> tuple[DataStore, KlineRepository]:
 
         storage = init_storage()
     app.state.storage = storage
+    with startup_phase(logger, "coordination state rebuild"):
+        from app.config import settings as _settings
+        from app.services.coordination import coordination
+
+        # 重建是昂贵且跨 worker 重复无意义的启动钩子：只让一个 worker 执行。
+        if _settings.coordination_backend == "redis" and coordination.once(
+            "startup:coordination_rebuild"
+        ):
+            from app.services.coordination_audit import rebuild_coordination
+
+            counts = rebuild_coordination()
+            logger.info("协调态重建完成: %s", counts)
+        if _settings.mining_store_backend == "redis" and coordination.once(
+            "startup:mining_rebuild"
+        ):
+            from app.services.mining_audit import rebuild_mining_runs
+
+            mining_counts = rebuild_mining_runs()
+            logger.info("mining run 重建完成: %s", mining_counts)
     with startup_phase(logger, "repository initialization"):
         repo = KlineRepository(store, storage=storage.store)
     app.state.datastore = store
@@ -165,15 +184,20 @@ def _lifespan_seed_factors(store: DataStore) -> int:
 
 def _lifespan_mining_guardian(app: FastAPI, store: DataStore, repo: KlineRepository) -> None:
     """挖掘/守护任务恢复 + enriched generation 固定 + 缓存后台预热。"""
+    from app.services.coordination import coordination
+
     with startup_phase(logger, "mining manager initialization"):
-        from app.services.mining_jobs import MiningRunStore
+        from app.services.mining_jobs import get_run_store
         from app.services.mining_manager import MiningJobManager
 
         mining_manager = MiningJobManager(store.data_dir)
-    # degraded 实例不得改写其他 owner 的 live run manifests
+    # degraded 实例不得改写其他 owner 的 live run manifests；
+    # 恢复只由一个 worker 做，避免多 worker 互把对方 ACTIVE run 标 interrupted。
     with startup_phase(logger, "mining run recovery"):
         recovered_mining_runs = (
-            mining_manager.recover_interrupted() if app.state.mining_lock_acquired else 0
+            mining_manager.recover_interrupted()
+            if app.state.mining_lock_acquired and coordination.once("startup:mining_recover")
+            else 0
         )
     app.state.mining_manager = mining_manager
     if recovered_mining_runs:
@@ -182,15 +206,22 @@ def _lifespan_mining_guardian(app: FastAPI, store: DataStore, repo: KlineReposit
         guardian_manager = MiningJobManager(
             store.data_dir,
             kind="guardian",
-            store=MiningRunStore(store.data_dir, namespace="guardian"),
+            store=get_run_store(store.data_dir, namespace="guardian"),
         )
     with startup_phase(logger, "guardian run recovery"):
-        recovered_guardian_runs = guardian_manager.recover_interrupted()
+        recovered_guardian_runs = (
+            guardian_manager.recover_interrupted()
+            if coordination.once("startup:guardian_recover")
+            else 0
+        )
     app.state.guardian_manager = guardian_manager
     if recovered_guardian_runs:
         logger.warning("recovered %d interrupted guardian runs", recovered_guardian_runs)
-    # 接受回测请求前固定 managed generation, 避免首批并发 worker 各自创建版本
-    if settings.backtest_matrix_disk_cache_enabled:
+    # 接受回测请求前固定 managed generation, 避免首批并发 worker 各自创建版本；
+    # 只让一个 worker 固定共享版本，其余 worker 直接复用已固定的结果。
+    if settings.backtest_matrix_disk_cache_enabled and coordination.once(
+        "startup:matrix_generation"
+    ):
         try:
             with startup_phase(logger, "enriched generation initialization"):
                 repo.get_matrix_data_generation("stock")
@@ -262,18 +293,25 @@ def _lifespan_quote_monitor(app: FastAPI, repo: KlineRepository) -> None:
 
 
 def _lifespan_schedulers(app: FastAPI, store: DataStore, repo: KlineRepository, capset) -> None:
-    """调度器 + depth sealed 补跑 + 盘中分钟刷新 + 停机缺口自检。"""
+    """调度器 + depth sealed 补跑 + 盘中分钟刷新 + 停机缺口自检。
+
+    后台线程只在 leader worker 启动（避免多进程重复调度）；但服务对象与
+    app.state 在所有 worker 都挂载，API 读取时非 leader 只是「未启动」状态。
+    """
+    from app.services.coordination import coordination
+
+    leader = coordination.once("startup:schedulers")
     try:
         daily_pipeline.set_app_state(app.state)
-        scheduler = daily_pipeline.start_scheduler(repo, capset)
-        app.state.scheduler = scheduler
+        app.state.scheduler = daily_pipeline.start_scheduler(repo, capset) if leader else None
     except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("scheduler not started: %s", e)
         app.state.scheduler = None
     try:
         depth_service = app.state.depth_service
         depth_service.boot_check()
-        depth_service.start_polling()
+        if leader:
+            depth_service.start_polling()
     except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("depth_service init failed: %s", e)
     try:
@@ -282,19 +320,21 @@ def _lifespan_schedulers(app: FastAPI, store: DataStore, repo: KlineRepository, 
         minute_refresh = MinuteRefreshService(repo)
         minute_refresh.set_app_state(app.state)
         app.state.minute_refresh = minute_refresh
-        minute_refresh.start()
+        if leader:
+            minute_refresh.start()
     except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("minute_refresh init failed: %s", e)
-    try:
-        import threading
+    if leader:
+        try:
+            import threading
 
-        from app.services.data_integrity import boot_integrity_check
+            from app.services.data_integrity import boot_integrity_check
 
-        timer = threading.Timer(30.0, boot_integrity_check, args=(app.state,))
-        timer.daemon = True  # 不阻塞进程退出
-        timer.start()
-    except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
-        logger.warning("integrity boot check scheduling failed: %s", e)
+            timer = threading.Timer(30.0, boot_integrity_check, args=(app.state,))
+            timer.daemon = True  # 不阻塞进程退出
+            timer.start()
+        except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
+            logger.warning("integrity boot check scheduling failed: %s", e)
 
 
 async def _lifespan_background(
@@ -327,14 +367,19 @@ async def _lifespan_background(
         await ensure_builtin_presets(store.data_dir)
     except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("内置扩展表初始化失败 (不影响启动): %s", e)
+    from app.services.coordination import coordination
+
+    leader = coordination.once("startup:background")
     from app.services.ext_pull import pull_scheduler
 
-    pull_scheduler.start(store.data_dir)
-    pull_scheduler.refresh(store.data_dir)
+    if leader:
+        pull_scheduler.start(store.data_dir)
+        pull_scheduler.refresh(store.data_dir)
     app.state.pull_scheduler = pull_scheduler
     from app.services.financial_sync import financial_scheduler
 
-    financial_scheduler.start(store.data_dir, capset)
+    if leader:
+        financial_scheduler.start(store.data_dir, capset)
     app.state.financial_scheduler = financial_scheduler
     from app.watchdog import start_watchdog
 
@@ -540,6 +585,10 @@ async def _lifespan_shutdown(app: FastAPI, state: _LifespanState) -> None:
     from app.services.quote_service import shutdown_delivery_executors
 
     shutdown_delivery_executors()
+    # 事件总线订阅线程先退出, 再关闭存储层 (与启动顺序相反)
+    from app.services.events import bus
+
+    bus.close()
     # 存储层最后收尾: 先把写缓冲 flush 完再断连, 避免丢已接受的写入
     from app.storage.runtime import shutdown_storage
 
@@ -582,19 +631,26 @@ async def _application_lifespan(app: FastAPI):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 方案 C（Redis 状态机）下 run 状态由 Redis Lua 权威串行化, 取消走协调层,
+    # flock 不再参与 mining 门控 —— 直接以"已获得"语义启动, 不再抢本机文件锁。
+    # 默认 memory 文件版仍需 flock 单写者保护, 保留原降级 / 强制释放语义。
+    distributed_mining = settings.mining_store_backend == "redis"
     mining_process_lock = MiningProcessLock(settings.data_dir)
     lock_acquired = True
-    try:
-        mining_process_lock.acquire()
-    except MiningProcessLockError:
-        # 撞锁不再让整个后端起不来 (典型: 旧实例挂死在 shutdown 持锁不放):
-        # 面板以降级模式启动 — 挖掘启动入口返回 409, 用户可在挖掘页查看
-        # 持有者并 (满足陈旧判定时) 强制释放, 之后自动恢复。
-        lock_acquired = False
-        logger.warning(
-            "挖掘锁被其他进程占用, 面板以降级模式启动 (挖掘功能暂不可用; "
-            "可在挖掘页查看锁状态并强制释放)"
-        )
+    if not distributed_mining:
+        try:
+            mining_process_lock.acquire()
+        except MiningProcessLockError:
+            # 撞锁不再让整个后端起不来 (典型: 旧实例挂死在 shutdown 持锁不放):
+            # 面板以降级模式启动 — 挖掘启动入口返回 409, 用户可在挖掘页查看
+            # 持有者并 (满足陈旧判定时) 强制释放, 之后自动恢复。
+            lock_acquired = False
+            logger.warning(
+                "挖掘锁被其他进程占用, 面板以降级模式启动 (挖掘功能暂不可用; "
+                "可在挖掘页查看锁状态并强制释放)"
+            )
+    else:
+        logger.info("分布式挖掘模式 (redis): flock 门控已出局")
     app.state.mining_process_lock = mining_process_lock
     app.state.mining_lock_acquired = lock_acquired
     try:

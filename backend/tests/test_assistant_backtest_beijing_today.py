@@ -8,6 +8,7 @@ get_stock_daily / get_stock_analysis / 系统提示词已经改用 cn_today()
 UTC 主机在北京 00:00-08:00、以及美西主机整个 A 股交易时段, 本地日历日比
 北京早一天: 回测窗口少取一个自然日, 刚收盘的当日成交不进样本。
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -60,7 +61,8 @@ def _patch_worker(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]) -> 
 
 
 def test_run_backtest_default_end_is_beijing_today(
-    monkeypatch: pytest.MonkeyPatch, tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
     captured: dict[str, Any] = {}
     _patch_clocks(monkeypatch)
@@ -69,8 +71,7 @@ def test_run_backtest_default_end_is_beijing_today(
     result = tool_catalog.run_backtest(tmp_path, strategy_id="demo_a")
 
     assert captured["end"] == BJ, (
-        f"回测缺省结束日必须是北京日期 {BJ}, 实际 {captured.get('end')} "
-        f"(服务器本地 {LOCAL})"
+        f"回测缺省结束日必须是北京日期 {BJ}, 实际 {captured.get('end')} (服务器本地 {LOCAL})"
     )
     assert captured["end"] != LOCAL
     assert captured["start"] == BJ - timedelta(days=180)
@@ -79,7 +80,8 @@ def test_run_backtest_default_end_is_beijing_today(
 
 
 def test_run_backtest_explicit_end_is_kept(
-    monkeypatch: pytest.MonkeyPatch, tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
     captured: dict[str, Any] = {}
     _patch_clocks(monkeypatch)
@@ -87,7 +89,9 @@ def test_run_backtest_explicit_end_is_kept(
     explicit = date(2026, 6, 30)
 
     result = tool_catalog.run_backtest(
-        tmp_path, strategy_id="demo_a", end=explicit.isoformat(),
+        tmp_path,
+        strategy_id="demo_a",
+        end=explicit.isoformat(),
     )
 
     assert captured["end"] == explicit
@@ -95,7 +99,8 @@ def test_run_backtest_explicit_end_is_kept(
 
 
 async def test_assistant_run_backtest_tool_uses_beijing_today(
-    monkeypatch: pytest.MonkeyPatch, tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
     captured: dict[str, Any] = {}
     _patch_clocks(monkeypatch)

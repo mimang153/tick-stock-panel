@@ -24,26 +24,44 @@ from app.strategy import custom_signals
 def _limit_signal_definitions(monkeypatch):
     """注入涨跌停信号定义 (与 data/user_data/custom_signals 种子同语义),
     使 signal_limit_* 列断言不依赖运行目录的用户数据。"""
+
     def _cond(left, op, right):
         return {"left": left, "op": op, "right": right, "leftDays": 0, "rightDays": 0}
 
     sigs = [
-        {"id": "limit_up", "column": "signal_limit_up",
-         "conditions": [_cond("raw_close", ">", "0"),
-                        _cond("raw_close", ">=", "field:limit_up_price")]},
-        {"id": "limit_down", "column": "signal_limit_down",
-         "conditions": [_cond("raw_close", ">", "0"),
-                        _cond("raw_close", "<=", "field:limit_down_price")]},
-        {"id": "limit_down_recovery", "column": "signal_limit_down_recovery",
-         "conditions": [_cond("raw_low", ">", "0"),
-                        _cond("raw_close", ">", "field:limit_down_price"),
-                        _cond("raw_low", "<=", "field:limit_down_price"),
-                        _cond("close", ">", "field:open")]},
+        {
+            "id": "limit_up",
+            "column": "signal_limit_up",
+            "conditions": [
+                _cond("raw_close", ">", "0"),
+                _cond("raw_close", ">=", "field:limit_up_price"),
+            ],
+        },
+        {
+            "id": "limit_down",
+            "column": "signal_limit_down",
+            "conditions": [
+                _cond("raw_close", ">", "0"),
+                _cond("raw_close", "<=", "field:limit_down_price"),
+            ],
+        },
+        {
+            "id": "limit_down_recovery",
+            "column": "signal_limit_down_recovery",
+            "conditions": [
+                _cond("raw_low", ">", "0"),
+                _cond("raw_close", ">", "field:limit_down_price"),
+                _cond("raw_low", "<=", "field:limit_down_price"),
+                _cond("close", ">", "field:open"),
+            ],
+        },
     ]
     monkeypatch.setattr(
-        pipeline, "_custom_signal_exprs", custom_signals.build_expressions(
+        pipeline,
+        "_custom_signal_exprs",
+        custom_signals.build_expressions(
             [{**s, "name": s["id"], "kind": "both", "enabled": True} for s in sigs]
-        )
+        ),
     )
 
 
@@ -71,16 +89,22 @@ def test_polars_and_numpy_price_limit_rules_match():
     dates = [date(2026, 7, 3), date(2026, 7, 6)]
     symbols = ["600001.SH", "300001.SZ", "689001.SH", "830001.BJ"]
     names = ["*st主板", "*ST创业", "科创ST", "北交ST"]
-    panel = pl.DataFrame({
-        "date": [value for value in dates for _ in symbols],
-        "symbol": symbols * len(dates),
-        "name": names * len(dates),
-    }).with_columns(
-        polars_is_risk_warning_name(pl.col("name")).alias("is_st")
-    ).with_columns(
-        polars_price_limit_pct(
-            pl.col("symbol"), pl.col("date"), pl.col("is_st"),
-        ).alias("limit_pct")
+    panel = (
+        pl.DataFrame(
+            {
+                "date": [value for value in dates for _ in symbols],
+                "symbol": symbols * len(dates),
+                "name": names * len(dates),
+            }
+        )
+        .with_columns(polars_is_risk_warning_name(pl.col("name")).alias("is_st"))
+        .with_columns(
+            polars_price_limit_pct(
+                pl.col("symbol"),
+                pl.col("date"),
+                pl.col("is_st"),
+            ).alias("limit_pct")
+        )
     )
     polars_values = panel["limit_pct"].to_numpy().reshape(len(dates), len(symbols))
     numpy_values = numpy_price_limit_matrix(dates, symbols, names)
@@ -95,7 +119,9 @@ def test_polars_and_numpy_limit_prices_use_identical_half_up_rounding():
     for up in (True, False):
         polars_values = frame.select(
             polars_limit_price(
-                pl.col("previous"), pl.col("limit"), up=up,
+                pl.col("previous"),
+                pl.col("limit"),
+                up=up,
             ).alias("price")
         )["price"].to_numpy()
         numpy_values = numpy_limit_price(previous, limits, up=up)
@@ -113,26 +139,30 @@ def test_matrix_uses_date_specific_st_limits_across_change(tmp_path):
     for trade_date, close in rows:
         partition = root / f"date={trade_date.isoformat()}"
         partition.mkdir(parents=True)
-        pl.DataFrame({
-            "symbol": ["600001.SH"],
-            "date": [trade_date],
-            "open": [close],
-            "high": [close],
-            "low": [close],
-            "close": [close],
-            "raw_close": [close],
-            "volume": [1000.0],
-        }).write_parquet(partition / "part.parquet")
+        pl.DataFrame(
+            {
+                "symbol": ["600001.SH"],
+                "date": [trade_date],
+                "open": [close],
+                "high": [close],
+                "low": [close],
+                "close": [close],
+                "raw_close": [close],
+                "volume": [1000.0],
+            }
+        ).write_parquet(partition / "part.parquet")
 
     market = load_market_data_matrix_from_parquet(
         root,
         rows[0][0],
         rows[-1][0],
         field_columns={"raw_close", "price_limit_pct"},
-        instruments=pl.DataFrame({
-            "symbol": ["600001.SH"],
-            "name": ["*ST主板"],
-        }),
+        instruments=pl.DataFrame(
+            {
+                "symbol": ["600001.SH"],
+                "name": ["*ST主板"],
+            }
+        ),
         cache_root=tmp_path / "cache",
     )
     np.testing.assert_allclose(
@@ -145,21 +175,31 @@ def test_matrix_uses_date_specific_st_limits_across_change(tmp_path):
 class _InstrumentRepo:
     def get_instruments_asset(self, asset_type: str) -> pl.DataFrame:
         assert asset_type == "stock"
-        return pl.DataFrame({
-            "symbol": ["600001.SH"],
-            "limit_up": [10.88],
-            "limit_down": [8.90],
-        })
+        return pl.DataFrame(
+            {
+                "symbol": ["600001.SH"],
+                "limit_up": [10.88],
+                "limit_down": [8.90],
+            }
+        )
 
 
 def test_minute_price_limit_prefers_authoritative_prices_only_today(monkeypatch):
     today = date(2026, 7, 18)
     monkeypatch.setattr(kline, "cn_today", lambda: today)
     current = kline._get_price_limit_info(
-        _InstrumentRepo(), "600001.SH", today, "stock", "*ST主板",
+        _InstrumentRepo(),
+        "600001.SH",
+        today,
+        "stock",
+        "*ST主板",
     )
     historical = kline._get_price_limit_info(
-        _InstrumentRepo(), "600001.SH", date(2026, 7, 3), "stock", "*ST主板",
+        _InstrumentRepo(),
+        "600001.SH",
+        date(2026, 7, 3),
+        "stock",
+        "*ST主板",
     )
 
     assert current == {
@@ -186,13 +226,15 @@ class _NewStockRepo:
 
     def get_instruments_asset(self, asset_type: str) -> pl.DataFrame:
         assert asset_type == "stock"
-        return pl.DataFrame({
-            "symbol": ["601091.SH"],
-            "name": ["C沈鼓"],
-            "limit_up": [100000.0],   # 哨兵值
-            "limit_down": [None],
-            "listing_date": [self.listing],
-        })
+        return pl.DataFrame(
+            {
+                "symbol": ["601091.SH"],
+                "name": ["C沈鼓"],
+                "limit_up": [100000.0],  # 哨兵值
+                "limit_down": [None],
+                "listing_date": [self.listing],
+            }
+        )
 
 
 def test_minute_price_limit_no_limit_window_overrides_rate_and_sentinel():
@@ -216,16 +258,18 @@ def test_minute_price_limit_no_limit_window_overrides_rate_and_sentinel():
 
 
 def _daily_limit_rows(current_close: float) -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": ["600001.SH", "600001.SH"],
-        "date": [date(2026, 7, 17), date(2026, 7, 20)],
-        "open": [10.0, current_close],
-        "high": [10.0, current_close],
-        "low": [10.0, current_close],
-        "close": [10.0, current_close],
-        "raw_close": [10.0, current_close],
-        "raw_high": [10.0, current_close],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["600001.SH", "600001.SH"],
+            "date": [date(2026, 7, 17), date(2026, 7, 20)],
+            "open": [10.0, current_close],
+            "high": [10.0, current_close],
+            "low": [10.0, current_close],
+            "close": [10.0, current_close],
+            "raw_close": [10.0, current_close],
+            "raw_high": [10.0, current_close],
+        }
+    )
 
 
 @pytest.mark.parametrize(
@@ -263,13 +307,15 @@ def test_daily_limit_prices_ignore_zero_placeholder_and_match_realtime():
     连板数一路累加; 跌停侧反过来永远判不出跌停。实时路径
     (_compute_limit_signals_today) 已有 >0 守卫, 冷路径必须同口径。
     """
-    instruments = pl.DataFrame({
-        "symbol": ["600001.SH"],
-        "name": ["普通股"],
-        "limit_up": [0.0],
-        "limit_down": [0.0],
-        "as_of": [date(2026, 7, 20)],
-    })
+    instruments = pl.DataFrame(
+        {
+            "symbol": ["600001.SH"],
+            "name": ["普通股"],
+            "limit_up": [0.0],
+            "limit_down": [0.0],
+            "as_of": [date(2026, 7, 20)],
+        }
+    )
 
     # 只涨 0.5%: 不是涨停
     mild = pipeline.compute_limit_signals(
@@ -299,19 +345,21 @@ def test_daily_limit_prices_ignore_zero_placeholder_and_match_realtime():
 
     # 与实时路径同一份维表同一结论
     realtime = pipeline._compute_limit_signals_today(
-        pl.DataFrame({
-            "symbol": ["600001.SH"],
-            "date": [date(2026, 7, 20)],
-            "open": [10.05],
-            "high": [10.05],
-            "low": [10.05],
-            "close": [10.05],
-            "raw_close": [10.05],
-            "raw_high": [10.05],
-            "raw_low": [10.05],
-            "_prev_close_raw": [10.0],
-            "volume": [1000.0],
-        }),
+        pl.DataFrame(
+            {
+                "symbol": ["600001.SH"],
+                "date": [date(2026, 7, 20)],
+                "open": [10.05],
+                "high": [10.05],
+                "low": [10.05],
+                "close": [10.05],
+                "raw_close": [10.05],
+                "raw_high": [10.05],
+                "raw_low": [10.05],
+                "_prev_close_raw": [10.0],
+                "volume": [1000.0],
+            }
+        ),
         instruments,
     )
     # 实时路径不注入信号列 (定义注入在 compute_enriched_today 末尾), 按引擎判定价对拍
@@ -323,26 +371,30 @@ def test_daily_limit_prices_ignore_zero_placeholder_and_match_realtime():
 
 def test_realtime_limit_prices_ignore_stale_instrument_date():
     today = date(2026, 7, 20)
-    rows = pl.DataFrame({
-        "symbol": ["600001.SH"],
-        "date": [today],
-        "open": [9.10],
-        "high": [9.10],
-        "low": [9.10],
-        "close": [9.10],
-        "raw_close": [9.10],
-        "raw_high": [9.10],
-        "raw_low": [9.10],
-        "_prev_close_raw": [10.0],
-        "volume": [1000.0],
-    })
-    instruments = pl.DataFrame({
-        "symbol": ["600001.SH"],
-        "name": ["普通股"],
-        "limit_up": [10.90],
-        "limit_down": [9.10],
-        "as_of": [date(2026, 7, 17)],
-    })
+    rows = pl.DataFrame(
+        {
+            "symbol": ["600001.SH"],
+            "date": [today],
+            "open": [9.10],
+            "high": [9.10],
+            "low": [9.10],
+            "close": [9.10],
+            "raw_close": [9.10],
+            "raw_high": [9.10],
+            "raw_low": [9.10],
+            "_prev_close_raw": [10.0],
+            "volume": [1000.0],
+        }
+    )
+    instruments = pl.DataFrame(
+        {
+            "symbol": ["600001.SH"],
+            "name": ["普通股"],
+            "limit_up": [10.90],
+            "limit_down": [9.10],
+            "as_of": [date(2026, 7, 17)],
+        }
+    )
 
     result = pipeline._compute_limit_signals_today(rows, instruments)
 
@@ -361,26 +413,32 @@ def test_limit_down_recovery_uses_raw_low_under_later_ex_div():
     day3 (除权日, 最新日不复权): 涨跌停基准切换为前复权昨收 4.825 → 跌停价 4.34,
     原始 low 4.34 触及且收阳未封死 → 真翘板。
     """
-    raw = pl.DataFrame({
-        "symbol": ["600001.SH"] * 3,
-        "date": [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)],
-        "open": [10.00, 9.60, 4.30],
-        "high": [10.10, 9.70, 4.45],
-        "low": [9.90, 9.30, 4.34],
-        "close": [10.00, 9.65, 4.42],
-        "volume": [10000.0, 10000.0, 10000.0],
-        "amount": [1.0e7, 1.0e7, 1.0e7],
-    })
-    factors = pl.DataFrame({
-        "symbol": ["600001.SH"],
-        "trade_date": [date(2024, 1, 4)],
-        "ex_factor": [2.0],
-    })
-    instruments = pl.DataFrame({
-        "symbol": ["600001.SH"],
-        "name": ["普通股"],
-        "float_shares": [1.0e8],
-    })
+    raw = pl.DataFrame(
+        {
+            "symbol": ["600001.SH"] * 3,
+            "date": [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)],
+            "open": [10.00, 9.60, 4.30],
+            "high": [10.10, 9.70, 4.45],
+            "low": [9.90, 9.30, 4.34],
+            "close": [10.00, 9.65, 4.42],
+            "volume": [10000.0, 10000.0, 10000.0],
+            "amount": [1.0e7, 1.0e7, 1.0e7],
+        }
+    )
+    factors = pl.DataFrame(
+        {
+            "symbol": ["600001.SH"],
+            "trade_date": [date(2024, 1, 4)],
+            "ex_factor": [2.0],
+        }
+    )
+    instruments = pl.DataFrame(
+        {
+            "symbol": ["600001.SH"],
+            "name": ["普通股"],
+            "float_shares": [1.0e8],
+        }
+    )
 
     df = pipeline.compute_enriched(raw, factors=factors, instruments=instruments)
 
@@ -403,23 +461,31 @@ def test_matrix_limit_lock_uses_exchange_reference_on_ex_div_with_later_event(tm
         # (date, raw_close, F(d) = 该日之后所有事件因子乘积)
         (date(2024, 1, 2), 10.00, 1.5625),
         (date(2024, 1, 3), 10.00, 1.5625),
-        (date(2024, 1, 4), 8.79, 1.25),   # ex1 除权日: 真涨停价 8.80, 未触及
+        (date(2024, 1, 4), 8.79, 1.25),  # ex1 除权日: 真涨停价 8.80, 未触及
         (date(2024, 1, 5), 8.70, 1.25),
         (date(2024, 1, 8), 8.70, 1.25),
-        (date(2024, 1, 9), 7.00, 1.0),    # ex2 除权日 (窗口末日)
+        (date(2024, 1, 9), 7.00, 1.0),  # ex2 除权日 (窗口末日)
     ]
     for trade_date, raw, f in spec:
         partition = root / f"date={trade_date.isoformat()}"
         partition.mkdir(parents=True)
-        pl.DataFrame({
-            "symbol": ["600001.SH"],
-            "date": [trade_date],
-            "open": [raw], "high": [raw], "low": [raw],
-            "close": [raw / f], "raw_close": [raw], "volume": [1000.0],
-        }).write_parquet(partition / "part.parquet")
+        pl.DataFrame(
+            {
+                "symbol": ["600001.SH"],
+                "date": [trade_date],
+                "open": [raw],
+                "high": [raw],
+                "low": [raw],
+                "close": [raw / f],
+                "raw_close": [raw],
+                "volume": [1000.0],
+            }
+        ).write_parquet(partition / "part.parquet")
 
     market = load_market_data_matrix_from_parquet(
-        root, spec[0][0], spec[-1][0],
+        root,
+        spec[0][0],
+        spec[-1][0],
         field_columns={"raw_close"},
         instruments=pl.DataFrame({"symbol": ["600001.SH"], "name": ["普通股"]}),
         cache_root=tmp_path / "cache",
@@ -441,24 +507,32 @@ def test_limit_price_on_ex_div_with_later_event_uses_exchange_reference():
     涨停价 7.04 → raw 8.79 误判涨停); d4 参考价 = 8.79/1.25 = 7.032,
     raw 7.74 恰为涨停价 → 正常检出 (防过度修正)。
     """
-    raw = pl.DataFrame({
-        "symbol": ["600001.SH"] * 4,
-        "date": [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4), date(2024, 1, 5)],
-        "open": [10.00, 10.00, 8.79, 7.74],
-        "high": [10.00, 10.00, 8.79, 7.74],
-        "low": [10.00, 10.00, 8.79, 7.74],
-        "close": [10.00, 10.00, 8.79, 7.74],
-        "volume": [10000.0] * 4,
-        "amount": [1.0e7] * 4,
-    })
-    factors = pl.DataFrame({
-        "symbol": ["600001.SH"] * 2,
-        "trade_date": [date(2024, 1, 4), date(2024, 1, 5)],
-        "ex_factor": [1.25, 1.25],
-    })
-    instruments = pl.DataFrame({
-        "symbol": ["600001.SH"], "name": ["普通股"], "float_shares": [1.0e8],
-    })
+    raw = pl.DataFrame(
+        {
+            "symbol": ["600001.SH"] * 4,
+            "date": [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4), date(2024, 1, 5)],
+            "open": [10.00, 10.00, 8.79, 7.74],
+            "high": [10.00, 10.00, 8.79, 7.74],
+            "low": [10.00, 10.00, 8.79, 7.74],
+            "close": [10.00, 10.00, 8.79, 7.74],
+            "volume": [10000.0] * 4,
+            "amount": [1.0e7] * 4,
+        }
+    )
+    factors = pl.DataFrame(
+        {
+            "symbol": ["600001.SH"] * 2,
+            "trade_date": [date(2024, 1, 4), date(2024, 1, 5)],
+            "ex_factor": [1.25, 1.25],
+        }
+    )
+    instruments = pl.DataFrame(
+        {
+            "symbol": ["600001.SH"],
+            "name": ["普通股"],
+            "float_shares": [1.0e8],
+        }
+    )
 
     df = pipeline.compute_enriched(raw, factors=factors, instruments=instruments)
 
@@ -480,11 +554,13 @@ def test_chinext_302_codes_use_growth_board_rules():
     与 300/301 同为 ±20%, 注册制新股同样有 5 个交易日无涨跌幅窗口。"""
     assert price_limit_pct("302132.SZ", date(2026, 10, 16)) == pytest.approx(0.20)
 
-    df = pl.DataFrame({
-        "symbol": ["302132.SZ", "000001.SZ"],
-        "trade_date": [date(2026, 10, 16)] * 2,
-        "is_risk_warning": [False, False],
-    })
+    df = pl.DataFrame(
+        {
+            "symbol": ["302132.SZ", "000001.SZ"],
+            "trade_date": [date(2026, 10, 16)] * 2,
+            "is_risk_warning": [False, False],
+        }
+    )
     pct = df.select(
         polars_price_limit_pct(pl.col("symbol"), pl.col("trade_date"), pl.col("is_risk_warning"))
     ).to_series()

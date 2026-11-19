@@ -1,11 +1,13 @@
-"""从 strategy/paper.py 抽取的 paper_orders 子模块（保持原公开 API）。"""
+"""从 strategy/paper.py 抽取的 paper_orders 子模块（保持原公开 API）。
+
+DES-005：订单读改写走 PostgreSQL（`app.storage.paper_pg`），`data_dir` 保留兼容签名。
+"""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-from app.services.fs_utils import atomic_write_text
+from app.storage import paper_pg as store
 
 DEFAULT_ACCOUNT_ID = "default"
 DEFAULT_COMMISSION_PCT = 0.00025  # 双边佣金 万2.5
@@ -79,28 +81,15 @@ def qty_from_amount(amount: float, ref_price: float) -> int:
 
 
 def load_orders(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> list[dict]:
-    out: list[dict] = []
-    for f in sorted(_rootmod._orders_dir(data_dir, account_id).glob("order_*.json")):
-        try:
-            out.append(json.loads(f.read_text(encoding="utf-8")))
-        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
-            _rootmod.logger.warning("paper order load failed %s: %s", f.name, e)
-    return out
+    return list(store.load_orders(account_id).values())
 
 
 def save_order(data_dir: Path, order: dict, account_id: str = DEFAULT_ACCOUNT_ID) -> None:
-    p = _rootmod._orders_dir(data_dir, account_id) / f"{order['id']}.json"
-    atomic_write_text(p, json.dumps(order, ensure_ascii=False, indent=2))
+    store.save_order(account_id, order)
 
 
 def get_order(data_dir: Path, order_id: str, account_id: str = DEFAULT_ACCOUNT_ID) -> dict | None:
-    p = _rootmod._orders_dir(data_dir, account_id) / f"{order_id}.json"
-    if not p.exists():
-        return None
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
-        return None
+    return store.get_order(account_id, order_id)
 
 
 def _resolve_qty_and_validate(

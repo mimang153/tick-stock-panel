@@ -5,6 +5,7 @@
   - parse_and_validate: 合法 JSON / 白名单外字段 / 非法 JSON / markdown 围栏
   - API 端点: 成功 / 校验失败 400 / 空描述 400 / AI 运行时错误透出
 """
+
 from __future__ import annotations
 
 import json
@@ -16,13 +17,13 @@ from fastapi import HTTPException
 from app.api.signals import AIGenerateRequest, ai_generate_signal
 from app.strategy.custom_signals_ai import build_messages, parse_and_validate
 
-VALID_JSON = '''{
+VALID_JSON = """{
   "name": "回踩MA20放量",
   "conditions": [
     {"left": "close", "op": "<=", "right": "field:ma20", "leftDays": 0, "rightDays": 0},
     {"left": "vol_ratio_5d", "op": ">=", "right": 2, "leftDays": 0, "rightDays": 0}
   ]
-}'''
+}"""
 
 
 # ── build_messages ──────────────────────────────────────────
@@ -69,25 +70,26 @@ def test_build_messages_contains_factor_fields():
 
 def test_parse_and_validate_accepts_factor_condition():
     # AI 输出以因子为条件字段: 应通过白名单校验
-    raw = json.dumps({
-        "name": "强动量",
-        "conditions": [
-            {"left": "momentum_20d", "op": ">=", "right": "0.1",
-             "leftDays": 0, "rightDays": 0}
-        ],
-    })
+    raw = json.dumps(
+        {
+            "name": "强动量",
+            "conditions": [
+                {"left": "momentum_20d", "op": ">=", "right": "0.1", "leftDays": 0, "rightDays": 0}
+            ],
+        }
+    )
     result = parse_and_validate(raw)
     assert result["conditions"][0]["left"] == "momentum_20d"
 
 
 def test_parse_and_validate_accepts_bare_factor_rhs():
     # 右值裸写因子名: 同样自动补 field: 前缀
-    raw = json.dumps({
-        "name": "动量走强",
-        "conditions": [
-            {"left": "momentum_5d", "op": ">", "right": "momentum_20d"}
-        ],
-    })
+    raw = json.dumps(
+        {
+            "name": "动量走强",
+            "conditions": [{"left": "momentum_5d", "op": ">", "right": "momentum_20d"}],
+        }
+    )
     result = parse_and_validate(raw)
     assert result["conditions"][0]["right"] == "field:momentum_20d"
 
@@ -109,12 +111,12 @@ def test_parse_and_validate_valid():
 
 
 def test_parse_and_validate_handles_missing_days():
-    raw = json.dumps({
-        "name": "新低反转",
-        "conditions": [
-            {"left": "close", "op": "<=", "right": "field:low_60d"}
-        ],
-    })
+    raw = json.dumps(
+        {
+            "name": "新低反转",
+            "conditions": [{"left": "close", "op": "<=", "right": "field:low_60d"}],
+        }
+    )
     result = parse_and_validate(raw)
     assert result["conditions"][0]["leftDays"] == 0
     assert result["conditions"][0]["rightDays"] == 0
@@ -127,19 +129,23 @@ def test_parse_and_validate_handles_markdown_fence():
 
 
 def test_parse_and_validate_rejects_non_whitelist_field():
-    raw = json.dumps({
-        "name": "非法字段",
-        "conditions": [{"left": "not_a_field", "op": ">", "right": "1"}],
-    })
+    raw = json.dumps(
+        {
+            "name": "非法字段",
+            "conditions": [{"left": "not_a_field", "op": ">", "right": "1"}],
+        }
+    )
     with pytest.raises(ValueError, match="not_a_field"):
         parse_and_validate(raw)
 
 
 def test_parse_and_validate_rejects_bad_operator():
-    raw = json.dumps({
-        "name": "非法运算符",
-        "conditions": [{"left": "close", "op": "=~", "right": "1"}],
-    })
+    raw = json.dumps(
+        {
+            "name": "非法运算符",
+            "conditions": [{"left": "close", "op": "=~", "right": "1"}],
+        }
+    )
     with pytest.raises(ValueError):
         parse_and_validate(raw)
 
@@ -157,24 +163,24 @@ def test_parse_and_validate_rejects_empty_conditions():
 
 def test_parse_and_validate_accepts_bare_whitelist_field_rhs():
     # AI 漏写 field: 前缀: 右值裸写白名单字段, 应自动补全为 field: 形式
-    raw = json.dumps({
-        "name": "MACD金叉",
-        "conditions": [
-            {"left": "macd_dif", "op": ">", "right": "macd_dea"}
-        ],
-    })
+    raw = json.dumps(
+        {
+            "name": "MACD金叉",
+            "conditions": [{"left": "macd_dif", "op": ">", "right": "macd_dea"}],
+        }
+    )
     result = parse_and_validate(raw)
     assert result["conditions"][0]["right"] == "field:macd_dea"
 
 
 def test_parse_and_validate_rejects_bare_non_whitelist_field_rhs():
     # 裸写非白名单字段作为右值, 仍应报非法右值
-    raw = json.dumps({
-        "name": "非法右值",
-        "conditions": [
-            {"left": "close", "op": ">", "right": "not_a_field"}
-        ],
-    })
+    raw = json.dumps(
+        {
+            "name": "非法右值",
+            "conditions": [{"left": "close", "op": ">", "right": "not_a_field"}],
+        }
+    )
     with pytest.raises(ValueError, match="非法右值"):
         parse_and_validate(raw)
 
@@ -188,8 +194,7 @@ def test_validate_accepts_bare_field_rhs():
         "name": "测试",
         "kind": "entry",
         "conditions": [
-            {"left": "macd_dif", "op": ">", "right": "macd_dea",
-             "leftDays": 0, "rightDays": 0},
+            {"left": "macd_dif", "op": ">", "right": "macd_dea", "leftDays": 0, "rightDays": 0},
         ],
     }
     custom_signals.validate(sig)
@@ -242,10 +247,12 @@ async def test_ai_generate_endpoint_success(monkeypatch):
 @pytest.mark.asyncio
 async def test_ai_generate_endpoint_400_on_invalid_conditions(monkeypatch):
     async def fake_generate(messages, **kwargs):
-        return json.dumps({
-            "name": "非法",
-            "conditions": [{"left": "close", "op": ">", "right": "field:not_allowed"}],
-        })
+        return json.dumps(
+            {
+                "name": "非法",
+                "conditions": [{"left": "close", "op": ">", "right": "field:not_allowed"}],
+            }
+        )
 
     import app.services.ai_provider as ai_provider
 

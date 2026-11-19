@@ -1,7 +1,7 @@
 # ClickHouse 迁移验收记录
 
-> 文档类型：部署 | 编号：DEP-002 | 状态：基线 | 文档版本：v1.0 | 最后更新：2026-11-18
-> 负责人：— | 关联：DEP-001
+> 文档类型：部署 | 编号：DEP-002 | 状态：基线 | 文档版本：v1.4 | 最后更新：2026-11-18
+> 负责人：— | 关联：DEP-001、REQ-002、ISS-002、DES-002
 > 归档来源：base_v1.0 基线文档，按 DOC-STANDARD v1.0 归类命名；内容未改。
 
 > 模板来源：`./DEP-001-clickhouse-acceptance.md` §15。按批次追加，没有记录的批次视为未验收。
@@ -200,3 +200,18 @@
 **待确认（非阻塞）**：`test_ext_market_level::test_market_level_ingest_and_rows_roundtrip` —— market_level（无 symbol 列）的 timeseries 数据 ingest 后 `/rows` 读空。CK `ext_timeseries` 主键含 symbol，market_level 行无法入库；`_read_ext_dataframe` timeseries 分支又强制读 CK（snapshot 分支有 market_level 本地回退）。这是**产品契约边界**：market_level 是否支持 timeseries 需产品方确认（若支持则需为 market_level 设计无 symbol 的 CK 存储，若不支持则测试应改用 snapshot 模式）。未用 skip/xfail 掩盖。
 
 **累计**：`163 → 48 failed`（清 115 例 / -71%），`4657 → 4772 passed`。剩余 48 例多为 integrity corrupt/损坏文件/symlink 等 CK 不可表达语义边界（集中在 `test_integrity_*`/`test_data_integrity*`/`test_atomic_parquet_writes`），需逐个按"语义等价标注"处理，单个成本高。
+
+## 追加：2026-11-18 全量测试基线恢复（不改变“有条件通过”结论）
+
+- 本轮排查发现此前 `MEMORY_LIMIT_EXCEEDED` 的根因不是 CK 容量本身，而是测试把带 `t_` 前缀的表写进正式库 `tsp`。已强制 pytest 使用 `tsp_test` 并清理 17,267 张残留表，开发 compose 另加内存覆盖。
+- 全量回归：`bash run_tests.sh -q --tb=no -p no:randomly` → `4817 passed / 13 skipped / 1 xfailed`，0 failed / 0 errors；B5 第二批后复跑仍为同一结果，且不再生成 `backend/MagicMock/` 临时文件。
+- B5 第三批完成：维表 instruments 在线读写改为 CK-only（仅显式注入 storage 时），避免全局 runtime 泄漏；daily/enriched 写入仍保留双写（依赖修补体系），publication 标记、派生缓存和离线工具仍待收敛。
+- 2026-11-18 评估 daily 修补 CK 分支原型：34 个修补/完整性用例依赖本地备份、指纹和 publication 标记，原型已回退；全量仍为 `4817 passed / 13 skipped / 1 xfailed`。daily/enriched CK-only **须实现**，按 DES-002 分阶段完成。
+- DES-002 P1 已完成：三张 CK 元数据表和存储层修补接口已实现，修补契约定向测试 `3 passed`。
+- DES-002 P2a 已完成：显式 storage 下完整性扫描/补丁复核/修补后校验走 CK，修补相关定向测试 `88 passed`。
+- DES-002 P2b 已完成：DES-002 §8.1 的 8 个优先契约测试全部迁移并通过；日K修补相关两个文件 `67 passed`，其余优先契约文件 `41 passed`，完整性相关测试 `70 passed`。
+- DES-002 P3 已完成：显式 storage 下修补、校验、universe、常规写入、live merge/flush 全部走 CK 权威表；状态统计与矩阵缓存 generation 改为 CK 优先；`ClickHouseStore.write` 生成严格递增行版本。
+- DES-002 P4 主体完成：显式 storage 路径移除本地 backup/fingerprint/marker/glob 依赖；无 storage 的离线兼容路径保留。`SCHEMA_VERSION` 无需因三张元数据表升级；`pipeline_recompute` 常规编排与派生缓存仍写本地 marker/parquet，指数 enriched 表尚未纳入 CK。
+- Redis 缓存层：`RedisCacheBackend` 已实现，`CACHE_BACKEND=redis` 可切换；复用宿主机已有 Redis 容器（compose 不新建服务），部署检查脚本 `./redis-cache.sh check`。`pool:*`、`benchmark:momentum:v1` 已接入，enriched bump 同步递增 Redis generation。
+- 最终验证：定向测试全绿；全量回归 `4820 passed / 13 skipped / 1 xfailed`，0 failed / 0 errors；改动文件 Ruff 全绿，`git diff --check` 通过。
+- 仍未闭环：连续 3 天观察、回滚演练、S3/S4 完整自动化、页面级双栈对照、满量性能标定、`pnpm build`。因此 DEP-002 的“有条件通过”结论不变；CK/缓存/多实例后续任务见 ISS-002、ISS-003。

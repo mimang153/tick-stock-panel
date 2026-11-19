@@ -4,6 +4,7 @@
 需要再花一轮 list_strategies 才能修正; 附带可用 id 后一次即可自纠,
 足迹卡上的失败原因对用户也可读。
 """
+
 from __future__ import annotations
 
 from app.custom.assistant import tools as assistant_tools
@@ -27,7 +28,9 @@ async def test_run_strategy_unknown_id_lists_available() -> None:
     ctx = assistant_tools.ToolContext.build(data_dir=".", repo=object(), engine=_StubEngine())
 
     payload = await assistant_tools.execute_assistant_tool(
-        "run_strategy", {"strategy_id": "布林突破"}, ctx,
+        "run_strategy",
+        {"strategy_id": "布林突破"},
+        ctx,
     )
     assert payload["ok"] is False
     assert "策略 布林突破 不存在" in payload["error"]

@@ -29,14 +29,14 @@ Ensures consistent REST API design, documentation, and implementation across the
 - **HTTP Methods:** Use proper HTTP methods for operations (GET for retrieval, POST for creation, etc.).
 - **Status Codes:** Use appropriate HTTP status codes to communicate the result of the request.
 - **Versioning:** Implement API versioning to manage changes without breaking existing integrations.
-- **Documentation:** 
+- **Documentation:**
   - **Swagger/OpenAPI:** Use tools like Swagger for comprehensive API documentation.
   - **Endpoint Descriptions:** Clearly document all endpoints including path, methods, parameters, and possible responses.
 - **Authentication & Security:**
   - Implement OAuth, JWT, or similar secure authentication methods.
   - Use HTTPS for all API communications.
 - **Rate Limiting:** Implement rate limiting to prevent abuse and ensure fair usage.
-- **Error Handling:** 
+- **Error Handling:**
   - Provide clear, human-readable error messages with corresponding status codes.
   - Implement error logging for debugging purposes.
 - **Pagination:** For list endpoints, implement pagination to manage large datasets.

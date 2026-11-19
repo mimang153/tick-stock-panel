@@ -2,10 +2,14 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
+from typing import Any
 
 import pytest
 
 from app.api import overview
+
+# 端点不读 request; 用 duck-typed 占位(None)绕过 Request[State] 静态签名。
+_NO_REQUEST: Any = None
 
 
 @pytest.fixture(autouse=True)
@@ -26,7 +30,7 @@ def test_concurrent_cold_requests_share_one_build(monkeypatch):
 
     def request():
         barrier.wait(timeout=2)
-        return overview.market_overview(None)
+        return overview.market_overview(_NO_REQUEST)
 
     monkeypatch.setattr(overview, "_build_overview", build)
     with ThreadPoolExecutor(8) as pool:
@@ -49,13 +53,13 @@ def test_invalidation_during_build_never_repopulates_old_cache(monkeypatch):
 
     monkeypatch.setattr(overview, "_build_overview", build)
     with ThreadPoolExecutor(2) as pool:
-        pending = pool.submit(overview.market_overview, None)
+        pending = pool.submit(overview.market_overview, _NO_REQUEST)
         assert entered.wait(2)
         overview.invalidate_overview_cache()
-        assert overview.market_overview(None) == {"value": "new"}
+        assert overview.market_overview(_NO_REQUEST) == {"value": "new"}
         release.set()
         pending.result(timeout=2)
-    assert overview.market_overview(None) == {"value": "new"}
+    assert overview.market_overview(_NO_REQUEST) == {"value": "new"}
 
 
 def test_failed_build_releases_followers_and_can_retry(monkeypatch):
@@ -70,14 +74,14 @@ def test_failed_build_releases_followers_and_can_retry(monkeypatch):
     def request():
         barrier.wait(timeout=2)
         with pytest.raises(ValueError, match="unavailable"):
-            overview.market_overview(None)
+            overview.market_overview(_NO_REQUEST)
 
     monkeypatch.setattr(overview, "_build_overview", fail)
     with ThreadPoolExecutor(4) as pool:
         list(pool.map(lambda _: request(), range(4)))
     assert len(calls) == 1
     monkeypatch.setattr(overview, "_build_overview", lambda *args: {"ok": True})
-    assert overview.market_overview(None) == {"ok": True}
+    assert overview.market_overview(_NO_REQUEST) == {"ok": True}
 
 
 def test_different_dates_build_independently(monkeypatch):
@@ -90,7 +94,9 @@ def test_different_dates_build_independently(monkeypatch):
     monkeypatch.setattr(overview, "_build_overview", build)
     days = [date(2026, 10, 28), date(2026, 10, 29)]
     with ThreadPoolExecutor(2) as pool:
-        assert list(pool.map(lambda day: overview.market_overview(None, day), days)) == [{"date": d} for d in days]
+        assert list(pool.map(lambda day: overview.market_overview(_NO_REQUEST, day), days)) == [
+            {"date": d} for d in days
+        ]
 
 
 def test_slow_build_does_not_extend_existing_freshness_window(monkeypatch):
@@ -103,8 +109,8 @@ def test_slow_build_does_not_extend_existing_freshness_window(monkeypatch):
         return {"build": len(calls)}
 
     monkeypatch.setattr(overview, "_build_overview", build)
-    assert overview.market_overview(None) == {"build": 1}
+    assert overview.market_overview(_NO_REQUEST) == {"build": 1}
     now[0] = 104.0
-    assert overview.market_overview(None) == {"build": 1}
+    assert overview.market_overview(_NO_REQUEST) == {"build": 1}
     now[0] = 105.0
-    assert overview.market_overview(None) == {"build": 2}
+    assert overview.market_overview(_NO_REQUEST) == {"build": 2}

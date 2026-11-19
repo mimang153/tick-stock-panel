@@ -3,6 +3,7 @@
 Run: uv run --frozen python -m scripts.benchmark_daily_sync_staging
 Uses synthetic data only; no external data source is contacted.
 """
+
 from __future__ import annotations
 
 import shutil
@@ -18,16 +19,18 @@ PARTS = 4
 
 def make_parts(root: Path) -> list[Path]:
     symbols = [f"{i:06d}.SZ" for i in range(ROWS)]
-    frame = pl.DataFrame({
-        "symbol": symbols,
-        "date": ["2026-09-18"] * ROWS,
-        "open": [10.0] * ROWS,
-        "high": [11.0] * ROWS,
-        "low": [9.0] * ROWS,
-        "close": [10.5] * ROWS,
-        "volume": [100.0] * ROWS,
-        "amount": [1050.0] * ROWS,
-    }).with_columns(pl.Series("bucket", [i % PARTS for i in range(ROWS)]))
+    frame = pl.DataFrame(
+        {
+            "symbol": symbols,
+            "date": ["2026-09-18"] * ROWS,
+            "open": [10.0] * ROWS,
+            "high": [11.0] * ROWS,
+            "low": [9.0] * ROWS,
+            "close": [10.5] * ROWS,
+            "volume": [100.0] * ROWS,
+            "amount": [1050.0] * ROWS,
+        }
+    ).with_columns(pl.Series("bucket", [i % PARTS for i in range(ROWS)]))
     paths = []
     for index, part in enumerate(frame.partition_by("bucket")):
         part = part.drop("bucket")

@@ -1,4 +1,5 @@
 """全量模拟 (full mode) 尾部执行回归测试。"""
+
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -14,17 +15,19 @@ def _panel_with_tail(symbols: list[str], n_data_days: int) -> pl.DataFrame:
     for sym in symbols:
         for i in range(n_data_days):
             px = 10.0 + i
-            rows.append({
-                "symbol": sym,
-                "date": start + timedelta(days=i),
-                "open": px,
-                "high": px,
-                "low": px,
-                "close": px,
-                "volume": 100_000,
-                "signal_limit_up": False,
-                "signal_limit_down": False,
-            })
+            rows.append(
+                {
+                    "symbol": sym,
+                    "date": start + timedelta(days=i),
+                    "open": px,
+                    "high": px,
+                    "low": px,
+                    "close": px,
+                    "volume": 100_000,
+                    "signal_limit_up": False,
+                    "signal_limit_down": False,
+                }
+            )
     return pl.DataFrame(rows).sort(["symbol", "date"])
 
 
@@ -35,9 +38,9 @@ def test_full_simulation_executes_signal_at_tail():
 
     start = date(2024, 1, 1)
     end = start + timedelta(days=n_days - 1)
-    entry_vals = []
-    for row in panel.select(["symbol", "date"]).iter_rows(named=True):
-        entry_vals.append(row["date"] == end)
+    entry_vals = [
+        row["date"] == end for row in panel.select(["symbol", "date"]).iter_rows(named=True)
+    ]
     entry_mask = pl.Series(entry_vals, dtype=pl.Boolean)
     exit_mask = pl.Series([False] * len(panel), dtype=pl.Boolean)
 

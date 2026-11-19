@@ -13,11 +13,8 @@ from app.tickflow.capabilities import CapabilitySet
 
 
 def _write_instruments(data_dir, symbols: list[str], ck=None) -> None:
-    path = data_dir / "instruments" / "instruments.parquet"
-    path.parent.mkdir(parents=True, exist_ok=True)
     df = pl.DataFrame({"symbol": symbols})
-    df.write_parquet(path)
-    # financial_sync 经 load_instruments 读 CK，需同步写 CK
+    # financial_sync 经 load_instruments 读 CK，造数只写 CK
     if ck is not None:
         ck.write_instruments("stock", df)
 
@@ -43,16 +40,14 @@ def test_first_share_sync_fetches_complete_history(tmp_path, monkeypatch, ck_run
 
     assert rows == 2
     assert calls == [(["600000.SH"], False)]
-    stored = pl.read_parquet(tmp_path / "financials" / "shares" / "part.parquet")
-    assert stored["period_end"].to_list() == ["2023-12-31", "2024-06-30"]
+    stored = ck_runtime.read_financials("financials_shares").sort("period_end")
+    assert stored["period_end"].to_list() == [date(2023, 12, 31), date(2024, 6, 30)]
 
 
 def test_incremental_share_sync_updates_existing_and_backfills_new_symbols(
     tmp_path, monkeypatch, ck_runtime
 ):
     _write_instruments(tmp_path, ["600000.SH", "000001.SZ"], ck_runtime)
-    path = tmp_path / "financials" / "shares" / "part.parquet"
-    path.parent.mkdir(parents=True, exist_ok=True)
     existing = pl.DataFrame(
         {
             "symbol": ["600000.SH"],
@@ -60,7 +55,6 @@ def test_incremental_share_sync_updates_existing_and_backfills_new_symbols(
             "float_shares": [10.0],
         }
     )
-    existing.write_parquet(path)
     # 增量合并从 CK 读旧数据，预置 shares 同步写 CK
     ck_runtime.write_financials(
         "financials_shares", existing.with_columns(pl.col("period_end").str.to_date())
@@ -92,7 +86,7 @@ def test_incremental_share_sync_updates_existing_and_backfills_new_symbols(
 
     assert rows == 3
     assert calls == [(["000001.SZ"], False), (["600000.SH"], True)]
-    stored = pl.read_parquet(path).sort(["symbol", "period_end"])
+    stored = ck_runtime.read_financials("financials_shares").sort(["symbol", "period_end"])
     assert stored.filter(pl.col("symbol") == "600000.SH")["float_shares"].to_list() == [11.0]
     assert stored.filter(pl.col("symbol") == "000001.SZ")["float_shares"].to_list() == [20.0, 21.0]
 

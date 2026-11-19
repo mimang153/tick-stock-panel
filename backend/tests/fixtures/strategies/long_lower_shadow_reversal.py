@@ -8,9 +8,6 @@ from app.backtest.matrix import (
     make_signal_matrix,
     matrix_feature,
 )
-from app.backtest.matrix import (
-    valid_shift as shift,
-)
 
 META = {
     "id": "long_lower_shadow_reversal",
@@ -67,8 +64,10 @@ class LongLowerShadowReversalMatrixStrategy:
         shadow_pct = (body_bot - market.low) / prev_close * 100.0
 
         entry = shadow_pct >= float(params.get("shadow_pct_min", 3.0))
-        entry &= matrix_feature(market, "momentum_5d") <= float(params.get("drop_pct_max", -5.0)) / 100.0
-        entry &= matrix_feature(market, "vol_ratio_5d") >= 1.2   # 承接需有量
+        entry &= (
+            matrix_feature(market, "momentum_5d") <= float(params.get("drop_pct_max", -5.0)) / 100.0
+        )
+        entry &= matrix_feature(market, "vol_ratio_5d") >= 1.2  # 承接需有量
         if params.get("require_recovery", True):
             # 收盘位于当日振幅上半部 (close_position ∈ [0,1]): 长下影反击常为低开回拉,
             # 收盘仍可能低于开盘 (假阴线), 用位置而非阴阳判定收复力度

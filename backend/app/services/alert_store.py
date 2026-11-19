@@ -10,6 +10,7 @@
   - 清理策略: 追加后按需 prune (按 ts 删旧),避免文件无限膨胀
   - 读时全量加载到内存过滤 (记录量受上限约束, 5000 条量级无压力)
 """
+
 from __future__ import annotations
 
 import json
@@ -74,7 +75,7 @@ def _publish_events(events: list[dict]) -> None:
 
         for ev in events:
             bus.publish("alert", ev, scope="read:analysis")
-    except Exception:  # noqa: BLE001 — 事件通道绝不反噬主流程
+    except Exception:  # noqa: BLE001 - 事件广播为尽力而为, 失败不能影响主流程
         logger.debug("alert 事件广播失败 (忽略)", exc_info=True)
 
 
@@ -90,6 +91,7 @@ def list_recent(
     持锁读: prune/delete/clear 会整文件重写, 无锁读可能读到截断内容。
     """
     import time
+
     cutoff = (time.time() - days * 86400) * 1000  # 毫秒
     out: list[dict] = []
     p = _path(data_dir)
@@ -103,7 +105,7 @@ def list_recent(
                     continue
                 try:
                     ev = json.loads(line)
-                except Exception:
+                except Exception:  # noqa: BLE001 - 单行 JSON 损坏跳过,不中断整批读取
                     continue
                 if ev.get("ts", 0) < cutoff:
                     continue
@@ -112,7 +114,7 @@ def list_recent(
                 if type and ev.get("type") != type:
                     continue
                 out.append(ev)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - 整批读取失败时返回空列表,不影响主流程
         logger.warning("alert_store read failed: %s", e)
         return []
     # 时间倒序 + 截断
@@ -130,7 +132,7 @@ def clear(data_dir: Path) -> int:
         try:
             with p.open("r", encoding="utf-8") as f:
                 count = sum(1 for line in f if line.strip())
-        except Exception:
+        except Exception:  # noqa: BLE001 - 统计条数失败仍可清空,计数按 0 处理
             pass
         p.write_text("", encoding="utf-8")
         return count
@@ -156,13 +158,13 @@ def delete_one(data_dir: Path, ts: int) -> bool:
                         continue
                     try:
                         ev = json.loads(line)
-                    except Exception:
+                    except Exception:  # noqa: BLE001 - 单行 JSON 损坏跳过,不影响删除其余记录
                         continue
                     if not deleted and ev.get("ts") == ts:
                         deleted = True
                         continue
                     kept.append(ev)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - 读取失败返回 False,由调用方决定是否重试
             logger.warning("alert_store delete_one read failed: %s", e)
             return False
         if not deleted:
@@ -171,7 +173,7 @@ def delete_one(data_dir: Path, ts: int) -> bool:
             with p.open("w", encoding="utf-8") as f:
                 for ev in kept:
                     f.write(json.dumps(ev, ensure_ascii=False) + "\n")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - 写回失败返回 False,不覆盖原有告警记录
             logger.warning("alert_store delete_one write failed: %s", e)
             return False
         return True
@@ -185,13 +187,14 @@ def count(data_dir: Path) -> int:
     try:
         with _lock, p.open("r", encoding="utf-8") as f:
             return sum(1 for line in f if line.strip())
-    except Exception:
+    except Exception:  # noqa: BLE001 - 统计失败按 0 返回,条数只用于展示
         return 0
 
 
 def _prune_locked(p: Path) -> None:
     """(调用方需持锁) 保留近 MAX_DAYS 天 + 上限 MAX_RECORDS 条。"""
     import time
+
     cutoff = (time.time() - MAX_DAYS * 86400) * 1000
     kept: list[dict] = []
     try:
@@ -202,13 +205,13 @@ def _prune_locked(p: Path) -> None:
                     continue
                 try:
                     ev = json.loads(line)
-                except Exception:
+                except Exception:  # noqa: BLE001 - 单行 JSON 损坏跳过,不影响其余记录清理
                     continue
                 if ev.get("ts", 0) >= cutoff:
                     kept.append(ev)
     except FileNotFoundError:
         return
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - 读取失败放弃本轮清理,下次写入再试
         logger.warning("alert_store prune read failed: %s", e)
         return
     # 上限截断 (保留最新的)
@@ -220,5 +223,5 @@ def _prune_locked(p: Path) -> None:
         with p.open("w", encoding="utf-8") as f:
             for ev in kept:
                 f.write(json.dumps(ev, ensure_ascii=False) + "\n")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - 写回失败仅告警,不中断主写入流程
         logger.warning("alert_store prune write failed: %s", e)

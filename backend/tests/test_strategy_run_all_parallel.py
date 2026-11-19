@@ -5,6 +5,7 @@ engine.run_all 支持有界线程池并发 (策略对共享 context 只读纯函
 - 失败策略的异常语义一致 (原顺序首个失败抛出);
 - composite 子策略的嵌套 run_all 不受影响 (递归恒串行)。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -15,7 +16,7 @@ import pytest
 
 from app.strategy.engine import StrategyDataContext, StrategyEngine
 
-_FILTER_TEMPLATE = '''
+_FILTER_TEMPLATE = """
 import polars as pl
 
 META = {{
@@ -26,7 +27,7 @@ META = {{
 }}
 def filter(df, params):
     return pl.col("close") > {threshold}
-'''
+"""
 
 
 def _write_strategy(directory: Path, code: str) -> None:
@@ -44,19 +45,21 @@ def _make_engine(tmp_path: Path) -> StrategyEngine:
 
 def _context() -> StrategyDataContext:
     n = 30
-    current = pl.DataFrame({
-        "symbol": [f"{i:06d}.SZ" for i in range(n)],
-        "name": [f"股票{i}" for i in range(n)],
-        "open": [5.0 + i for i in range(n)],
-        "high": [5.5 + i for i in range(n)],
-        "low": [4.5 + i for i in range(n)],
-        "close": [5.0 + i for i in range(n)],
-        "volume": [1000.0 * (i + 1) for i in range(n)],
-        "amount": [5000.0 * (i + 1) for i in range(n)],
-        "turnover_rate": [1.0 + i * 0.1 for i in range(n)],
-        "total_shares": [1e8 for _ in range(n)],
-        "float_shares": [5e7 for _ in range(n)],
-    })
+    current = pl.DataFrame(
+        {
+            "symbol": [f"{i:06d}.SZ" for i in range(n)],
+            "name": [f"股票{i}" for i in range(n)],
+            "open": [5.0 + i for i in range(n)],
+            "high": [5.5 + i for i in range(n)],
+            "low": [4.5 + i for i in range(n)],
+            "close": [5.0 + i for i in range(n)],
+            "volume": [1000.0 * (i + 1) for i in range(n)],
+            "amount": [5000.0 * (i + 1) for i in range(n)],
+            "turnover_rate": [1.0 + i * 0.1 for i in range(n)],
+            "total_shares": [1e8 for _ in range(n)],
+            "float_shares": [5e7 for _ in range(n)],
+        }
+    )
     return StrategyDataContext(
         asset_type="stock",
         timeframe="1d",
@@ -67,8 +70,7 @@ def _context() -> StrategyDataContext:
 
 def _signature(results: dict) -> dict:
     return {
-        sid: (r.total, tuple(sorted(row["symbol"] for row in r.rows)))
-        for sid, r in results.items()
+        sid: (r.total, tuple(sorted(row["symbol"] for row in r.rows))) for sid, r in results.items()
     }
 
 
@@ -77,8 +79,7 @@ def test_parallel_run_all_matches_sequential_results(tmp_path: Path) -> None:
     context = _context()
     # 关闭默认基础过滤, 让结果只取决于策略谓词本身
     overrides = {
-        meta["id"]: {"basic_filter": {"enabled": False}}
-        for meta in engine.list_strategies()
+        meta["id"]: {"basic_filter": {"enabled": False}} for meta in engine.list_strategies()
     }
 
     sequential = engine.run_all(context, overrides_map=overrides, parallel=False)
@@ -97,11 +98,11 @@ def test_parallel_run_all_preserves_failure_semantics(tmp_path: Path) -> None:
     _write_strategy(d, _FILTER_TEMPLATE.format(sid="ok_first", threshold=10.0))
     _write_strategy(
         d,
-        '''
+        """
 META = {"id": "boom", "name": "boom"}
 def filter(df, params):
     raise ValueError("injected strategy failure")
-''',
+""",
     )
     _write_strategy(d, _FILTER_TEMPLATE.format(sid="ok_last", threshold=15.0))
     engine = StrategyEngine(strategy_dirs=[d])

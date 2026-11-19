@@ -6,9 +6,11 @@
 3. 优先级: 显式 commission_pct 覆盖 fees_pct。
 4. 撮合传导: 印花税只影响卖出腿, 且精度进入 TradeRecord。
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import Any, cast
 
 import polars as pl
 
@@ -18,26 +20,31 @@ from app.backtest.engine import BacktestEngine, MatcherConfig
 # 复用 portfolio 测试的最小面板/掩码构造
 # ---------------------------------------------------------------
 
-def _panel(symbols: list[str], days: int = 4, price: float = 10.0, overrides: dict | None = None) -> pl.DataFrame:
+
+def _panel(
+    symbols: list[str], days: int = 4, price: float = 10.0, overrides: dict | None = None
+) -> pl.DataFrame:
     overrides = overrides or {}
     start = date(2024, 1, 1)
     rows = []
     for sym in symbols:
         for i in range(days):
             patch = overrides.get((sym, i), {})
-            rows.append({
-                "symbol": sym,
-                "name": sym,
-                "date": start + timedelta(days=i),
-                "open": patch.get("open", price),
-                "high": patch.get("high", price),
-                "low": patch.get("low", price),
-                "close": patch.get("close", price),
-                "volume": patch.get("volume", 100_000),
-                "score": patch.get("score", 1),
-                "signal_limit_up": patch.get("signal_limit_up", False),
-                "signal_limit_down": patch.get("signal_limit_down", False),
-            })
+            rows.append(
+                {
+                    "symbol": sym,
+                    "name": sym,
+                    "date": start + timedelta(days=i),
+                    "open": patch.get("open", price),
+                    "high": patch.get("high", price),
+                    "low": patch.get("low", price),
+                    "close": patch.get("close", price),
+                    "volume": patch.get("volume", 100_000),
+                    "score": patch.get("score", 1),
+                    "signal_limit_up": patch.get("signal_limit_up", False),
+                    "signal_limit_down": patch.get("signal_limit_down", False),
+                }
+            )
     return pl.DataFrame(rows).sort(["symbol", "date"])
 
 
@@ -53,6 +60,7 @@ def _mask(panel: pl.DataFrame, marks: set[tuple[str, int]]) -> pl.Series:
 # ---------------------------------------------------------------
 # 1. 单元测试: buy_cost_pct / sell_cost_pct
 # ---------------------------------------------------------------
+
 
 def test_legacy_fees_pct_keeps_symmetric_cost_without_stamp():
     """仅传 fees_pct: 买卖成本相等, 均为 fees + slippage, 不含印花税 (旧行为)。"""
@@ -86,6 +94,7 @@ def test_commission_pct_zero_is_not_treated_as_unset():
 # 2. 撮合传导: 印花税只影响卖出腿
 # ---------------------------------------------------------------
 
+
 def _round_trip_trade(cfg_kwargs: dict):
     """价格恒定的一次买卖来回, 返回唯一成交的 TradeRecord。"""
     panel = _panel(
@@ -98,7 +107,7 @@ def _round_trip_trade(cfg_kwargs: dict):
     )
     entries = _mask(panel, {("A", 0)})
     exits = _mask(panel, set())
-    result = BacktestEngine(repo=None).simulate_portfolio(
+    result = BacktestEngine(repo=cast(Any, None)).simulate_portfolio(
         panel,
         entries,
         exits,
@@ -123,7 +132,9 @@ def test_stamp_tax_only_deducts_on_sell_leg():
     """
     stamp = 0.001
     t_no_stamp = _round_trip_trade(dict(commission_pct=0.0003, stamp_tax_pct=0.0, slippage_bps=0))
-    t_with_stamp = _round_trip_trade(dict(commission_pct=0.0003, stamp_tax_pct=stamp, slippage_bps=0))
+    t_with_stamp = _round_trip_trade(
+        dict(commission_pct=0.0003, stamp_tax_pct=stamp, slippage_bps=0)
+    )
 
     # (a) 核心不变量: 买入腿由 buy_cost_pct 决定, 与印花税无关 → 股数必须一致。
     assert t_no_stamp.shares == t_with_stamp.shares
@@ -144,11 +155,17 @@ def test_independent_candidate_pnl_pct_includes_decomposed_costs():
     )
     entries = _mask(panel, {("A", 0)})
     exits = _mask(panel, set())
-    result = BacktestEngine(repo=None).simulate_independent_candidates(
+    result = BacktestEngine(repo=cast(Any, None)).simulate_independent_candidates(
         panel,
         entries,
         exits,
-        MatcherConfig(matching="close_t", commission_pct=0.0003, stamp_tax_pct=0.001, slippage_bps=0, max_hold_days=1),
+        MatcherConfig(
+            matching="close_t",
+            commission_pct=0.0003,
+            stamp_tax_pct=0.001,
+            slippage_bps=0,
+            max_hold_days=1,
+        ),
     )
     assert len(result.trades) == 1
     # buy_cost=0.0003, sell_cost=0.0003+0.001=0.0013 → 合计 -0.0016
@@ -159,11 +176,30 @@ def test_independent_candidate_pnl_pct_includes_decomposed_costs():
 # 3. SSE 任务缓存键: 成本参数必须参与, 否则不同成本命中同一缓存 / cancel 失配
 # ---------------------------------------------------------------
 
+
 def test_job_key_distinguishes_commission_and_stamp():
     """成本参数不同的两次回测必须得到不同 job_key (避免缓存碰撞与 cancel 失配)。"""
     from app.api.backtest import _make_job_key
 
-    base_args = ("s", None, None, None, "open_t+1", None, None, 0.0002, 5.0, 10, 1.0, 1e6, "equal", None, None, "position", 5)
+    base_args = (
+        "s",
+        None,
+        None,
+        None,
+        "open_t+1",
+        None,
+        None,
+        0.0002,
+        5.0,
+        10,
+        1.0,
+        1e6,
+        "equal",
+        None,
+        None,
+        "position",
+        5,
+    )
     k_none = _make_job_key(*base_args)
     k_comm = _make_job_key(*base_args, commission_pct=0.0009)
     k_stamp = _make_job_key(*base_args, stamp_tax_pct=0.001)

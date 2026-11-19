@@ -10,10 +10,12 @@ CONTRIBUTING §3.3: A 股交易时段按北京时间, 服务器时区不能成�
 美西主机整个 A 股交易时段、UTC 主机北京 00:00-08:00, 本地日历日比北京
 早一天: 管道已写入的当日官方 K 被排除, 分析与价位停在昨天。
 """
+
 from __future__ import annotations
 
 from datetime import date
 from types import SimpleNamespace
+from typing import Any
 
 import polars as pl
 
@@ -57,7 +59,7 @@ def test_levels_window_ends_on_beijing_today(monkeypatch) -> None:
     """
     monkeypatch.setattr(stock_analysis_api, "cn_today", lambda: BJ, raising=False)
     repo = _Repo()
-    req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo)))
+    req: Any = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo)))
     stock_analysis_api.get_levels(req, symbol="600000.SH", days=120)
     assert repo.windows, "应查询日K"
     _start, end = repo.windows[0]

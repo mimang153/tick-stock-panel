@@ -116,6 +116,28 @@ docker compose logs -f clickhouse
 docker compose exec clickhouse clickhouse-client --user tsp --password tsp123456 --query "SHOW DATABASES"
 ```
 
+## 可选 Redis 缓存层（复用宿主机容器）
+
+多实例部署时可启用 Redis 缓存；本项目 compose **不创建 Redis 服务**，只复用宿主机已有容器：
+
+```bash
+./redis-cache.sh up           # 用宿主机已有 Redis 镜像幂等创建/启动容器
+./redis-cache.sh check        # 检查容器状态与 PING
+./redis-cache.sh url          # 打印源码/容器内两套 CACHE_REDIS_URL
+./redis-cache.sh config       # 查看 maxmemory/淘汰策略/持久化配置
+./redis-cache.sh aof on       # 在线开启 AOF（appendfsync everysec，无需重启）
+./redis-cache.sh aof off      # 关闭 AOF（仅回退场景）
+./redis-cache.sh flush --yes  # 仅清除 tickflow:cache:* 项目键
+```
+
+在 `.env` 设置 `CACHE_BACKEND=redis`，并给 `BACKEND_EXTRAS` 加 `cache-redis`。脚本按 `REDIS_IMAGE` 选择本地镜像（默认 `redis:8-alpine`），按 `REDIS_CONTAINER` 创建或复用容器；若容器已存在，只启动，不重建。容量与淘汰策略由 `REDIS_MAXMEMORY` / `REDIS_MAXMEMORY_POLICY` 设置。
+
+**持久化策略（DES-004 §2.3 已批准，修订原 RC-02「纯缓存不持久化」）：** Redis 已升格为分布式协调态权威（锁、任务状态、限流、取消标志、mining 状态机），开启 AOF（`appendonly=yes`、`appendfsync=everysec`），新容器创建时默认启用，已有容器执行 `./redis-cache.sh aof on` 在线开启（无需重启）。注意：**AOF 只用于减少重启恢复时间，不是业务数据持久化保证**——不可丢失的数据（行情、回测、账户台账）仍在 CK / 事件溯源；Redis 协调态丢失后从 CK 审计重建（见 DES-004 §2.3）。`maxmemory-policy=allkeys-lru` 保持不变，协调态键需设 TTL 或纳入重建流程，避免被淘汰。
+
+源码直跑用 `CACHE_REDIS_URL=redis://:pass@localhost:6379/0`；compose 用 `CACHE_REDIS_URL_CONTAINER=redis://:pass@host.docker.internal:6379/0`。密码含特殊字符时需 URL 编码。
+
+**已知取舍：数据状态统计（`DataStatusCache`）不随 Redis 迁移。** 该缓存是进程内的请求级快照，由单个 daemon 线程做单飞刷新（并发请求不会重复起线程），刷新对象是"数据同步到哪天"这类统计值。默认单实例部署下保持本地实现；若启用多实例且共用 Redis，各实例仍会**各自刷新、各自统计**，产生重复计算开销，但统计结果一致、不会算错。这是已登记的设计取舍而非故障，不需要重启或清缓存。只有多实例成为正式部署形态且重复开销需要消除时，才按 ISS-003 RC-06 的 Redis 租约方案实现全局单飞。
+
 更新到新版本:
 
 ```bash
@@ -326,10 +348,24 @@ ssh -L 3018:127.0.0.1:3018 root@123.45.67.89
 
 ## 多窗口与多人共享访问
 
-同一部署可以由多个浏览器窗口、设备同时访问。API 主进程保持 **1 个**
-(`uvicorn --workers 1`，现有启动方式默认如此)，计算子进程继续沿用回测/优化的
-既有机制。当前队列、缓存与限额在进程内共享，不能通过增加 API workers 或让多个
-容器同时写同一数据目录来扩容。登录和用户数据仍采用现有单密码、共享数据模式。
+同一部署可以由多个浏览器窗口、设备同时访问。**S4 起 API 可多 worker 运行**
+（Dockerfile `API_WORKERS`，默认 2）：镜像以 `uvicorn --workers ${API_WORKERS}` 启动，
+计算子进程继续沿用回测/优化的既有机制。登录和用户数据仍采用现有单密码、共享数据模式。
+
+**多 worker 的前提（DES-004 §4 / DES-005 / ISS-004 DIST-05，均已落地）：**
+
+- **模拟盘账户**：PG 事务层（`PAPER_PG_URL`），一次成交在 account 行锁内重放台账后
+  整体写入，前端零改动；原文件事实源与进程内 `PAPER_LOCK` 已移除。
+- **四后端默认 redis**：`CACHE_BACKEND` / `EVENT_BUS_BACKEND` / `COORDINATION_BACKEND`
+  / `MINING_STORE_BACKEND` 默认 redis，分别承担跨 worker 缓存、SSE 广播、取消/限流/
+  任务状态与 mining 原子状态机。`memory` 仅作离线调试与 pytest 隔离。
+- **启动钩子单飞**：协调态/mining 重建、mining/guardian 恢复、调度器、扩展拉取、
+  财务调度、矩阵 generation 固定经 `coordination.once()` 只在一个 worker 执行；
+  服务对象仍挂到所有 worker 的 `app.state`，非 leader 只是「未启动」状态。
+
+**已登记取舍**：`DataStatusCache`（RC-06）保留各 worker 本地刷新（结果一致即可），
+memory 文件版 mining 保留 flock 单写者兼容。多 worker 门禁见 CONTRIBUTING 测试矩阵；
+离线单进程调试仍可用 `API_WORKERS=1` + 四后端 memory。
 
 ### 请求和计算的区别
 

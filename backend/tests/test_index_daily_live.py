@@ -6,6 +6,7 @@
 指数 live enriched 缓存由 quote_service 每轮 merge/flush 维护, 不依赖指数监控规则
 (test_repository_index / test_quote_index_merge / test_index_live_write_without_monitor_rules)。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -26,17 +27,19 @@ YDAY = date(2026, 3, 1)
 
 
 def _live_index_frame(day: date) -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": ["000001.SH"],
-        "date": [day],
-        "open": [3010.0],
-        "high": [3050.0],
-        "low": [3008.0],
-        "close": [3040.0],
-        "volume": [2.0],
-        "amount": [2.0],
-        "change_pct": [0.0116],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["000001.SH"],
+            "date": [day],
+            "open": [3010.0],
+            "high": [3050.0],
+            "low": [3008.0],
+            "close": [3040.0],
+            "volume": [2.0],
+            "amount": [2.0],
+            "change_pct": [0.0116],
+        }
+    )
 
 
 class _IndexRepo:
@@ -51,16 +54,18 @@ class _IndexRepo:
         return pl.DataFrame({"symbol": ["000001.SH"], "name": ["上证指数"]})
 
     def get_index_daily(self, symbol, start, end, columns=None) -> pl.DataFrame:
-        return pl.DataFrame({
-            "symbol": ["000001.SH"],
-            "date": [YDAY],
-            "open": [3000.0],
-            "high": [3010.0],
-            "low": [2990.0],
-            "close": [3005.0],
-            "volume": [1.0],
-            "amount": [1.0],
-        })
+        return pl.DataFrame(
+            {
+                "symbol": ["000001.SH"],
+                "date": [YDAY],
+                "open": [3000.0],
+                "high": [3010.0],
+                "low": [2990.0],
+                "close": [3005.0],
+                "volume": [1.0],
+                "amount": [1.0],
+            }
+        )
 
     def get_enriched_latest_asset(self, asset_type: str, refresh: bool = True):
         self.latest_calls.append((asset_type, refresh))
@@ -85,7 +90,11 @@ def test_index_daily_injects_live_candle(monkeypatch) -> None:
     monkeypatch.setattr(kline_api, "cn_today", lambda: TODAY)
     repo = _IndexRepo()
     result = indices.get_index_daily(
-        _index_request(repo), symbol="000001.SH", days=5, start_date=None, end_date=None,
+        _index_request(repo),
+        symbol="000001.SH",
+        days=5,
+        start_date=None,
+        end_date=None,
     )
     dates = [str(r["date"])[:10] for r in result["rows"]]
     assert TODAY.isoformat() in dates, f"盘中必须带上当日实时K, 实际 {dates}"
@@ -110,7 +119,11 @@ def test_index_daily_skips_live_candle_when_cache_unusable(monkeypatch, latest) 
     monkeypatch.setattr(kline_api, "cn_today", lambda: TODAY)
     repo = _IndexRepo(latest=latest)
     result = indices.get_index_daily(
-        _index_request(repo), symbol="000001.SH", days=5, start_date=None, end_date=None,
+        _index_request(repo),
+        symbol="000001.SH",
+        days=5,
+        start_date=None,
+        end_date=None,
     )
     dates = [str(r["date"])[:10] for r in result["rows"]]
     assert dates == [YDAY.isoformat()]
@@ -159,7 +172,11 @@ def test_index_daily_default_end_is_beijing_today(monkeypatch) -> None:
     monkeypatch.setattr(indices, "cn_today", lambda: TODAY, raising=False)
 
     indices.get_index_daily(
-        _index_request(repo), symbol="000001.SH", days=5, start_date=None, end_date=None,
+        _index_request(repo),
+        symbol="000001.SH",
+        days=5,
+        start_date=None,
+        end_date=None,
     )
     assert captured, "应查询指数日K"
     _start, end = captured[0]

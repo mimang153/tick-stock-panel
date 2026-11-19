@@ -44,7 +44,7 @@ FastAPI 服务
    ├─ storage 门面（Repository 接口）              ← 本次新增的统一收口层
    │    ├─ clickhouse 读取（SQL → Arrow → Polars）
    │    └─ 写入缓冲（2s / 5000 行批量 flush）
-   ├─ CacheBackend（接口）                         ← 进程内存实现，预留 Redis
+   ├─ CacheBackend（接口）                         ← 默认内存，可切换宿主机 Redis 容器
    └─ ClickHouse（单节点容器，HTTP 8123）
 ```
 
@@ -441,9 +441,9 @@ class CacheBackend(Protocol):
 | 实现 | 场景 | 序列化 |
 | --- | --- | --- |
 | `MemoryCacheBackend` | 当前默认（单进程） | 直接持有 Polars DataFrame / dict，零序列化 |
-| `RedisCacheBackend` | 将来多进程 / 多实例 | **Arrow IPC**（DataFrame）+ JSON（dict），禁用 pickle |
+| `RedisCacheBackend` | 已实现；多进程 / 多实例时切换 | **Arrow IPC**（DataFrame）+ JSON（dict），禁用 pickle |
 
-选择方式：`CACHE_BACKEND=memory|redis`（+ `CACHE_REDIS_URL`），与存储层解耦，可独立切换。
+选择方式：`CACHE_BACKEND=memory|redis`（+ `CACHE_REDIS_URL`），与存储层解耦，可独立切换。Redis 由宿主机已有容器提供，本项目 compose 不新建 Redis 服务；容器内用 `CACHE_REDIS_URL_CONTAINER` 指向 `host.docker.internal`。
 
 **缓存内容与命名空间**
 
@@ -540,8 +540,10 @@ CK 由 compose 以官方镜像 `clickhouse/clickhouse-server:24.8.8-alpine` 启�
 | `CH_WRITE_FLUSH_INTERVAL_MS` | `2000` | 写缓冲时间阈值 |
 | `CH_WRITE_FLUSH_ROWS` | `5000` | 写缓冲行数阈值 |
 | `CH_QUERY_TIMEOUT_S` | `60` | 查询超时 |
-| `CACHE_BACKEND` | `memory` | 缓存介质：`memory` / `redis` |
-| `CACHE_REDIS_URL` | 空 | `CACHE_BACKEND=redis` 时的连接串（当前不实现，仅占位） |
+| `CACHE_BACKEND` | `redis` | 缓存介质：`memory` / `redis`；S4 起默认 redis（跨 worker 共享），离线调试可改 memory |
+| `CACHE_REDIS_URL` | `redis://:123456@localhost:6379/0` | `CACHE_BACKEND=redis` 时源码直跑连接串（含密码，与 `REDIS_PASSWORD` 一致） |
+| `CACHE_REDIS_URL_CONTAINER` | `redis://host.docker.internal:6379/0` | compose 内连接宿主机 Redis 容器 |
+| `CACHE_REDIS_PREFIX` | `tickflow:cache:` | Redis 键前缀，便于只清本项目缓存 |
 
 ### 4.10 主键与查询模式（性能关键）
 
@@ -639,7 +641,7 @@ DDL 与迁移脚本集中在 `storage/schema.py`（版本号 + 语句列表）�
 | D1 | 周边数据归属 | **已定**：`pools`/`ai_cache` 走 `CacheBackend`（内存→Redis）；`backtest_results` 入 CK（`backtest_runs`+`backtest_trades`）；`screener_results` 已删除（追溯见 §8） |
 | D2 | 批次划分（B1~B5） | **待定**，后续专门讨论 |
 | D3 | B2 完成标准（是否含一次完整回测） | **待定**，后续专门讨论 |
-| D4 | 缓存介质切换时机 | 当前 `MemoryCacheBackend`；Redis 实现留接口，按需接入 |
+| D4 | 缓存介质切换时机 | S4 起默认 `RedisCacheBackend`（`CACHE_BACKEND=redis`），`MemoryCacheBackend` 保留作离线调试与 pytest 隔离 |
 | D5 | 同步状态与完成语义 | **已定**：用 `sync_state` 小表（§3.4），**不再使用任何文件标记**（`preferences.json` 的同步时间、`EnrichedPublication` 的 publishing 标记均废弃） |
 | D6 | 写入模式 | **已定**：实时类缓存优先 + 异步落库；批量同步/修复类落库优先（§4.2） |
 

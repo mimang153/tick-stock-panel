@@ -11,6 +11,7 @@
 
 文件路径: data/user_data/strategy_cache.json
 """
+
 from __future__ import annotations
 
 import json
@@ -68,8 +69,15 @@ def _get_enriched_mtime(data_dir: Path, as_of: str) -> float | None:
         return None
 
 
+def _redis_backend() -> bool:
+    """是否已装配 Redis 缓存后端；导入延迟到调用时避免模块级循环依赖。"""
+    from app.services import strategy_cache_redis
+
+    return strategy_cache_redis._store() is not None
+
+
 def read_cache(data_dir: Path) -> dict | None:
-    """读取策略缓存文件。返回 None 表示无缓存或读取失败。
+    """读取策略缓存。返回 None 表示无缓存或读取失败。
 
     说明: 原先有 enriched mtime 过期校验 (数据文件变化 → 判过期返回 None),
     但在有实时行情的系统里, enriched parquet 每轮被刷新 → mtime 必然变化 →
@@ -77,6 +85,10 @@ def read_cache(data_dir: Path) -> dict | None:
     保护价值有限。故移除: 盘后缓存总能读出, 实时新鲜度由 /api/screener/cached
     端点叠加监控引擎的内存实时结果 (latest_strategy_results) 来保证。
     """
+    if _redis_backend():
+        from app.services import strategy_cache_redis
+
+        return strategy_cache_redis.read(data_dir)
     with _file_lock:
         return _read_cache_unlocked(data_dir)
 
@@ -88,10 +100,13 @@ def clear_cache(data_dir: Path) -> None:
     # 运维可见性: 策略页依赖本缓存秒加载, 被清空即整页回退到全量重算。
     # 记录调用链 (最近 5 帧), 排查"缓存莫名消失"类问题不需要复现现场。
     frames = traceback.extract_stack()[:-1]
-    chain = " <- ".join(
-        f"{f.filename.rsplit('/', 1)[-1]}:{f.lineno}:{f.name}" for f in frames[-5:]
-    )
+    chain = " <- ".join(f"{f.filename.rsplit('/', 1)[-1]}:{f.lineno}:{f.name}" for f in frames[-5:])
     logger.warning("策略缓存被清除, 调用链: %s", chain)
+    if _redis_backend():
+        from app.services import strategy_cache_redis
+
+        strategy_cache_redis.clear(data_dir)
+        return
     path = _cache_path(data_dir)
     with _file_lock:
         _memory_cache.pop(str(path), None)
@@ -148,11 +163,19 @@ def write_cache(
     validate: Callable[[], None] | None = None,
     strict: bool = False,
 ) -> None:
-    """将策略结果写入缓存文件，同时更新今日曾命中集合。
+    """将策略结果写入缓存，同时更新今日曾命中集合。
 
     - 日期变更时重置 today_ever_matched 和 today_ever_rows
     - 同一天内合并 (并集) 之前曾命中的 symbol，并用最新行数据更新
+    - Redis 后端下由 Lua 原子完成合并；文件后端下由进程内锁保护
     """
+    if _redis_backend():
+        from app.services import strategy_cache_redis
+
+        if validate is not None:
+            validate()
+        strategy_cache_redis.write(data_dir, as_of, results, _get_enriched_mtime(data_dir, as_of))
+        return
     path = _cache_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -177,10 +200,11 @@ def _write_cache_locked(
     old_as_of = old.get("as_of") if old else None
     old_ever_rows: dict[str, dict[str, dict]] = old.get("today_ever_rows", {}) if old else {}
 
-    if old_as_of == as_of:
-        merged_results = {**(old.get("results") or {}), **results}
-    else:
-        merged_results = results
+    merged_results = (
+        {**(old.get("results") or {}), **results}
+        if old is not None and old_as_of == as_of
+        else results
+    )
 
     # 当前命中的行数据 → symbol 映射
     current_row_maps: dict[str, dict[str, dict]] = {}
@@ -220,7 +244,9 @@ def _write_cache_locked(
     try:
         # 原子写: 先写临时文件再 os.replace, 避免读侧读到半写的 JSON
         tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, default=_json_default), encoding="utf-8")
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, default=_json_default), encoding="utf-8"
+        )
         os.replace(tmp, path)
         # 写入成功 → 用新指纹直填镜像, 轮询方 (2s 一次的 /cached-summary) 免付重读。
         # payload 即刚序列化到磁盘的内容, 镜像与磁盘天然一致。
@@ -228,7 +254,13 @@ def _write_cache_locked(
         _memory_cache[str(path)] = (st.st_mtime_ns, st.st_size, payload)
         total_rows = sum(len(r.get("rows", [])) for r in merged_results.values())
         total_ever = sum(len(v) for v in today_ever_matched.values())
-        logger.info("策略缓存已写入: %s, %d 策略, %d 命中, %d 曾命中", as_of, len(merged_results), total_rows, total_ever)
+        logger.info(
+            "策略缓存已写入: %s, %d 策略, %d 命中, %d 曾命中",
+            as_of,
+            len(merged_results),
+            total_rows,
+            total_ever,
+        )
     except Exception as e:
         logger.warning("写入策略缓存失败: %s", e)
         if strict:

@@ -7,6 +7,7 @@ ETF 与指数盘中 MA60、60 日极值、60 日动量为空 (创60日新高/新
 等信号一并失效), 而盘后缓存 (_refresh_etf_enriched / _refresh_index_enriched,
 300 个自然日) 有值。股票盘中递推窗口已按交易日计数 (_live_agg_window_start)。
 """
+
 from __future__ import annotations
 
 import math
@@ -23,7 +24,9 @@ from app.services.quote_service import QuoteService
 
 TODAY = date(2026, 2, 26)
 # 2026 元旦 + 春节休市 (2/16~2/23): 2025-11-28 ~ 2026-02-25 只有 57 个交易日
-CLOSED = {date(2026, 1, 1), date(2026, 1, 2)} | {date(2026, 2, 16) + timedelta(days=i) for i in range(8)}
+CLOSED = {date(2026, 1, 1), date(2026, 1, 2)} | {
+    date(2026, 2, 16) + timedelta(days=i) for i in range(8)
+}
 SYMBOLS = ("510300.SH", "159915.SZ")
 WINDOW_COLUMNS = ("ma60", "high_60d", "low_60d", "momentum_60d")
 TABLES = {"etf": "kline_etf_daily", "index": "kline_index_daily"}

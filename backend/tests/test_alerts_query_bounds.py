@@ -3,6 +3,7 @@
 同类列表端点 (abnormal.py 的 limit、rps.py 的 days) 已用 Query(ge=..., le=...)
 约束同名参数; 本文件锁住 /api/alerts 的同一口径。
 """
+
 from __future__ import annotations
 
 import time
@@ -46,9 +47,9 @@ def test_days_and_limit_above_store_retention_are_rejected(tmp_path):
     client = _client(tmp_path)
     # 存储侧只保留 MAX_DAYS 天 / MAX_RECORDS 条, 超出上限的请求没有可返回的数据
     assert client.get("/api/alerts", params={"days": alert_store.MAX_DAYS + 1}).status_code == 422
-    assert client.get(
-        "/api/alerts", params={"limit": alert_store.MAX_RECORDS + 1}
-    ).status_code == 422
+    assert (
+        client.get("/api/alerts", params={"limit": alert_store.MAX_RECORDS + 1}).status_code == 422
+    )
 
 
 def test_valid_params_still_return_all_records(tmp_path):

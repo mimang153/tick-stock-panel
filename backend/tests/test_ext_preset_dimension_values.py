@@ -3,6 +3,7 @@
 类别名里的 NaN/None 占位值清洗已随 fanout 迁移到 ext_fanout.clean_label
 (见 test_ext_fanout.py); 此处保留消费侧的维度值清洗测试。
 """
+
 from __future__ import annotations
 
 from app.services.market_overview_builder import _dimension_values

@@ -27,10 +27,8 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
-import shutil
 import threading
 import uuid
 from datetime import date as _date
@@ -43,7 +41,7 @@ import polars as pl
 from app.market_time import CN_TZ, cn_now, cn_today
 from app.parquet import scan_daily_parquet, scan_parquet_compat
 from app.polars_guard import guarded_collect
-from app.services.fs_utils import atomic_write_text
+from app.storage import paper_pg as store
 
 # --- re-export：保持 import 路径与 monkeypatch 可观察性 ---
 from .paper_fill import (
@@ -167,78 +165,13 @@ MAX_POSITION_SYMBOLS = 50  # 持仓标的数上限 (防误操作)
 DEFAULT_ACCOUNT_ID = "default"
 _ACCOUNT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
-_MIGRATION_DONE = False
 
-
-# ── 路径与账户目录 ──────────────────────────────────────
+# ── 账户 ID 校验 ────────────────────────────────────────
 def validate_account_id(account_id: str) -> str:
     """账户 ID 只允许字母/数字/下划线/短横线 (防路径穿越), 非法抛 ValueError。"""
     if not isinstance(account_id, str) or not _ACCOUNT_ID_RE.match(account_id or ""):
         raise ValueError(f"账户 ID 非法 (仅限字母数字下划线短横线, ≤32 字符): {account_id!r}")
     return account_id
-
-
-def accounts_base(data_dir: Path) -> Path:
-    return Path(data_dir) / "paper" / "accounts"
-
-
-def _migrate_legacy(data_dir: Path) -> None:
-    """旧单账户布局 data/paper/* → data/paper/accounts/default/* (一次性, 幂等)。
-
-    仅当旧 account.json 存在且 accounts/ 尚不存在时迁移; 移动失败只留痕不阻断
-    (下次访问重试), 避免迁移异常导致模拟盘整体不可用。
-    """
-    legacy = Path(data_dir) / "paper"
-    base = accounts_base(data_dir)
-    if not (legacy / "account.json").exists() or base.exists():
-        return
-    dest = base / DEFAULT_ACCOUNT_ID
-    try:
-        dest.mkdir(parents=True, exist_ok=True)
-        for name in (
-            "account.json",
-            "orders",
-            "fills.jsonl",
-            "positions.json",
-            "nav",
-            "auto_rules",
-        ):
-            src = legacy / name
-            if src.exists():
-                shutil.move(str(src), str(dest / name))
-        logger.info("paper: 旧单账户数据已迁移到 %s", dest)
-    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
-        logger.warning("paper 旧数据迁移失败 (下次重试): %s", e)
-        # 迁移半途而废时目标目录已建立, 会跳过后续重试 — 清掉半成品目录保证可重试
-        try:
-            if dest.exists() and not (dest / "account.json").exists():
-                shutil.rmtree(dest, ignore_errors=True)
-                if not any(base.iterdir()):
-                    base.rmdir()
-        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
-            pass
-
-
-def _root(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> Path:
-    global _MIGRATION_DONE
-    if not _MIGRATION_DONE:
-        _migrate_legacy(data_dir)
-        _MIGRATION_DONE = True
-    d = accounts_base(data_dir) / validate_account_id(account_id)
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _orders_dir(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> Path:
-    d = _root(data_dir, account_id) / "orders"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _nav_dir(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> Path:
-    d = _root(data_dir, account_id) / "nav"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
 
 
 def _now_iso() -> str:
@@ -256,14 +189,7 @@ def _order_sort_key(order: dict) -> tuple:
 
 # ── 账户 ────────────────────────────────────────────────
 def get_account(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> dict | None:
-    p = _root(data_dir, account_id) / "account.json"
-    if not p.exists():
-        return None
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
-        logger.warning("paper account load failed: %s", e)
-        return None
+    return store.get_account(validate_account_id(account_id))
 
 
 def create_account(
@@ -301,33 +227,16 @@ def create_account(
             "status": "active",  # active / frozen
             "created_at": _now_iso(),
         }
-        atomic_write_text(
-            _root(data_dir, account_id) / "account.json",
-            json.dumps(acc, ensure_ascii=False, indent=2),
-        )
-        return acc
+        return store.create_account(account_id, acc)
 
 
 def save_account(data_dir: Path, acc: dict, account_id: str = DEFAULT_ACCOUNT_ID) -> None:
-    atomic_write_text(
-        _root(data_dir, account_id) / "account.json",
-        json.dumps(acc, ensure_ascii=False, indent=2),
-    )
+    store.save_account(account_id, acc)
 
 
 def list_account_ids(data_dir: Path) -> list[str]:
     """全部账户 id (按创建时间; 供钩子/结算遍历)。"""
-    base = accounts_base(data_dir)
-    if not base.exists():
-        return []
-    out: list[tuple[str, str]] = []
-    for p in base.glob("*/account.json"):
-        try:
-            acc = json.loads(p.read_text(encoding="utf-8"))
-            out.append((acc.get("created_at", ""), acc.get("id", p.parent.name)))
-        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
-            continue
-    return [aid for _, aid in sorted(out)]
+    return store.list_account_ids()
 
 
 def list_accounts(data_dir: Path) -> list[dict]:
@@ -405,9 +314,7 @@ def delete_account(
                 if s
             )
             return None, f"账户仍有 {detail}, 确认删除需 force=true"
-        root = accounts_base(data_dir) / validate_account_id(account_id)
-        if root.exists():
-            shutil.rmtree(root)
+        store.delete_account(account_id)
         return {"holdings": holdings, "pending_orders": pending}, None
 
 
@@ -697,31 +604,11 @@ def daily_nav(
 def _write_nav_line(
     data_dir: Path, day: str, nav: dict, account_id: str = DEFAULT_ACCOUNT_ID
 ) -> None:
-    p = _nav_dir(data_dir, account_id) / "daily.jsonl"
-    lines: list[str] = []
-    if p.exists():
-        for line in p.read_text(encoding="utf-8").splitlines():
-            try:
-                if json.loads(line).get("date") != day:
-                    lines.append(line)
-            except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
-                continue
-    lines.append(json.dumps(nav, ensure_ascii=False))
-    lines.sort(key=lambda s: json.loads(s)["date"])
-    atomic_write_text(p, "\n".join(lines) + "\n")
+    store.append_nav(account_id, day, nav)
 
 
 def load_nav(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> list[dict]:
-    p = _nav_dir(data_dir, account_id) / "daily.jsonl"
-    if not p.exists():
-        return []
-    out: list[dict] = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        try:
-            out.append(json.loads(line))
-        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
-            continue
-    return out
+    return store.load_nav(account_id)
 
 
 def overview(

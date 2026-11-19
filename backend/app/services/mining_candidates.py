@@ -2,6 +2,7 @@
 
 Concurrency protection is process-local; V1 remains a single-process service.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -14,7 +15,7 @@ import threading
 import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import polars as pl
 import pyarrow.parquet as pq
@@ -64,6 +65,12 @@ logger = logging.getLogger(__name__)
 
 
 class MiningCandidateService:
+    """挖掘候选的晋升与发布编排。
+
+    promote 把一次成功运行登记为待审候选; publish 通过质量门槛后把因子/策略
+    发布为共享策略, 并在失败时回滚已创建资源, 保证候选与发布状态一致。
+    """
+
     def __init__(
         self,
         data_dir: Path | str,
@@ -86,6 +93,7 @@ class MiningCandidateService:
         self._monitor_state_invalidator = monitor_state_invalidator
 
     def promote(self, run_id: str, signature: str) -> dict[str, Any]:
+        """把一次成功运行的产物登记为待审候选(按 provenance 去重)。"""
         with _LOCK:
             manifest, summary, path, frame, row, definition = self._load_candidate(
                 run_id, signature
@@ -96,7 +104,7 @@ class MiningCandidateService:
             item = self.candidate_store.create_or_get_by_provenance(
                 origin_run_id=run_id,
                 candidate_signature=signature,
-                kind=kind,
+                kind=cast(Literal["factor", "strategy"], kind),
                 name=name,
                 source_id=source_id,
                 config=config,
@@ -115,6 +123,7 @@ class MiningCandidateService:
             return item
 
     def publish(self, run_id: str, signature: str) -> dict[str, Any]:
+        """校验候选质量门槛后发布为共享策略, 失败时回滚已创建的策略与关联。"""
         with _LOCK:
             manifest, summary, path, frame, row, definition = self._load_candidate(
                 run_id, signature
@@ -130,8 +139,7 @@ class MiningCandidateService:
             )
             if not gate.qualified:
                 raise ValueError(
-                    "candidate does not meet the promotion gate: "
-                    + "; ".join(gate.reasons)
+                    "candidate does not meet the promotion gate: " + "; ".join(gate.reasons)
                 )
             if definition["kind"] == "factor_rank":
                 self._enforce_mined_slot_limit()
@@ -150,13 +158,9 @@ class MiningCandidateService:
                     )
                 return {"ok": True, "strategy_id": published_id}
 
-            published_id = self._validate_published_id(
-                _published_strategy_id(run_id, signature)
-            )
+            published_id = self._validate_published_id(_published_strategy_id(run_id, signature))
             self._validate_publication_backlink(row, published_id)
-            source = self._render_factor_strategy(
-                manifest, summary, row, definition, published_id
-            )
+            source = self._render_factor_strategy(manifest, summary, row, definition, published_id)
 
             target = self._custom_strategy_path(published_id)
             created = self._publish_or_verify_source(
@@ -172,9 +176,7 @@ class MiningCandidateService:
                 if self._monitor_state_invalidator is not None:
                     self._monitor_state_invalidator()
             except Exception as exc:
-                rollback_error = (
-                    self._rollback_created_source(target, source) if created else None
-                )
+                rollback_error = self._rollback_created_source(target, source) if created else None
                 message = f"strategy runtime invalidation failed: {exc}"
                 if rollback_error is not None:
                     message += f"; strategy rollback failed: {rollback_error}"
@@ -260,10 +262,8 @@ class MiningCandidateService:
                     "algorithm_version": summary.get("algorithm_version"),
                 },
             )
-        except Exception:  # noqa: BLE001 — 旁路钩子: 任何失败都不阻断发布主流程
-            logger.warning(
-                "guardian baseline recording failed for %s", strategy_id, exc_info=True
-            )
+        except Exception:  # noqa: BLE001 - 基线记录失败仅告警, 不影响发布编排
+            logger.warning("guardian baseline recording failed for %s", strategy_id, exc_info=True)
 
     def _load_candidate(
         self,
@@ -298,23 +298,21 @@ class MiningCandidateService:
         return manifest, summary, path, frame, row, definition
 
     def _registered_candidates_path(self, manifest: Mapping[str, Any]) -> Path:
+        """解析清单登记的 candidates.parquet 绝对路径, 拒绝符号链接与越界。"""
         artifacts = manifest.get("artifacts")
         if not isinstance(artifacts, Mapping):
             raise ValueError("mining candidates artifact is not registered")
         raw_path = artifacts.get("candidates")
         if raw_path != "candidates.parquet":
-            raise ValueError(
-                "only the registered candidates.parquet artifact can be used"
-            )
-        path = self.run_store.artifact_path(
-            str(manifest["run_id"]), "candidates"
-        )
+            raise ValueError("only the registered candidates.parquet artifact can be used")
+        path = self.run_store.artifact_path(str(manifest["run_id"]), "candidates")
         if path.is_symlink() or not path.is_file():
             raise ValueError("mining candidates artifact is unavailable")
         return path
 
     @staticmethod
     def _read_artifact(path: Path) -> pl.DataFrame:
+        """按大小/行数上限安全读取候选 parquet, 超限或解析失败抛可读错误。"""
         try:
             size = path.stat().st_size
         except OSError as exc:
@@ -330,25 +328,22 @@ class MiningCandidateService:
         if metadata is None or metadata.num_rows > _MAX_ARTIFACT_ROWS:
             raise ValueError("mining candidates artifact exceeds its row limit")
         uncompressed = sum(
-            metadata.row_group(index).total_byte_size
-            for index in range(metadata.num_row_groups)
+            metadata.row_group(index).total_byte_size for index in range(metadata.num_row_groups)
         )
         if uncompressed > _MAX_UNCOMPRESSED_BYTES:
-            raise ValueError(
-                "mining candidates artifact exceeds its uncompressed size limit"
-            )
+            raise ValueError("mining candidates artifact exceeds its uncompressed size limit")
         required = set(_ARTIFACT_SCHEMA) - _OPTIONAL_ARTIFACT_COLUMNS
         missing = sorted(required - set(schema))
         if missing:
             raise ValueError(f"mining candidates artifact schema is invalid: {missing}")
         invalid_types = [
-            name for name, dtype in _ARTIFACT_SCHEMA.items()
+            name
+            for name, dtype in _ARTIFACT_SCHEMA.items()
             if name in schema and schema[name] != dtype
         ]
         if invalid_types:
             raise ValueError(
-                "mining candidates artifact column types are invalid: "
-                f"{invalid_types}"
+                f"mining candidates artifact column types are invalid: {invalid_types}"
             )
         try:
             return pl.read_parquet(
@@ -356,6 +351,20 @@ class MiningCandidateService:
             )
         except Exception as exc:
             raise RuntimeError("failed to read mining candidates artifact") from exc
+
+    @staticmethod
+    def _expected_candidate_kind(definition: Mapping[str, Any]) -> str:
+        """校验定义字段白名单, 并返回 row.kind 应有的期望值。"""
+        kind = definition.get("kind")
+        if kind == "factor_rank":
+            fields, label, expected = _FACTOR_DEFINITION_FIELDS, "factor", "factor_combination"
+        elif kind == "existing_strategy":
+            fields, label, expected = _EXISTING_DEFINITION_FIELDS, "existing", "existing_strategy"
+        else:
+            raise ValueError(f"unsupported mining candidate kind: {kind!r}")
+        if set(definition) != fields:
+            raise ValueError(f"{label} candidate definition contains unsupported fields")
+        return expected
 
     def _validate_definition(
         self,
@@ -376,16 +385,7 @@ class MiningCandidateService:
         if not isinstance(definition, dict):
             raise ValueError("mining candidate definition must be an object")
         kind = definition.get("kind")
-        if kind == "factor_rank":
-            if set(definition) != _FACTOR_DEFINITION_FIELDS:
-                raise ValueError("factor candidate definition contains unsupported fields")
-            expected_kind = "factor_combination"
-        elif kind == "existing_strategy":
-            if set(definition) != _EXISTING_DEFINITION_FIELDS:
-                raise ValueError("existing candidate definition contains unsupported fields")
-            expected_kind = "existing_strategy"
-        else:
-            raise ValueError(f"unsupported mining candidate kind: {kind!r}")
+        expected_kind = self._expected_candidate_kind(definition)
         if row.get("kind") != expected_kind:
             raise ValueError("mining candidate kind does not match its definition")
         if (
@@ -403,19 +403,17 @@ class MiningCandidateService:
         if row.get("signature") != signature or computed != signature:
             raise ValueError("mining candidate signature does not match its definition")
         score = row.get("score")
-        if (
-            score is not None
-            and (
-                isinstance(score, bool)
-                or not isinstance(score, (int, float))
-                or not math.isfinite(float(score))
-            )
+        if score is not None and (
+            isinstance(score, bool)
+            or not isinstance(score, int | float)
+            or not math.isfinite(float(score))
         ):
             raise ValueError("candidate score must be finite")
         return definition
 
     @staticmethod
     def _request(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
+        """取出清单中的原始挖掘请求, 缺失或非映射时抛错。"""
         request = manifest.get("request")
         if not isinstance(request, Mapping):
             raise ValueError("mining origin request is unavailable")
@@ -427,6 +425,7 @@ class MiningCandidateService:
         row: Mapping[str, Any],
         definition: Mapping[str, Any],
     ) -> None:
+        """校验因子候选定义与产物列一致, 防止晋升用时序列名错配。"""
         factor_names = definition.get("factor_names")
         if (
             not isinstance(factor_names, list)
@@ -445,7 +444,7 @@ class MiningCandidateService:
             weight = scoring[factor_name]
             if (
                 isinstance(weight, bool)
-                or not isinstance(weight, (int, float))
+                or not isinstance(weight, int | float)
                 or not math.isfinite(float(weight))
                 or float(weight) <= 0.0
             ):
@@ -472,6 +471,7 @@ class MiningCandidateService:
         row: Mapping[str, Any],
         definition: Mapping[str, Any],
     ) -> None:
+        """校验存量策略候选定义合法, 防止复用被篡改的旧产物。"""
         strategy_id = definition.get("strategy_id")
         if not isinstance(strategy_id, str) or not strategy_id:
             raise ValueError("existing candidate strategy ID is invalid")
@@ -490,6 +490,7 @@ class MiningCandidateService:
         row: Mapping[str, Any],
         definition: Mapping[str, Any],
     ) -> tuple[str, str, str, dict[str, Any]]:
+        """汇总候选登记所需的 kind/name/source_id/config 四元组。"""
         request = self._request(manifest)
         signature = str(row["signature"])
         provenance = {
@@ -516,22 +517,33 @@ class MiningCandidateService:
         name = str(row.get("name") or signature)[:80]
         if definition["kind"] == "existing_strategy":
             strategy_id = str(definition["strategy_id"])
-            return "strategy", name, strategy_id, {
-                **common,
-                "strategy_id": strategy_id,
-            }
+            return (
+                "strategy",
+                name,
+                strategy_id,
+                {
+                    **common,
+                    "strategy_id": strategy_id,
+                },
+            )
         factor_names = list(definition["factor_names"])
         source_id = _published_strategy_id(str(manifest["run_id"]), signature)
-        return "strategy", name, source_id, {
-            **common,
-            "strategy_id": source_id,
-            "factor_names": factor_names,
-            "directions": [definition["directions"][name] for name in factor_names],
-            "weights": [float(definition["scoring"][name]) for name in factor_names],
-        }
+        return (
+            "strategy",
+            name,
+            source_id,
+            {
+                **common,
+                "strategy_id": source_id,
+                "factor_names": factor_names,
+                "directions": [definition["directions"][name] for name in factor_names],
+                "weights": [float(definition["scoring"][name]) for name in factor_names],
+            },
+        )
 
     @staticmethod
     def _candidate_metrics(row: Mapping[str, Any]) -> dict[str, Any]:
+        """从结果行提取样本外指标子集作为候选登记的 metrics。"""
         fields = (
             "oos_sharpe",
             "oos_worst_sharpe",
@@ -553,7 +565,7 @@ class MiningCandidateService:
                     raise ValueError("candidate confidence is invalid")
             elif (
                 isinstance(value, bool)
-                or not isinstance(value, (int, float))
+                or not isinstance(value, int | float)
                 or not math.isfinite(float(value))
             ):
                 raise ValueError(f"candidate metric {field} must be finite")
@@ -562,6 +574,7 @@ class MiningCandidateService:
 
     @staticmethod
     def _validated_summary(summary: Mapping[str, Any]) -> dict[str, str]:
+        """校验并提取摘要中的数据日期/算法与方法来版本号字段。"""
         result: dict[str, str] = {}
         for field in ("data_as_of", "algorithm_version", "methodology_version"):
             value = summary.get(field)
@@ -572,6 +585,7 @@ class MiningCandidateService:
 
     @staticmethod
     def _asset_type(manifest: Mapping[str, Any]) -> str:
+        """读取运行请求的资产类型, 缺省 stock。"""
         asset_type = MiningCandidateService._request(manifest).get("asset_type")
         if asset_type not in {"stock", "etf"}:
             raise ValueError("mining origin asset_type is invalid")
@@ -586,6 +600,7 @@ class MiningCandidateService:
         run_id: str | None = None,
         signature: str | None = None,
     ) -> None:
+        """确认待发布策略为可实盘(non research-only, matrix-native, 1d)的合法策略。"""
         strategy = self.strategy_engine.get(strategy_id)
         if strategy.meta.get("research_only"):
             raise ValueError("research-only strategy cannot be published")
@@ -595,9 +610,7 @@ class MiningCandidateService:
             raise ValueError("published strategy must support 1d")
         if asset_type not in strategy.meta.get("asset_types", []):
             raise ValueError("published strategy does not support the run asset type")
-        public_ids = {
-            str(meta.get("id")) for meta in self.strategy_engine.list_strategies()
-        }
+        public_ids = {str(meta.get("id")) for meta in self.strategy_engine.list_strategies()}
         if strategy_id not in public_ids:
             raise ValueError("published strategy is not publicly discoverable")
         if path is not None and (
@@ -611,10 +624,9 @@ class MiningCandidateService:
 
     @staticmethod
     def _validate_published_id(strategy_id: str) -> str:
+        """校验发布策略 id 形如 pub_<hash>, 防止路径穿越式命名。"""
         if not _STRATEGY_ID_PATTERN.fullmatch(strategy_id):
-            raise ValueError(
-                f"strategy_id must use {_PUBLISHED_PREFIX!r} and safe characters"
-            )
+            raise ValueError(f"strategy_id must use {_PUBLISHED_PREFIX!r} and safe characters")
         return strategy_id
 
     @staticmethod
@@ -622,11 +634,13 @@ class MiningCandidateService:
         row: Mapping[str, Any],
         strategy_id: str,
     ) -> None:
+        """确认候选已有发布回链时与本次策略 id 一致, 避免重复发布。"""
         existing = _optional_string(row.get("published_strategy_id"))
         if existing is not None and existing != strategy_id:
             raise ValueError("candidate publication backlink is inconsistent")
 
     def _custom_strategy_path(self, strategy_id: str) -> Path:
+        """返回 data_dir 下自定义策略文件路径, 拒绝越界目录。"""
         unresolved_root = self.data_dir / "strategies" / "custom"
         unresolved_root.mkdir(parents=True, exist_ok=True)
         if unresolved_root.is_symlink():
@@ -647,11 +661,10 @@ class MiningCandidateService:
         definition: Mapping[str, Any],
         strategy_id: str,
     ) -> str:
+        """把因子候选渲染为策略源码并写入自定义策略目录, 返回策略 id。"""
         asset_type = self._asset_type(manifest)
         factor_names = list(definition["factor_names"])
-        scoring = {
-            name: float(definition["scoring"][name]) for name in factor_names
-        }
+        scoring = {name: float(definition["scoring"][name]) for name in factor_names}
         directions = {name: definition["directions"][name] for name in factor_names}
         meta = {
             "id": strategy_id,
@@ -723,17 +736,14 @@ class MiningCandidateService:
         signature: str,
         asset_type: str,
     ) -> bool:
+        """发布策略源码或复用同名已发布策略, 返回是否为本次新建。"""
         validation = AIStrategyGenerator().validate_code(source)
         if not validation.get("valid"):
-            raise ValueError(
-                f"rendered strategy failed validation: {validation.get('error')}"
-            )
+            raise ValueError(f"rendered strategy failed validation: {validation.get('error')}")
         if validation.get("meta", {}).get("id") != strategy_id:
             raise ValueError("rendered strategy META id is invalid")
         if path.exists() or path.is_symlink():
-            self._verify_existing_source(
-                path, source, strategy_id, run_id, signature, asset_type
-            )
+            self._verify_existing_source(path, source, strategy_id, run_id, signature, asset_type)
             return False
         if self.strategy_engine.has(strategy_id):
             raise ValueError(f"strategy ID already exists: {strategy_id}")
@@ -783,6 +793,7 @@ class MiningCandidateService:
         signature: str,
         asset_type: str,
     ) -> None:
+        """复用同名策略时校验源码内容与溯源元数据一致, 否则拒绝发布。"""
         if path.is_symlink() or not path.is_file():
             raise ValueError("strategy publication target is not a regular file")
         try:
@@ -815,7 +826,7 @@ class MiningCandidateService:
                 path.unlink()
                 self._fsync_directory(path.parent)
             self.strategy_engine.reload()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 回滚中任意失败都要作为异常回填给上层
             return exc
         return None
 
@@ -827,12 +838,13 @@ class MiningCandidateService:
                 path.unlink()
                 self._fsync_directory(path.parent)
             self.strategy_engine.reload()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 回滚中任意失败都要作为异常回填给上层
             return exc
         return None
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
+        """刷写目录项以持久化新建文件; Windows 无对应语义直接跳过。"""
         if os.name == "nt":
             return
         descriptor = os.open(path, os.O_RDONLY)

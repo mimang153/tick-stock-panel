@@ -6,6 +6,7 @@
 
 用法: cd backend && uv run python scripts/bench_factor_materialize.py [--json PATH]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -78,10 +79,15 @@ def _register(names: list[str]) -> None:
     for name in names:
         with contextlib.suppress(ValueError):
             unregister_factor(name)
-        register_definition({
-            "id": name, "label": name, "kind": "custom",
-            "formula": _FORMULAS[name], "status": "active",
-        })
+        register_definition(
+            {
+                "id": name,
+                "label": name,
+                "kind": "custom",
+                "formula": _FORMULAS[name],
+                "status": "active",
+            }
+        )
 
 
 def _time_materialize(frame: pl.DataFrame, names: list[str], repeats: int) -> list[float]:
@@ -130,7 +136,9 @@ def main() -> None:
     )  # +10 因子的热路径绝对增量 (验收: 应近零)
     print(json.dumps(row, ensure_ascii=False, indent=2))
     if args.json_path:
-        Path(args.json_path).write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
+        Path(args.json_path).write_text(
+            json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
 
 if __name__ == "__main__":

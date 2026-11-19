@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -16,6 +17,8 @@ from typing import Any, BinaryIO
 
 import polars as pl
 import psutil
+
+logger = logging.getLogger(__name__)
 
 
 class EnrichedGenerationUnavailableError(RuntimeError):
@@ -95,6 +98,38 @@ def _snapshot(payload: dict[str, Any]) -> EnrichedGenerationSnapshot:
         raise EnrichedGenerationUnavailableError(
             "enriched range generation marker is invalid"
         ) from exc
+    return EnrichedGenerationSnapshot(generation, base, ranges)
+
+
+def _ck_snapshot(asset_type: str) -> EnrichedGenerationSnapshot | None:
+    """从 CK generation 历史重建 range 快照；显式 storage 下的在线权威实现。
+
+    CK 每个 ready generation 带 changed_from，按提交顺序重建 bounded prefix
+    timeline；历史超过上限时折叠更早窗口到 base，语义与本地 marker 一致。
+    """
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is None:
+        return None
+    history = runtime.store.generation_history(asset_type, _MAX_RANGE_GENERATIONS + 1)
+    if not history:
+        return None
+    # 历史按 committed_at 倒序：第一条即当前 generation。
+    current = history[0]
+    generation = str(current["generation_id"])
+    # 全量重建 changed_from=None：所有窗口失效，退化为 base=generation。
+    if current.get("changed_from") is None:
+        return EnrichedGenerationSnapshot(generation, generation)
+    ranges = tuple(
+        (row["changed_from"], str(row["generation_id"]))
+        for row in reversed(history)
+        if row.get("changed_from") is not None
+    )
+    base = ranges[0][1]
+    if len(ranges) > _MAX_RANGE_GENERATIONS:
+        base = ranges[-_MAX_RANGE_GENERATIONS - 1][1]
+        ranges = ranges[-_MAX_RANGE_GENERATIONS:]
     return EnrichedGenerationSnapshot(generation, base, ranges)
 
 
@@ -299,6 +334,10 @@ def get_enriched_generation_snapshot(
     from app.services.daily_health import assert_usable
 
     assert_usable(data_dir, asset_type, enriched_only=True)
+    # 显式 storage 下在线读 CK generation 历史；无 storage 的离线路径读本地 marker。
+    ck_snapshot = _ck_snapshot(asset_type)
+    if ck_snapshot is not None:
+        return ck_snapshot
     path = _marker_path(data_dir, asset_type)
     payload = _read_marker(path)
     if payload is None:
@@ -372,6 +411,29 @@ def enriched_publication_incomplete(
     data_dir: Path,
     asset_type: str = "stock",
 ) -> bool:
+    # 显式 storage 下按 CK publishing 心跳判定；无 storage 的离线路径读本地 marker。
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is not None:
+        publishing = runtime.store.publishing_generations(asset_type)
+        if not publishing:
+            return False
+        now = time.time()
+        for row in publishing:
+            heartbeat = row.get("heartbeat_at")
+            if heartbeat is None:
+                continue
+            try:
+                age = now - heartbeat.timestamp()
+            except (AttributeError, ValueError):
+                # 心跳缺失 (不会被写入) 视为存活: 避免误判自己刚开的 generation。
+                continue
+            # 只把心跳超时的僵死发布视为 incomplete: 心跳新鲜的 publishing 是
+            # 当前 run_pipeline 自己开的 generation, 不能强制自己走全量重建。
+            if age > CLAIM_STALE_SECONDS:
+                return True
+        return False
     try:
         payload = _read_marker(_marker_path(data_dir, asset_type))
     except EnrichedGenerationUnavailableError:
@@ -386,6 +448,21 @@ def enriched_publication_incomplete(
 
 
 def bump_enriched_generation(data_dir: Path, asset_type: str = "stock") -> str:
+    # 显式 storage 下 bump 走 CK：提交新 ready generation（changed_from=None 全量失效），
+    # 与在线 snapshot 消费 CK 保持一致；离线路径仍写本地 marker。
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is not None:
+        store = getattr(runtime, "store", None)
+        if store is not None:
+            generation = store.begin_generation(asset_type, "system", None)
+            store.commit_generation(asset_type, generation, "system")
+            runtime.cache.bump("enriched")
+            return generation
+        # 仅有 cache 的轻量替身（如缓存契约测试）：只推进 cache generation。
+        runtime.cache.bump("enriched")
+        return ""
     path = _marker_path(data_dir, asset_type)
     with _exclusive_generation_lock(data_dir, asset_type):
         current = _read_marker(path)
@@ -395,6 +472,14 @@ def bump_enriched_generation(data_dir: Path, asset_type: str = "stock") -> str:
             )
         generation = uuid.uuid4().hex
         _write_marker(path, _ready_payload(generation))
+        try:
+            from app.storage.runtime import get_storage
+
+            runtime = get_storage()
+            if runtime is not None:
+                runtime.cache.bump("enriched")
+        except Exception as exc:  # noqa: BLE001 - 文件 generation 已提交，缓存失效失败只记录
+            logger.warning("enriched CacheBackend bump 失败: %s", exc)
         return generation
 
 
@@ -698,3 +783,43 @@ class EnrichedPublication:
             },
         )
         self._publishing = True
+
+
+class CKEnrichedPublication(EnrichedPublication):
+    """CK-only 发布适配器：只写 CK 事实表，不落本地 parquet / generation marker。
+
+    显式 storage 下 generation 以 CK `ck_enriched_generation` 为权威，由编排层
+    (run_pipeline) begin/commit；本适配器不触碰本地 marker 文件，仅维护内存态
+    与 changed_from。离线无 storage 路径仍用父类 EnrichedPublication 与 marker。
+    """
+
+    def _locked_claim(self, action):
+        # CK 无本地 marker 可认领：直接执行，发布权威由 CK generation 承担。
+        return action()
+
+    def begin(self) -> None:
+        self._publishing = True
+
+    def heartbeat(self) -> None:
+        # CK generation 心跳由编排层 heartbeat_generation 维护，本地无需续期。
+        return None
+
+    def abandon(self) -> None:
+        # CK generation 失败由编排层 fail_generation 维护；这里只复位内存态。
+        self._publishing = False
+        self._changed = False
+
+    def commit(self) -> str | None:
+        # ready 状态由编排层 commit_generation 写入；重复提交按父类语义返回 None。
+        if not self._changed:
+            self._publishing = False
+            return None
+        self._publishing = False
+        self._changed = False
+        return None
+
+    def write_parquet(self, df: pl.DataFrame, out: Path) -> None:
+        # 接口名沿用 write_parquet 以对齐 EnrichedPublication 编排面；实际只写 CK。
+        self._changed = True
+        self._record_changed_partition(df, out)
+        self._mirror_to_ck(df, out)

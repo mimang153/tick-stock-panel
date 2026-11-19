@@ -3,6 +3,7 @@
 NW t 的黄金值由测试内的独立第二实现 (显式循环求 Bartlett 加权长方差) 推导,
 与 stats_v2 向量化实现互为对拍。
 """
+
 from __future__ import annotations
 
 import math
@@ -71,7 +72,7 @@ def test_newey_west_insufficient_samples() -> None:
 
 def test_bh_fdr_golden() -> None:
     # 经典 BH 示例 (Wikipedia): q = [.005, .02, .042, .042, .042]
-    pvalues = [0.001, 0.008, 0.039, 0.041, 0.042]
+    pvalues: list[float | None] = [0.001, 0.008, 0.039, 0.041, 0.042]
     assert bh_fdr_qvalues(pvalues) == pytest.approx([0.005, 0.02, 0.042, 0.042, 0.042])
     # 乱序输入: q 值跟随原位置 (m=3: .042→r3 raw .042; .001→.003; .039→min(.0585,.042)=.042)
     assert bh_fdr_qvalues([0.042, 0.001, 0.039]) == pytest.approx([0.042, 0.003, 0.042])
@@ -99,12 +100,16 @@ def test_expected_max_sharpe_monotone() -> None:
 
 def test_deflated_sharpe_psr() -> None:
     # 无偏斜无超额峰度时退化为 Φ(SR * sqrt(n-1))
-    probability = deflated_sharpe_psr(sharpe=0.1, n_obs=2500, skewness=0.0, kurtosis=3.0, expected_max_sharpe=0.0)
+    probability = deflated_sharpe_psr(
+        sharpe=0.1, n_obs=2500, skewness=0.0, kurtosis=3.0, expected_max_sharpe=0.0
+    )
     assert probability == pytest.approx(0.5 * (1 + math.erf(0.1 * math.sqrt(2499) / math.sqrt(2))))
     # 校正项抬高分母会降低 PSR
     penalized = deflated_sharpe_psr(0.1, 2500, skewness=0.0, kurtosis=10.0)
+    assert probability is not None and penalized is not None
     assert penalized < probability
     # EM 校正降低显著性
     deflated = deflated_sharpe_psr(0.1, 2500, 0.0, 3.0, expected_max_sharpe=0.08)
+    assert deflated is not None
     assert deflated < probability
     assert deflated_sharpe_psr(0.1, 3) is None  # 样本不足

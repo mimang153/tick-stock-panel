@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, replace
 from datetime import date, timedelta
+from typing import Any, cast
 
 import numpy as np
 import polars as pl
@@ -36,15 +37,17 @@ def _panel(days: int = 12, assets: int = 6) -> pl.DataFrame:
         current = start + timedelta(days=day_id * 2)
         for asset_id in range(assets):
             target = float(asset_id + (day_id % 2) * 0.1)
-            rows.append({
-                "symbol": f"{asset_id:06d}.SZ",
-                "date": current,
-                "good": target,
-                "inverse": -target,
-                "copy": target * 10.0,
-                "noise": float((asset_id * 7 + day_id * 3) % assets),
-                "_next_return": target,
-            })
+            rows.append(
+                {
+                    "symbol": f"{asset_id:06d}.SZ",
+                    "date": current,
+                    "good": target,
+                    "inverse": -target,
+                    "copy": target * 10.0,
+                    "noise": float((asset_id * 7 + day_id * 3) % assets),
+                    "_next_return": target,
+                }
+            )
     return pl.DataFrame(rows)
 
 
@@ -98,13 +101,15 @@ def test_profile_trading_bar_requirements(profile, required_bars, folds):
 
 
 def test_rank_correlation_is_pairwise_finite_symmetric_and_average_ranked():
-    panel = pl.DataFrame({
-        "date": [date(2024, 1, 2)] * 5 + [date(2024, 1, 3)] * 5,
-        "a": [1.0, 1.0, 3.0, np.nan, 5.0, 5.0, 4.0, 3.0, 2.0, 1.0],
-        "b": [2.0, 2.0, 6.0, 8.0, np.inf, 1.0, 2.0, 3.0, 4.0, 5.0],
-        "c": [1.0, None, 2.0, 3.0, 4.0, None, None, None, None, None],
-        "constant": [7.0] * 10,
-    })
+    panel = pl.DataFrame(
+        {
+            "date": [date(2024, 1, 2)] * 5 + [date(2024, 1, 3)] * 5,
+            "a": [1.0, 1.0, 3.0, np.nan, 5.0, 5.0, 4.0, 3.0, 2.0, 1.0],
+            "b": [2.0, 2.0, 6.0, 8.0, np.inf, 1.0, 2.0, 3.0, 4.0, 5.0],
+            "c": [1.0, None, 2.0, 3.0, 4.0, None, None, None, None, None],
+            "constant": [7.0] * 10,
+        }
+    )
 
     result = compute_rank_correlation(
         panel,
@@ -129,21 +134,25 @@ def test_rank_correlation_is_pairwise_finite_symmetric_and_average_ranked():
     daily_correlations = []
     for daily in panel.partition_by("date"):
         valid = daily.filter(pl.col("a").is_finite() & pl.col("b").is_finite())
-        daily_correlations.append(np.corrcoef(
-            valid["a"].rank(method="average").to_numpy(),
-            valid["b"].rank(method="average").to_numpy(),
-        )[0, 1])
+        daily_correlations.append(
+            np.corrcoef(
+                valid["a"].rank(method="average").to_numpy(),
+                valid["b"].rank(method="average").to_numpy(),
+            )[0, 1]
+        )
     assert daily_correlations == pytest.approx([1.0, -1.0])
     assert matrix[0, 1] == pytest.approx(np.mean(daily_correlations))
 
 
 def test_rank_correlation_reranks_after_pairwise_finite_intersection():
-    panel = pl.DataFrame({
-        "date": [date(2024, 1, 2)] * 4,
-        "a": [1.0, 2.0, 3.0, 4.0],
-        "b": [10.0, None, 20.0, 30.0],
-        "c": [None, 10.0, 20.0, 30.0],
-    })
+    panel = pl.DataFrame(
+        {
+            "date": [date(2024, 1, 2)] * 4,
+            "a": [1.0, 2.0, 3.0, 4.0],
+            "b": [10.0, None, 20.0, 30.0],
+            "c": [None, 10.0, 20.0, 30.0],
+        }
+    )
 
     result = compute_rank_correlation(panel, ["a", "b", "c"])
     matrix = np.asarray(result.matrix)
@@ -225,9 +234,7 @@ def test_beam_search_learns_direction_from_train_and_honors_real_proxy_budget():
     assert first.budget_exhausted is True
     assert first.candidates == second.candidates == reversed_rows.candidates
     inverse = next(
-        candidate
-        for candidate in first.candidates
-        if candidate.factor_names == ("inverse",)
+        candidate for candidate in first.candidates if candidate.factor_names == ("inverse",)
     )
     assert inverse.directions == (-1,)
     assert all(len(candidate.factor_names) <= 4 for candidate in first.candidates)
@@ -324,7 +331,7 @@ class _AlternatingWinnerEvaluator(_Evaluator):
     def evaluate_candidate(self, train, test, definition):
         self.calls.append((_frame_labels(train), _frame_labels(test), dict(definition)))
         prefer_good = _frame_labels(test)[0] < "2024-01-25"
-        names = definition.get("factor_names") or ()
+        names: Any = definition.get("factor_names") or ()
         is_good = bool(names) and names[0] == "good"
         return {"score": 2.0 if is_good == prefer_good else 1.0}
 
@@ -338,19 +345,17 @@ class _LabelEvaluator(_Evaluator):
         raise AssertionError("label evaluator must not receive fold DataFrames")
 
     def evaluate_candidate_labels(self, train_labels, test_labels, definition):
-        self.label_calls.append((
-            tuple(train_labels),
-            tuple(test_labels),
-            dict(definition),
-        ))
+        self.label_calls.append(
+            (
+                tuple(train_labels),
+                tuple(test_labels),
+                dict(definition),
+            )
+        )
         return {"score": len(definition.get("factor_names", ())) or 0.1}
 
 
-@pytest.mark.parametrize("evaluator_type", [_Evaluator, _LabelEvaluator])
-def test_mining_service_reselects_per_inner_fold_and_keeps_tests_out_of_selection(
-    evaluator_type,
-):
-    panel = _panel(days=10)
+def _reselect_exploratory_request():
     validation = NestedValidationConfig(
         outer_train_bars=8,
         outer_test_bars=2,
@@ -362,7 +367,7 @@ def test_mining_service_reselects_per_inner_fold_and_keeps_tests_out_of_selectio
         embargo_bars=0,
         min_train_bars=4,
     )
-    request = MiningRequest(
+    return MiningRequest(
         factor_names=("good", "copy", "inverse", "noise"),
         correlation_threshold=0.95,
         budget=MiningBudget(
@@ -374,13 +379,9 @@ def test_mining_service_reselects_per_inner_fold_and_keeps_tests_out_of_selectio
         validation=validation,
         profile="exploratory",
     )
-    folds = generate_nested_folds(
-        sorted(str(value) for value in panel["date"].unique().to_list()),
-        validation,
-    )
-    assert len(folds) == 1
-    metric_calls: list[tuple[str, ...]] = []
 
+
+def _reselect_metric_provider(request, metric_calls):
     def metric_provider(train, factor_names):
         assert tuple(factor_names) == request.factor_names
         labels = tuple(
@@ -391,15 +392,10 @@ def test_mining_service_reselects_per_inner_fold_and_keeps_tests_out_of_selectio
         metric_calls.append(labels)
         return _metrics()
 
-    evaluator = evaluator_type()
-    result = MiningService().run(
-        panel,
-        request,
-        metric_provider=metric_provider,
-        evaluator=evaluator,
-    )
+    return metric_provider
 
-    nested = folds[0]
+
+def _assert_reselection_calls(result, request, nested, metric_calls, evaluator):
     expected_selection_labels = [
         *(inner.train_labels for inner in nested.inner),
         nested.outer.train_labels,
@@ -408,9 +404,7 @@ def test_mining_service_reselects_per_inner_fold_and_keeps_tests_out_of_selectio
     assert result.trials_used == request.budget.max_trials
     assert result.proxy_trials_used <= request.budget.max_proxy_trials
     evaluator_calls = (
-        evaluator.label_calls
-        if isinstance(evaluator, _LabelEvaluator)
-        else evaluator.calls
+        evaluator.label_calls if isinstance(evaluator, _LabelEvaluator) else evaluator.calls
     )
     assert len(evaluator_calls) == len(nested.inner) + 1
     for call, inner in zip(evaluator_calls[:-1], nested.inner, strict=True):
@@ -429,32 +423,44 @@ def test_mining_service_reselects_per_inner_fold_and_keeps_tests_out_of_selectio
     )
     assert outer_definition == selected.definition()
 
+
+def _assert_outer_test_data_excluded_from_selection(panel, request, nested):
     changed = panel.with_columns(
-        pl.when(
-            pl.col("date")
-            .cast(pl.Utf8)
-            .str.slice(0, 10)
-            .is_in(nested.outer.test_labels)
-        )
+        pl.when(pl.col("date").cast(pl.Utf8).str.slice(0, 10).is_in(nested.outer.test_labels))
         .then(-pl.col("good") * 999.0)
         .otherwise(pl.col("good"))
         .alias("good")
     )
-    without_evaluation = MiningService().run(
-        panel,
-        request,
-        factor_metrics=_metrics(),
-    )
-    changed_result = MiningService().run(
-        changed,
-        request,
-        factor_metrics=_metrics(),
-    )
+    without_evaluation = MiningService().run(panel, request, factor_metrics=_metrics())
+    changed_result = MiningService().run(changed, request, factor_metrics=_metrics())
     assert without_evaluation.folds[0].selected_factors == (
         changed_result.folds[0].selected_factors
     )
     assert without_evaluation.folds[0].candidates == changed_result.folds[0].candidates
 
+
+@pytest.mark.parametrize("evaluator_type", [_Evaluator, _LabelEvaluator])
+def test_mining_service_reselects_per_inner_fold_and_keeps_tests_out_of_selection(
+    evaluator_type,
+):
+    panel = _panel(days=10)
+    request = _reselect_exploratory_request()
+    folds = generate_nested_folds(
+        sorted(str(value) for value in panel["date"].unique().to_list()),
+        request.validation,
+    )
+    assert len(folds) == 1
+    metric_calls: list[tuple[str, ...]] = []
+    evaluator = evaluator_type()
+    result = MiningService().run(
+        panel,
+        request,
+        metric_provider=_reselect_metric_provider(request, metric_calls),
+        evaluator=evaluator,
+    )
+    nested = folds[0]
+    _assert_reselection_calls(result, request, nested, metric_calls, evaluator)
+    _assert_outer_test_data_excluded_from_selection(panel, request, nested)
     with pytest.raises(ValueError, match="requires at least 3 outer folds"):
         MiningService().run(
             panel,
@@ -489,21 +495,24 @@ def test_mining_service_requires_fold_local_metrics_with_evaluator():
             panel,
             request,
             factor_metrics=(FactorMetric("good", 1.0, 1.0, 1.0, 0.1),),
-            metric_provider=lambda _train, _names: (
-                FactorMetric("good", 1.0, 1.0, 1.0, 0.1),
-            ),
+            metric_provider=lambda _train, _names: (FactorMetric("good", 1.0, 1.0, 1.0, 0.1),),
             evaluator=_Evaluator(),
         )
 
 
-def test_target_endpoint_is_removed_from_every_train_phase_but_not_tests(monkeypatch):
+def _panel_with_target_dates():
     panel = _panel(days=10)
     labels = sorted(panel["date"].unique().to_list())
-    target_dates = pl.DataFrame({
-        "date": labels,
-        "_target_date": [*labels[1:], labels[-1] + timedelta(days=2)],
-    })
-    panel = panel.join(target_dates, on="date", how="left")
+    target_dates = pl.DataFrame(
+        {
+            "date": labels,
+            "_target_date": [*labels[1:], labels[-1] + timedelta(days=2)],
+        }
+    )
+    return panel.join(target_dates, on="date", how="left"), labels
+
+
+def _target_endpoint_request():
     validation = NestedValidationConfig(
         outer_train_bars=8,
         outer_test_bars=2,
@@ -515,17 +524,43 @@ def test_target_endpoint_is_removed_from_every_train_phase_but_not_tests(monkeyp
         embargo_bars=0,
         min_train_bars=4,
     )
-    request = MiningRequest(
+    return MiningRequest(
         factor_names=("good",),
         budget=MiningBudget(max_combination_size=1, max_proxy_trials=12, max_trials=3),
         validation=validation,
         profile="exploratory",
     )
-    nested = generate_nested_folds([str(label) for label in labels], validation)[0]
+
+
+def _assert_target_endpoint_frames(
+    result, nested, metric_frames, correlation_frames, beam_frames, evaluator
+):
+    assert result.folds[0].error is None
+    assert len(metric_frames) == len(correlation_frames) == len(beam_frames) == 3
+    evaluation_folds = [*nested.inner, nested.outer]
+    assert len(evaluator.calls) == len(evaluation_folds)
+    for (train_labels, test_labels, _), test_frame, fold in zip(
+        evaluator.calls,
+        evaluator.test_frames,
+        evaluation_folds,
+        strict=True,
+    ):
+        assert train_labels == fold.train_labels[:-1]
+        assert test_labels == fold.test_labels
+        assert test_frame.height == len(fold.test_labels) * 6
+        assert not test_frame.filter(
+            pl.col("_target_date").cast(pl.Utf8).str.slice(0, 10) > fold.test_end
+        ).is_empty()
+
+
+def test_target_endpoint_is_removed_from_every_train_phase_but_not_tests(monkeypatch):
+    panel, labels = _panel_with_target_dates()
+    request = _target_endpoint_request()
+    nested = generate_nested_folds([str(label) for label in labels], request.validation)[0]
     train_ends = [*(inner.train_end for inner in nested.inner), nested.outer.train_end]
-    metric_frames = []
-    correlation_frames = []
-    beam_frames = []
+    metric_frames: list[Any] = []
+    correlation_frames: list[Any] = []
+    beam_frames: list[Any] = []
 
     def assert_target_bounded(frame, train_end):
         assert frame.filter(
@@ -573,23 +608,9 @@ def test_target_endpoint_is_removed_from_every_train_phase_but_not_tests(monkeyp
         metric_provider=metric_provider,
         evaluator=evaluator,
     )
-
-    assert result.folds[0].error is None
-    assert len(metric_frames) == len(correlation_frames) == len(beam_frames) == 3
-    evaluation_folds = [*nested.inner, nested.outer]
-    assert len(evaluator.calls) == len(evaluation_folds)
-    for (train_labels, test_labels, _), test_frame, fold in zip(
-        evaluator.calls,
-        evaluator.test_frames,
-        evaluation_folds,
-        strict=True,
-    ):
-        assert train_labels == fold.train_labels[:-1]
-        assert test_labels == fold.test_labels
-        assert test_frame.height == len(fold.test_labels) * 6
-        assert not test_frame.filter(
-            pl.col("_target_date").cast(pl.Utf8).str.slice(0, 10) > fold.test_end
-        ).is_empty()
+    _assert_target_endpoint_frames(
+        result, nested, metric_frames, correlation_frames, beam_frames, evaluator
+    )
 
 
 def test_outer_refit_fails_when_selected_factor_structure_is_missing():
@@ -665,9 +686,7 @@ def test_candidate_evaluation_dataclass_score_must_be_finite():
     result = MiningService().run(
         panel,
         request,
-        metric_provider=lambda _train, _names: (
-            FactorMetric("good", 1.0, 1.0, 1.0, 0.1),
-        ),
+        metric_provider=lambda _train, _names: (FactorMetric("good", 1.0, 1.0, 1.0, 0.1),),
         evaluator=NonFiniteEvaluator(),
     )
 
@@ -701,15 +720,16 @@ def test_beam_search_skips_factors_without_sufficient_valid_observations():
 
     assert result.candidates
     assert all(
-        set(candidate.factor_names) <= {"good", "valid_inverse"}
-        for candidate in result.candidates
+        set(candidate.factor_names) <= {"good", "valid_inverse"} for candidate in result.candidates
     )
     assert {candidate.factor_names for candidate in result.candidates} >= {
         ("good",),
         ("valid_inverse",),
         ("good", "valid_inverse"),
     }
-    assert all(candidate.dates > 0 and candidate.observations >= 3 for candidate in result.candidates)
+    assert all(
+        candidate.dates > 0 and candidate.observations >= 3 for candidate in result.candidates
+    )
     assert invalid_only.candidates == ()
 
 
@@ -830,7 +850,7 @@ def test_winner_definitions_are_cross_evaluated_on_all_outer_folds():
     assert len(winners) == 2
     for fold in result.folds:
         cross_ids = [candidate_id for candidate_id, _ in fold.cross_evaluations]
-        assert cross_ids == sorted(winners - {fold.selected_candidate_id})
+        assert cross_ids == sorted(cast(Any, winners - {fold.selected_candidate_id}))
         for _, evaluation in fold.cross_evaluations:
             assert evaluation.error is None
 
@@ -870,9 +890,7 @@ def test_benchmarks_run_even_when_factor_track_fails_on_a_fold():
     fold = result.folds[0]
     assert fold.error == "no candidate completed inner validation within budget"
     assert fold.selected_candidate_id is None
-    assert [candidate_id for candidate_id, _ in fold.benchmark_evaluations] == [
-        "strategy:alpha"
-    ]
+    assert [candidate_id for candidate_id, _ in fold.benchmark_evaluations] == ["strategy:alpha"]
     benchmark = fold.benchmark_evaluations[0][1]
     assert benchmark.error == "backtest exploded"
 

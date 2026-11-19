@@ -7,6 +7,7 @@
 已存在(含用户已自行迁移的同名策略)一律不覆盖; 标记保证一次性,
 删除后重启不复活。
 """
+
 from __future__ import annotations
 
 import logging
@@ -36,13 +37,8 @@ def _has_upgrade_traces(data_dir: Path) -> bool:
 def seed_missing_builtins(data_dir: Path) -> int:
     """仅升级用户: 把内置策略种子按文件名补入 data/strategies/custom。
 
-    - 幂等: ``.seeded_v1`` 标记存在 (无论目录后来是否被清空) 不再种入。
-    - 新用户 (无旧版使用痕迹) 跳过并落标记 — 新版本没有内置策略,
-      新装策略库保持为空; 之后再拉数据/用久了也不会回头种 (标记已落)。
-    - 仅写缺失的同名文件, 已有一律不覆盖: 已自行迁移过的老环境零写入,
-      只迁移了一部分的按缺口补全。
-    - 写入前逐一过 _validate_safety (种子随包分发, 纵深防御),
-      校验失败跳过该文件不阻断启动。
+    幂等标记 ``.seeded_v1`` 保证一次性; 新装无旧版痕迹则跳过并落标记。
+    只补缺失的同名文件, 已有的一律不覆盖; 写入前过 _validate_safety。
     """
     custom_dir = data_dir / "strategies" / "custom"
     custom_dir.mkdir(parents=True, exist_ok=True)

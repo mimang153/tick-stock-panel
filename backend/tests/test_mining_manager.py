@@ -144,9 +144,7 @@ def test_start_records_states_events_progress_and_worker_payload(
     assert terminal["started_at"] is not None
     assert terminal["finished_at"] is not None
     assert manager.store.read_summary(run_id) == result
-    _wait_for_event_types(
-        manager, run_id, ["queued", "running", "progress", "succeeded"]
-    )
+    _wait_for_event_types(manager, run_id, ["queued", "running", "progress", "succeeded"])
 
 
 def test_start_accepts_valid_persistent_run_id(make_manager) -> None:
@@ -245,9 +243,7 @@ def test_cancel_while_waiting_for_capacity_never_calls_runner(
         assert cancelling["status"] == "cancelling"
         _wait_for_status(manager, run_id, "cancelled")
         assert not runner_called.is_set()
-        _wait_for_event_types(
-            manager, run_id, ["queued", "cancelling", "cancelled"]
-        )
+        _wait_for_event_types(manager, run_id, ["queued", "cancelling", "cancelled"])
     finally:
         isolated_limiter.release("mining")
 
@@ -316,9 +312,7 @@ def test_budget_exhausted_result_uses_distinct_success_status(make_manager) -> N
 
     _wait_for_status(manager, run_id, "succeeded_with_budget_exhausted")
     assert manager.store.read_summary(run_id) == result
-    _wait_for_event_types(
-        manager, run_id, ["queued", "running", "succeeded_with_budget_exhausted"]
-    )
+    _wait_for_event_types(manager, run_id, ["queued", "running", "succeeded_with_budget_exhausted"])
 
 
 def test_recover_interrupted_delegates_to_store(make_manager) -> None:

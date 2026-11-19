@@ -1,0 +1,6 @@
+<!-- 开发环境覆盖: 全量 pytest 会并发创建多张带前缀的测试表, 3.2 GiB 上限实测不足。
+     仅由 docker-compose.dev.yml 挂载; 生产仍使用 40-tsp-container.xml 的保守上限。 -->
+<clickhouse>
+    <max_server_memory_usage>4500000000</max_server_memory_usage>
+    <max_server_memory_usage_to_ram_ratio>0.9</max_server_memory_usage_to_ram_ratio>
+</clickhouse>

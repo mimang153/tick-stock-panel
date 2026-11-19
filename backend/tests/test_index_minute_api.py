@@ -1,8 +1,10 @@
 """指数分钟 API 契约: 历史日期路由与 TTL 缓存。"""
+
 from __future__ import annotations
 
 from datetime import date, timedelta
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import polars as pl
@@ -20,12 +22,14 @@ def fixed_context(monkeypatch):
     indices._index_minute_cache.clear()
 
 
-def _request() -> SimpleNamespace:
+def _request() -> Any:
     repo = MagicMock()
-    repo.get_index_instruments.return_value = pl.DataFrame({
-        "symbol": ["000001.SH"],
-        "name": ["上证指数"],
-    })
+    repo.get_index_instruments.return_value = pl.DataFrame(
+        {
+            "symbol": ["000001.SH"],
+            "name": ["上证指数"],
+        }
+    )
     return SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(repo=repo, capabilities=MagicMock())),
     )
@@ -53,8 +57,12 @@ def test_today_result_cached_within_ttl():
     """当日请求走数据源, 10s 内同代码同日的重复轮询命中缓存只打一次数据源。"""
     indices._index_minute_cache.clear()
     with patch.object(indices.kline_sync, "fetch_minute_single", return_value=_bars()) as fetch:
-        first = indices.get_index_minute(_request(), symbol="000001.SH", trade_date=indices.cn_today())
-        second = indices.get_index_minute(_request(), symbol="000001.SH", trade_date=indices.cn_today())
+        first = indices.get_index_minute(
+            _request(), symbol="000001.SH", trade_date=indices.cn_today()
+        )
+        second = indices.get_index_minute(
+            _request(), symbol="000001.SH", trade_date=indices.cn_today()
+        )
     fetch.assert_called_once()
     assert first["source"] == "live"
     assert len(first["rows"]) == 1

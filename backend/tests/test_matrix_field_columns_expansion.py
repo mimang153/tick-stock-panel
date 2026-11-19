@@ -6,6 +6,7 @@ META["scoring"] 为空。每日信号/实时矩阵路径通过 _matrix_field_col
 (limit_up_count_* -> consecutive_limit_ups), 否则 compute_signals 抛
 "MarketDataMatrix missing field: consecutive_limit_ups"。
 """
+
 from __future__ import annotations
 
 import types
@@ -42,19 +43,21 @@ def test_mined_limit_up_strategy_signals_build_from_panel_fields():
     start = date(2024, 1, 1)
     for offset in range(80):
         close = 10.0 + offset * 0.04
-        rows.append({
-            "symbol": "000001.SZ",
-            "date": start + timedelta(days=offset),
-            "open": close - 0.05,
-            "high": close + 0.15,
-            "low": close - 0.15,
-            "close": close,
-            "volume": 1000.0 + offset * 5.0,
-            "amount": 100000.0,
-            "amplitude": 1.5,
-            "turnover_rate": 5.0,
-            "consecutive_limit_ups": (offset % 17) + 1 if offset % 17 == 0 else 0,
-        })
+        rows.append(
+            {
+                "symbol": "000001.SZ",
+                "date": start + timedelta(days=offset),
+                "open": close - 0.05,
+                "high": close + 0.15,
+                "low": close - 0.15,
+                "close": close,
+                "volume": 1000.0 + offset * 5.0,
+                "amount": 100000.0,
+                "amplitude": 1.5,
+                "turnover_rate": 5.0,
+                "consecutive_limit_ups": (offset % 17) + 1 if offset % 17 == 0 else 0,
+            }
+        )
     panel = pl.DataFrame(rows)
     strategy = _mined_limit_up_strategy()
     market = build_market_data_matrix(

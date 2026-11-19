@@ -11,6 +11,7 @@
 达标判据与检验页服务端判读同源 (|t_NW| / BH q / |IC| / |IR|), 按档放宽或收紧;
 q 值缺失时按"通过"处理 (探索档小样本下 BH 校正保守)。
 """
+
 from __future__ import annotations
 
 import math
@@ -84,7 +85,7 @@ def _short_reason(reason: str) -> str:
 
 def _finite_or_none(value: Any) -> float | None:
     """NaN/Inf 一律归 None, 避免写入任务存储时产生非法 JSON。"""
-    if isinstance(value, (int, float)) and math.isfinite(value):
+    if isinstance(value, int | float) and math.isfinite(value):
         return float(value)
     return None
 
@@ -100,6 +101,95 @@ def _metric_row(item: dict[str, Any]) -> dict[str, Any]:
         "q": _finite_or_none(item.get("q_value")),
         "direction": 1 if (item.get("ic_mean") or 0) >= 0 else -1,
     }
+
+
+def _run_batch_screen(
+    engine: Any,
+    asset_type: str,
+    start: date | None,
+    end: date,
+) -> tuple[list[str], date, list[Any], float]:
+    candidates = [
+        str(item["id"])
+        for item in factor_columns_view()
+        if asset_type in item.get("asset_types", ["stock"])
+    ]
+    screen_start = max(start or date.min, end - timedelta(days=SCREEN_WINDOW_DAYS))
+    began = time.perf_counter()
+    service = FactorBacktestService(engine)
+    batch = service.run_batch(
+        FactorBatchConfig(
+            factor_names=candidates,
+            symbols=None,
+            start=screen_start,
+            end=end,
+            rebalance="daily",
+            asset_type=asset_type,
+        )
+    )
+    elapsed_ms = round((time.perf_counter() - began) * 1000, 1)
+    return candidates, screen_start, batch.results, elapsed_ms
+
+
+def _classify_results(
+    candidates: list[str],
+    results: list[Any],
+    gate: ScreenGate,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    qualified: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    by_name = {str(getattr(item, "factor_name", None)): item for item in results}
+    for name in candidates:
+        item = by_name.get(name)
+        if item is None:
+            failed.append(
+                {
+                    "factor_name": name,
+                    "label": name,
+                    "group": "",
+                    "ic": None,
+                    "ir": None,
+                    "t": None,
+                    "q": None,
+                    "reason": "未返回结果",
+                }
+            )
+            continue
+        # 非有限值先清洗 (NaN 与任何比较均为 False, 会绕过门槛误判达标)
+        reason = classify_factor(
+            {
+                "error": getattr(item, "error", None),
+                "ic_mean": _finite_or_none(getattr(item, "ic_mean", None)),
+                "ir": _finite_or_none(getattr(item, "ir", None)),
+                "t_newey_west": _finite_or_none(getattr(item, "t_newey_west", None)),
+                "q_value": _finite_or_none(getattr(item, "q_value", None)),
+            },
+            gate,
+        )
+        row = _metric_row(
+            {
+                "factor_name": getattr(item, "factor_name", None),
+                "label": getattr(item, "label", None),
+                "group": getattr(item, "group", None),
+                "ic_mean": getattr(item, "ic_mean", None),
+                "ir": getattr(item, "ir", None),
+                "t_newey_west": getattr(item, "t_newey_west", None),
+                "q_value": getattr(item, "q_value", None),
+            }
+        )
+        if reason is None:
+            qualified.append(row)
+        else:
+            failed.append({**row, "reason": reason})
+    return qualified, failed
+
+
+def _count_reasons(failed: list[dict[str, Any]]) -> dict[str, int]:
+    reason_counts: dict[str, int] = {}
+    for row in failed:
+        category = _short_reason(row["reason"])
+        reason_counts[category] = reason_counts.get(category, 0) + 1
+    return reason_counts
 
 
 def screen_all_factors(
@@ -119,64 +209,16 @@ def screen_all_factors(
     if gate is None:
         raise ValueError(f"unknown mining profile: {profile}")
 
-    candidates = [
-        str(item["id"])
-        for item in factor_columns_view()
-        if asset_type in item.get("asset_types", ["stock"])
-    ]
-    screen_start = max(start or date.min, end - timedelta(days=SCREEN_WINDOW_DAYS))
-    began = time.perf_counter()
-    service = FactorBacktestService(engine)
-    batch = service.run_batch(FactorBatchConfig(
-        factor_names=candidates,
-        symbols=None,
-        start=screen_start,
-        end=end,
-        rebalance="daily",
-        asset_type=asset_type,
-    ))
-    elapsed_ms = round((time.perf_counter() - began) * 1000, 1)
-
-    qualified: list[dict[str, Any]] = []
-    failed: list[dict[str, Any]] = []
-    by_name = {str(getattr(item, "factor_name", None)): item for item in batch.results}
-    for name in candidates:
-        item = by_name.get(name)
-        if item is None:
-            failed.append({"factor_name": name, "label": name, "group": "",
-                           "ic": None, "ir": None, "t": None, "q": None,
-                           "reason": "未返回结果"})
-            continue
-        # 非有限值先清洗 (NaN 与任何比较均为 False, 会绕过门槛误判达标)
-        reason = classify_factor({
-            "error": getattr(item, "error", None),
-            "ic_mean": _finite_or_none(getattr(item, "ic_mean", None)),
-            "ir": _finite_or_none(getattr(item, "ir", None)),
-            "t_newey_west": _finite_or_none(getattr(item, "t_newey_west", None)),
-            "q_value": _finite_or_none(getattr(item, "q_value", None)),
-        }, gate)
-        row = _metric_row({
-            "factor_name": getattr(item, "factor_name", None),
-            "label": getattr(item, "label", None),
-            "group": getattr(item, "group", None),
-            "ic_mean": getattr(item, "ic_mean", None),
-            "ir": getattr(item, "ir", None),
-            "t_newey_west": getattr(item, "t_newey_west", None),
-            "q_value": getattr(item, "q_value", None),
-        })
-        if reason is None:
-            qualified.append(row)
-        else:
-            failed.append({**row, "reason": reason})
+    candidates, screen_start, results, elapsed_ms = _run_batch_screen(
+        engine, asset_type, start, end
+    )
+    qualified, failed = _classify_results(candidates, results, gate)
 
     # 池按 |IC|*|IR| 降序 (截面信噪比口径), 截断到挖掘上限
     qualified.sort(key=lambda row: abs(row["ic"] or 0.0) * abs(row["ir"] or 0.0), reverse=True)
     pool = [row["factor_name"] for row in qualified[:max_factors]]
 
-    reason_counts: dict[str, int] = {}
-    for row in failed:
-        category = _short_reason(row["reason"])
-        reason_counts[category] = reason_counts.get(category, 0) + 1
+    reason_counts = _count_reasons(failed)
 
     return {
         "profile": profile,

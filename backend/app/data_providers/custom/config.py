@@ -1,4 +1,5 @@
 """Custom HTTP data source configuration."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -7,13 +8,17 @@ from typing import Any, Literal
 
 import yaml
 
-DatasetName = Literal["daily", "adj_factor", "realtime", "minute", "depth5", "full_minute", "financial"]
+DatasetName = Literal[
+    "daily", "adj_factor", "realtime", "minute", "depth5", "full_minute", "financial"
+]
 DEFAULT_TIMEOUT = 30.0
 MAX_TIMEOUT = 300.0
 
 
 @dataclass(frozen=True)
 class AuthConfig:
+    """鉴权配置：凭据环境变量名与请求头/参数位置。"""
+
     type: str = "none"
     token_env: str | None = None
     header: str = "Authorization"
@@ -22,6 +27,8 @@ class AuthConfig:
 
 @dataclass(frozen=True)
 class DatasetConfig:
+    """单个数据集的请求模板与响应字段映射配置。"""
+
     url: str
     method: str = "GET"
     batch: int | None = None
@@ -44,6 +51,8 @@ class DatasetConfig:
 
 @dataclass(frozen=True)
 class CustomSourceConfig:
+    """自定义数据源的顶层不可变配置。"""
+
     name: str
     display_name: str
     auth: AuthConfig = field(default_factory=AuthConfig)
@@ -51,6 +60,7 @@ class CustomSourceConfig:
     path: Path | None = None
 
     def has_dataset(self, name: DatasetName) -> bool:
+        """声明该源是否提供指定数据集。"""
         return name in self.datasets
 
 
@@ -94,7 +104,8 @@ def _dataset_from_dict(raw: dict[str, Any]) -> DatasetConfig:
         params=dict(raw.get("params") or {}),
         body=dict(raw.get("body") or {}),
         symbols_param=str(raw.get("symbols_param", "symbols") or "symbols").strip() or "symbols",
-        start_param=str(raw.get("start_param", "start_time") or "start_time").strip() or "start_time",
+        start_param=str(raw.get("start_param", "start_time") or "start_time").strip()
+        or "start_time",
         end_param=str(raw.get("end_param", "end_time") or "end_time").strip() or "end_time",
         asset_type_param=(str(raw.get("asset_type_param") or "").strip() or None),
         freq_param=(str(raw.get("freq_param") or "").strip() or None),
@@ -106,7 +117,9 @@ def config_from_dict(raw: dict[str, Any], path: Path | None = None) -> CustomSou
     datasets = {
         name: _dataset_from_dict(cfg)
         for name, cfg in (raw.get("datasets") or {}).items()
-        if name in {"daily", "adj_factor", "realtime", "minute", "depth5", "full_minute", "financial"} and isinstance(cfg, dict)
+        if name
+        in {"daily", "adj_factor", "realtime", "minute", "depth5", "full_minute", "financial"}
+        and isinstance(cfg, dict)
     }
     default_name = path.stem if path else "preview"
     name = str(raw.get("name", default_name) or default_name).lower()

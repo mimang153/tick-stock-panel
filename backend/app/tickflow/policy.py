@@ -7,6 +7,7 @@
 
 Tier Label 算法见 §5.3:基线档 + 补丁能力。
 """
+
 from __future__ import annotations
 
 import json
@@ -18,8 +19,8 @@ from typing import Any
 
 import yaml
 
-from app.config import settings
 from app import secrets_store
+from app.config import settings
 
 from .capabilities import Cap, CapabilityLimits, CapabilitySet
 
@@ -71,17 +72,22 @@ def _is_transient(e: Exception) -> bool:
     """
     cls = e.__class__.__name__
     if cls in {
-        "RateLimitError", "InternalServerError", "APIError",
-        "ConnectionError", "TimeoutError", "ConnectError",
-        "ConnectTimeout", "ReadTimeout", "RemoteProtocolError",
-        "httpx.ConnectError", "httpx.TimeoutException",
+        "RateLimitError",
+        "InternalServerError",
+        "APIError",
+        "ConnectionError",
+        "TimeoutError",
+        "ConnectError",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "RemoteProtocolError",
+        "httpx.ConnectError",
+        "httpx.TimeoutException",
     }:
         return True
     # APIError 体系下,status_code 5xx/429 视为瞬时
     status = getattr(e, "status_code", None)
-    if isinstance(status, int) and (status == 429 or status >= 500):
-        return True
-    return False
+    return isinstance(status, int) and (status == 429 or status >= 500)
 
 
 def _call_with_retry(fn, attempts: int = 3, backoff: float = 0.6) -> None:
@@ -94,7 +100,7 @@ def _call_with_retry(fn, attempts: int = 3, backoff: float = 0.6) -> None:
         try:
             fn()
             return
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             last_exc = e
             # 权限/参数类错误:重试无意义,立即抛出交给 try_call 归类
             if not _is_transient(e):
@@ -107,6 +113,134 @@ def _call_with_retry(fn, attempts: int = 3, backoff: float = 0.6) -> None:
     raise last_exc
 
 
+def _build_probe_client():
+    from tickflow import TickFlow
+
+    from .client import PAID_ENDPOINT, _base_url
+
+    key = secrets_store.get_tickflow_key()
+    # 探测专用客户端:强制走付费端点验证 key。
+    # base_url 用用户自定义端点(若已配置测速切换),否则默认 api.tickflow.org。
+    probe_base = _base_url() or PAID_ENDPOINT
+    logger.info("开始能力探测 (付费端点=%s, SDK默认超时=30s×重试3)", probe_base)
+    return TickFlow(api_key=key, base_url=probe_base)
+
+
+def _classify_probe_error(exc: Exception) -> str:
+    msg = str(exc).lower()
+    cls = exc.__class__.__name__
+    # PermissionError 类名 / HTTP 403 / 中英文权限关键词都算"明确无权限"
+    if (
+        cls in {"PermissionError", "AuthorizationError"}
+        or "permission" in msg
+        or "unauthorized" in msg
+        or "403" in msg
+        or "forbidden" in msg
+        or "套餐" in msg
+        or "权限" in msg
+        or "需要" in msg
+    ):
+        return "perm"
+    return "transient" if _is_transient(exc) else "other"
+
+
+def _probe_pool(tf):
+    unis = tf.universes.list()
+    if not unis:
+        raise RuntimeError("no universes available")
+    first_id = unis[0]["id"] if isinstance(unis[0], dict) else unis[0].id
+    return tf.quotes.get_by_universes([first_id], as_dataframe=False)
+
+
+def _probe_cap_calls(tf) -> list[tuple[Cap, Any]]:
+    # 全部用 keyword-only 形式调用,符合 SDK 真实签名
+    return [
+        (Cap.QUOTE_BY_SYMBOL, lambda: tf.quotes.get(symbols=[_PROBE_SYMBOL], as_dataframe=False)),
+        (Cap.QUOTE_BATCH, lambda: tf.quotes.get_by_symbols([_PROBE_SYMBOL], as_dataframe=False)),
+        (Cap.QUOTE_POOL, lambda: _probe_pool(tf)),
+        (
+            Cap.KLINE_DAILY_BY_SYMBOL,
+            lambda: tf.klines.get(_PROBE_SYMBOL, period="1d", count=1, as_dataframe=False),
+        ),
+        (
+            Cap.KLINE_DAILY_BATCH,
+            lambda: tf.klines.batch([_PROBE_SYMBOL], period="1d", count=1, as_dataframe=False),
+        ),
+        (
+            Cap.KLINE_MINUTE_BY_SYMBOL,
+            lambda: tf.klines.get(_PROBE_SYMBOL, period="1m", count=1, as_dataframe=False),
+        ),
+        (
+            Cap.KLINE_MINUTE_BATCH,
+            lambda: tf.klines.batch([_PROBE_SYMBOL], period="1m", count=1, as_dataframe=False),
+        ),
+        (Cap.INTRADAY, lambda: tf.klines.intraday(_PROBE_SYMBOL, count=1, as_dataframe=False)),
+        (
+            Cap.INTRADAY_BATCH,
+            lambda: tf.klines.intraday_batch([_PROBE_SYMBOL], count=1, as_dataframe=False),
+        ),
+        (
+            Cap.INTRADAY_UNIVERSE,
+            lambda: tf.klines.intraday_universe("CN_Equity_A", count=1, as_dataframe=False),
+        ),
+        (Cap.DEPTH5, lambda: tf.depth.get(_PROBE_SYMBOL)),
+        (Cap.DEPTH5_BATCH, lambda: tf.depth.batch([_PROBE_SYMBOL])),
+        (
+            Cap.FINANCIAL,
+            lambda: tf.financials.metrics([_PROBE_SYMBOL], latest=True, as_dataframe=False),
+        ),
+        (Cap.ADJ_FACTOR, lambda: tf.klines.ex_factors([_PROBE_SYMBOL], as_dataframe=False)),
+    ]
+
+
+class _CapabilityProbeState:
+    def __init__(self, all_caps_defaults: dict[str, dict[str, Any]]) -> None:
+        self.available: dict[Cap, CapabilityLimits] = {}
+        self.log: list[str] = []
+        # 重试耗尽仍失败的瞬时错误(非明确无权限)对应的 cap。供上层判定: 若「分水岭」
+        # cap(单只日K/复权因子)是瞬时失败, 不要据此把付费用户降级为 free/none。
+        self.transient_failed: set[Cap] = set()
+        self.all_caps_defaults = all_caps_defaults
+
+    def defaults(self, cap: Cap) -> dict[str, Any]:
+        return self.all_caps_defaults.get(str(cap), {})
+
+    def try_call(self, cap: Cap, fn) -> None:
+        # 分段耗时日志: 记录每个 cap 探测的开始/结束/耗时/结果, 便于定位卡死环节。
+        t0 = time.perf_counter()
+        logger.info("能力探测开始: %s", cap.value)
+        try:
+            _call_with_retry(fn)
+            limits = self.defaults(cap)
+            self.available[cap] = CapabilityLimits(
+                rpm=limits.get("rpm"),
+                batch=limits.get("batch"),
+                subscribe=limits.get("subscribe"),
+            )
+            elapsed = time.perf_counter() - t0
+            self.log.append(f"✓ {cap}")
+            logger.info("能力探测完成: %s ✓ (%.2fs)", cap.value, elapsed)
+        except Exception as e:  # noqa: BLE001
+            elapsed = time.perf_counter() - t0
+            cls = e.__class__.__name__
+            kind = _classify_probe_error(e)
+            if kind == "perm":
+                self.log.append(f"✗ {cap}(无权限)")
+                logger.info("能力探测完成: %s ✗ 无权限 (%.2fs)", cap.value, elapsed)
+            elif kind == "transient":
+                # 仅**真瞬时**错误(超时/连接/5xx/429, 由 _is_transient 判定)才标记为疑似 —
+                # 与探测重试用同一判据。否则一个消息未命中权限关键词的确定性失败
+                # (如 401/"authentication failed"/"key expired")会被误当瞬时, 让降级
+                # 保护(保留旧付费档)反而掩盖真实的 Key 失效, 永不回落到 free-api。
+                self.transient_failed.add(cap)
+                self.log.append(f"? {cap} (瞬时: {cls}: {e})")
+                logger.warning("能力探测瞬时失败: %s ? %s: %s (%.2fs)", cap.value, cls, e, elapsed)
+            else:
+                # 非权限关键词、也非瞬时 → 视为该能力确实不可用(不保留、不重试保护)
+                self.log.append(f"✗ {cap}({cls}: {e})")
+                logger.info("能力探测完成: %s ✗ %s: %s (%.2fs)", cap.value, cls, e, elapsed)
+
+
 def _probe_real(tiers: dict) -> tuple[CapabilitySet, list[str], set[Cap]]:
     """逐 capability 试探。需要 API key。
 
@@ -117,159 +251,26 @@ def _probe_real(tiers: dict) -> tuple[CapabilitySet, list[str], set[Cap]]:
 
     返回 (capset, probe_log)。
     """
-    from tickflow import TickFlow
-    from .client import _base_url, PAID_ENDPOINT
-
-    key = secrets_store.get_tickflow_key()
-    # 探测专用客户端:强制走付费端点验证 key。
-    # base_url 用用户自定义端点(若已配置测速切换),否则默认 api.tickflow.org。
-    probe_base = _base_url() or PAID_ENDPOINT
-    logger.info("开始能力探测 (付费端点=%s, SDK默认超时=30s×重试3)", probe_base)
-    tf = TickFlow(api_key=key, base_url=probe_base)
-    available: dict[Cap, CapabilityLimits] = {}
-    log: list[str] = []
-    # 重试耗尽仍失败的瞬时错误(非明确无权限)对应的 cap。供上层判定: 若「分水岭」
-    # cap(单只日K/复权因子)是瞬时失败, 不要据此把付费用户降级为 free/none。
-    transient_failed: set[Cap] = set()
-
-    def try_call(cap: Cap, fn, default_limits: dict[str, Any]) -> None:
-        # 分段耗时日志: 记录每个 cap 探测的开始/结束/耗时/结果, 便于定位卡死环节。
-        _t0 = time.perf_counter()
-        logger.info("能力探测开始: %s", cap.value)
-        try:
-            _call_with_retry(fn)
-            available[cap] = CapabilityLimits(
-                rpm=default_limits.get("rpm"),
-                batch=default_limits.get("batch"),
-                subscribe=default_limits.get("subscribe"),
-            )
-            _elapsed = time.perf_counter() - _t0
-            log.append(f"✓ {cap}")
-            logger.info("能力探测完成: %s ✓ (%.2fs)", cap.value, _elapsed)
-        except Exception as e:  # noqa: BLE001
-            _elapsed = time.perf_counter() - _t0
-            msg = str(e).lower()
-            cls = e.__class__.__name__
-            # PermissionError 类名 / HTTP 403 / 中英文权限关键词都算"明确无权限"
-            is_perm_denied = (
-                cls in {"PermissionError", "AuthorizationError"}
-                or "permission" in msg or "unauthorized" in msg
-                or "403" in msg or "forbidden" in msg
-                or "套餐" in msg or "权限" in msg or "需要" in msg
-            )
-            if is_perm_denied:
-                log.append(f"✗ {cap}(无权限)")
-                logger.info("能力探测完成: %s ✗ 无权限 (%.2fs)", cap.value, _elapsed)
-            elif _is_transient(e):
-                # 仅**真瞬时**错误(超时/连接/5xx/429, 由 _is_transient 判定)才标记为疑似 —
-                # 与探测重试用同一判据。否则一个消息未命中权限关键词的确定性失败
-                # (如 401/"authentication failed"/"key expired")会被误当瞬时, 让降级
-                # 保护(保留旧付费档)反而掩盖真实的 Key 失效, 永不回落到 free-api。
-                transient_failed.add(cap)
-                log.append(f"? {cap} (瞬时: {cls}: {e})")
-                logger.warning("能力探测瞬时失败: %s ? %s: %s (%.2fs)", cap.value, cls, e, _elapsed)
-            else:
-                # 非权限关键词、也非瞬时 → 视为该能力确实不可用(不保留、不重试保护)
-                log.append(f"✗ {cap}({cls}: {e})")
-                logger.info("能力探测完成: %s ✗ %s: %s (%.2fs)", cap.value, cls, e, _elapsed)
-
+    tf = _build_probe_client()
     # 用各档默认上限作为占位(无 X-RateLimit-* 头时)
     # 取所有档的并集,逐 cap 试探
     all_caps_defaults: dict[str, dict[str, Any]] = {}
     for tier in ("free", "starter", "pro", "expert"):
         for cap_name, lim in tiers.get(tier, {}).items():
             all_caps_defaults.setdefault(cap_name, lim)
-
-    def defaults(cap: Cap) -> dict[str, Any]:
-        return all_caps_defaults.get(str(cap), {})
-
-    # 全部用 keyword-only 形式调用,符合 SDK 真实签名
-    # quote.by_symbol
-    try_call(Cap.QUOTE_BY_SYMBOL,
-             lambda: tf.quotes.get(symbols=[_PROBE_SYMBOL], as_dataframe=False),
-             defaults(Cap.QUOTE_BY_SYMBOL))
-
-    # quote.batch — 批量行情(POST /v1/quotes)。用 get_by_symbols 试探。
-    try_call(Cap.QUOTE_BATCH,
-             lambda: tf.quotes.get_by_symbols([_PROBE_SYMBOL], as_dataframe=False),
-             defaults(Cap.QUOTE_BATCH))
-
-    # quote.pool — 用一个真实存在的 universe id 试探。
-    # universes.list() 在 Free 也开放,先拿任意一个 universe id 再用 get_by_universes 试。
-    def _probe_pool():
-        unis = tf.universes.list()
-        if not unis:
-            raise RuntimeError("no universes available")
-        first_id = unis[0]["id"] if isinstance(unis[0], dict) else getattr(unis[0], "id")
-        return tf.quotes.get_by_universes([first_id], as_dataframe=False)
-
-    try_call(Cap.QUOTE_POOL, _probe_pool, defaults(Cap.QUOTE_POOL))
-
-    # kline.daily.by_symbol — Free 也有
-    try_call(Cap.KLINE_DAILY_BY_SYMBOL,
-             lambda: tf.klines.get(_PROBE_SYMBOL, period="1d", count=1, as_dataframe=False),
-             defaults(Cap.KLINE_DAILY_BY_SYMBOL))
-
-    # kline.daily.batch
-    try_call(Cap.KLINE_DAILY_BATCH,
-             lambda: tf.klines.batch([_PROBE_SYMBOL], period="1d", count=1, as_dataframe=False),
-             defaults(Cap.KLINE_DAILY_BATCH))
-
-    # kline.minute.by_symbol
-    try_call(Cap.KLINE_MINUTE_BY_SYMBOL,
-             lambda: tf.klines.get(_PROBE_SYMBOL, period="1m", count=1, as_dataframe=False),
-             defaults(Cap.KLINE_MINUTE_BY_SYMBOL))
-
-    # kline.minute.batch
-    try_call(Cap.KLINE_MINUTE_BATCH,
-             lambda: tf.klines.batch([_PROBE_SYMBOL], period="1m", count=1, as_dataframe=False),
-             defaults(Cap.KLINE_MINUTE_BATCH))
-
-    # intraday
-    try_call(Cap.INTRADAY,
-             lambda: tf.klines.intraday(_PROBE_SYMBOL, count=1, as_dataframe=False),
-             defaults(Cap.INTRADAY))
-
-    # intraday.batch
-    try_call(Cap.INTRADAY_BATCH,
-             lambda: tf.klines.intraday_batch([_PROBE_SYMBOL], count=1, as_dataframe=False),
-             defaults(Cap.INTRADAY_BATCH))
-
-    # intraday.universe — 全量分钟: 标的池单请求拉全市场最新 N 根 (Expert)
-    try_call(Cap.INTRADAY_UNIVERSE,
-             lambda: tf.klines.intraday_universe("CN_Equity_A", count=1, as_dataframe=False),
-             defaults(Cap.INTRADAY_UNIVERSE))
-
-    # depth5 — 按标的查(单只)
-    try_call(Cap.DEPTH5,
-             lambda: tf.depth.get(_PROBE_SYMBOL),
-             defaults(Cap.DEPTH5))
-
-    # depth5.batch — 批量查(SDK 0.1.23+ 提供 depth.batch,对应官方 /v1/depth/batch 端点)
-    try_call(Cap.DEPTH5_BATCH,
-             lambda: tf.depth.batch([_PROBE_SYMBOL]),
-             defaults(Cap.DEPTH5_BATCH))
-
-    # financial — SDK 提供 income / balance_sheet / cash_flow / metrics / shares
-    # 用 metrics 探测(单据最小)
-    try_call(Cap.FINANCIAL,
-             lambda: tf.financials.metrics([_PROBE_SYMBOL], latest=True, as_dataframe=False),
-             defaults(Cap.FINANCIAL))
-
-    # adj_factor — 实际在 klines.ex_factors
-    try_call(Cap.ADJ_FACTOR,
-             lambda: tf.klines.ex_factors([_PROBE_SYMBOL], as_dataframe=False),
-             defaults(Cap.ADJ_FACTOR))
+    state = _CapabilityProbeState(all_caps_defaults)
+    for cap, fn in _probe_cap_calls(tf):
+        state.try_call(cap, fn)
 
     # websocket 不在探测期试连接(成本太高且阻塞),按档位默认推断
     # 若 expert 的其他 cap 都通,则推断 websocket 也可用
-    if (Cap.FINANCIAL in available and Cap.INTRADAY_BATCH in available):
-        available[Cap.WEBSOCKET] = CapabilityLimits(
-            subscribe=defaults(Cap.WEBSOCKET).get("subscribe", 100),
+    if Cap.FINANCIAL in state.available and Cap.INTRADAY_BATCH in state.available:
+        state.available[Cap.WEBSOCKET] = CapabilityLimits(
+            subscribe=state.defaults(Cap.WEBSOCKET).get("subscribe", 100),
         )
-        log.append("✓ websocket (inferred from expert tier)")
+        state.log.append("✓ websocket (inferred from expert tier)")
 
-    return CapabilitySet(available), log, transient_failed
+    return CapabilitySet(state.available), state.log, state.transient_failed
 
 
 def _load_cached_capset(cache_path: Path) -> CapabilitySet | None:
@@ -319,8 +320,8 @@ _DATASET_CAP_MAP: tuple[tuple[str, Cap], ...] = (
 def _augment_custom_sources(capset: CapabilitySet) -> None:
     """根据用户配置的数据源, 补充对应能力 (不覆盖 TickFlow 已有的)。"""
     try:
-        from app.services import preferences
         from app.data_providers import custom as custom_sources
+        from app.services import preferences
 
         daily_provider = preferences.get_daily_data_provider()
         adj_provider = preferences.get_adj_factor_provider()
@@ -338,7 +339,9 @@ def _augment_custom_sources(capset: CapabilitySet) -> None:
                 capset.grant(cap)
                 logger.info(
                     "custom source '%s' provides dataset '%s': granted %s",
-                    provider, dataset, cap.value,
+                    provider,
+                    dataset,
+                    cap.value,
                 )
     except Exception as e:  # noqa: BLE001
         logger.debug("custom source augment skipped: %s", e)
@@ -353,8 +356,11 @@ def _detect_tickflow_caps(force: bool = False) -> CapabilitySet:
         # schema 版本校验:旧缓存或缺版本号 → 过期,丢弃后重新探测
         if cached.get("schema_version") == _CACHE_SCHEMA_VERSION:
             return _capset_from_json(cached)
-        logger.info("capabilities 缓存 schema 版本过期(缓存=%s, 当前=%d), 重新探测",
-                    cached.get("schema_version"), _CACHE_SCHEMA_VERSION)
+        logger.info(
+            "capabilities 缓存 schema 版本过期(缓存=%s, 当前=%d), 重新探测",
+            cached.get("schema_version"),
+            _CACHE_SCHEMA_VERSION,
+        )
 
     tiers = _load_tiers_yaml()
     if settings.use_free_mode:
@@ -377,10 +383,9 @@ def _detect_tickflow_caps(force: bool = False) -> CapabilitySet:
         prev_capset = _load_cached_capset(cache_path)
         prev_was_paid = prev_capset is not None and Cap.ADJ_FACTOR in prev_capset.all()
         transient_downgrade = (
-            (classified.is_invalid and Cap.KLINE_DAILY_BY_SYMBOL in transient_failed)
-            or (classified.is_free and Cap.ADJ_FACTOR in transient_failed)
-        )
-        if prev_was_paid and transient_downgrade:
+            classified.is_invalid and Cap.KLINE_DAILY_BY_SYMBOL in transient_failed
+        ) or (classified.is_free and Cap.ADJ_FACTOR in transient_failed)
+        if prev_was_paid and prev_capset is not None and transient_downgrade:
             logger.warning(
                 "能力探测分水岭瞬时失败(非无权限): %s; 保留上次缓存档位, 不降级",
                 sorted(str(c) for c in transient_failed),
@@ -396,7 +401,13 @@ def _detect_tickflow_caps(force: bool = False) -> CapabilitySet:
         if classified.is_free:
             # 免费有效 key:按 free 档能力持久化(日K free-api + 按标的实时)。
             capset = _tier_to_capset(tiers["free"])
-            _persist(capset, "Free", log=probe_log + ["✓ 免费有效 key(运行时走 free-api 服务器)"], missing=[], extras=[])
+            _persist(
+                capset,
+                "Free",
+                log=[*probe_log, "✓ 免费有效 key(运行时走 free-api 服务器)"],
+                missing=[],
+                extras=[],
+            )
             return capset
         # 付费档(starter+) — 探测出的能力即为真实可用
         label, missing, extras = _compute_label_and_missing(capset, tiers)
@@ -404,7 +415,7 @@ def _detect_tickflow_caps(force: bool = False) -> CapabilitySet:
         _persist(capset, label, log=probe_log, missing=missing, extras=extras)
         return capset
     except Exception as e:
-        logger.exception("detect_capabilities failed; using none baseline: %s", e)
+        logger.exception("detect_capabilities failed; using none baseline")
         capset = _tier_to_capset(tiers["none"])
         _persist(capset, "None(探测失败)", log=[f"探测失败:{e}"], missing=[], extras=[])
         return capset
@@ -414,11 +425,15 @@ def _detect_tickflow_caps(force: bool = False) -> CapabilitySet:
 # 拥有**任意一个**即认作该档及以上。自上而下匹配。
 # 这套设计的好处:单个 capability 探测的 transient 失败不会把整体档位"误降"。
 TIER_SIGNATURES: dict[str, set[Cap]] = {
-    "expert":  {Cap.FINANCIAL, Cap.INTRADAY_BATCH, Cap.WEBSOCKET},
-    "pro":     {Cap.KLINE_MINUTE_BATCH, Cap.KLINE_MINUTE_BY_SYMBOL,
-                Cap.INTRADAY, Cap.DEPTH5, Cap.DEPTH5_BATCH},
-    "starter": {Cap.QUOTE_BATCH, Cap.KLINE_DAILY_BATCH,
-                Cap.ADJ_FACTOR, Cap.QUOTE_POOL},
+    "expert": {Cap.FINANCIAL, Cap.INTRADAY_BATCH, Cap.WEBSOCKET},
+    "pro": {
+        Cap.KLINE_MINUTE_BATCH,
+        Cap.KLINE_MINUTE_BY_SYMBOL,
+        Cap.INTRADAY,
+        Cap.DEPTH5,
+        Cap.DEPTH5_BATCH,
+    },
+    "starter": {Cap.QUOTE_BATCH, Cap.KLINE_DAILY_BATCH, Cap.ADJ_FACTOR, Cap.QUOTE_POOL},
     # free / none 不需 signature — 由 _classify_tier 的分水岭逻辑判定
 }
 
@@ -433,9 +448,9 @@ class TierClassification:
       - 有复权因子 → 付费档(starter+),具体档位由 signature 决定
     """
 
-    tier: str            # "none" / "free" / "starter" / "pro" / "expert"
-    is_invalid: bool     # 无效 key(连单只日K都拿不到)
-    is_free: bool        # 免费有效 key(有日K、无复权因子)
+    tier: str  # "none" / "free" / "starter" / "pro" / "expert"
+    is_invalid: bool  # 无效 key(连单只日K都拿不到)
+    is_free: bool  # 免费有效 key(有日K、无复权因子)
 
 
 def _classify_tier(capset: CapabilitySet, tiers: dict) -> TierClassification:
@@ -468,6 +483,7 @@ def _classify_tier(capset: CapabilitySet, tiers: dict) -> TierClassification:
         base = "starter"
     return TierClassification(tier=base, is_invalid=False, is_free=False)
 
+
 # 补丁友好命名(label 后缀用)
 _CAP_ALIASES: dict[Cap, str] = {
     Cap.KLINE_MINUTE_BATCH: "分钟K",
@@ -487,7 +503,9 @@ _CAP_ALIASES: dict[Cap, str] = {
 
 
 def _override_limits_with_detected_tier(
-    capset: CapabilitySet, label: str, tiers: dict,
+    capset: CapabilitySet,
+    label: str,
+    tiers: dict,
 ) -> CapabilitySet:
     """探测完成后,用判档对应的 limits 覆盖每个 cap 的速率/批量。
 
@@ -498,7 +516,7 @@ def _override_limits_with_detected_tier(
     base_name = label.split()[0].split("+")[0].strip().lower()  # "Pro + 分钟K" → "pro"
     tier_limits = tiers.get(base_name, {})
     new_caps: dict[Cap, CapabilityLimits] = {}
-    for cap, _old_lim in capset.all().items():
+    for cap in capset.all():
         spec = tier_limits.get(cap.value)
         if spec:
             new_caps[cap] = CapabilityLimits(
@@ -519,11 +537,12 @@ def _override_limits_with_detected_tier(
 
 def _tier_caps_set(tiers: dict, tier_name: str) -> set[Cap]:
     """读 tiers.yaml 的某档定义,转为 Cap 集合。"""
-    return {Cap(c) for c in tiers.get(tier_name, {}).keys() if c in {x.value for x in Cap}}
+    return {Cap(c) for c in tiers.get(tier_name, {}) if c in {x.value for x in Cap}}
 
 
 def _compute_label_and_missing(
-    capset: CapabilitySet, tiers: dict,
+    capset: CapabilitySet,
+    tiers: dict,
 ) -> tuple[str, list[str], list[str]]:
     """返回 (label, missing_caps, extra_caps)。
 
@@ -564,7 +583,11 @@ def _compute_label_and_missing(
         return f"{base.capitalize()}+", missing, sorted(c.value for c in extras_set)
 
     suffix = sorted({_CAP_ALIASES.get(e, str(e)) for e in extras_set})
-    return f"{base.capitalize()} + " + " + ".join(suffix), missing, sorted(c.value for c in extras_set)
+    return (
+        f"{base.capitalize()} + " + " + ".join(suffix),
+        missing,
+        sorted(c.value for c in extras_set),
+    )
 
 
 def _compute_label(capset: CapabilitySet, tiers: dict) -> str:
@@ -588,9 +611,9 @@ def _persist(
         "label": label,
         "capabilities": capset.to_dict(),
         "probe_log": log or [],
-        "missing_caps": missing or [],   # 本档应有但未探测到
-        "extras_caps": extras or [],     # 超出本档的额外能力
-        "invalid_key": invalid_key,      # 探测出的 key 无效(连单只日K都拿不到)
+        "missing_caps": missing or [],  # 本档应有但未探测到
+        "extras_caps": extras or [],  # 超出本档的额外能力
+        "invalid_key": invalid_key,  # 探测出的 key 无效(连单只日K都拿不到)
     }
     with cache_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)

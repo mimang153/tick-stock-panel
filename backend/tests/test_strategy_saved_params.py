@@ -1,5 +1,6 @@
 from datetime import date
 from types import SimpleNamespace
+from typing import Any
 
 import polars as pl
 import pytest
@@ -61,23 +62,34 @@ def test_explicit_params_override_saved_strategy_params():
 
 def test_patch_config_preserves_other_user_overrides(tmp_path):
     engine, _ = _make_engine()
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        strategy_engine=engine,
-        repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
-    )))
-    strategy_config.save_override(tmp_path, "saved_params", {
-        "params": {"min_value": 2},
-        "stop_loss": -0.05,
-    })
-
-    strategy_api.patch_config(strategy_api.SaveConfigRequest(
-        strategy_id="saved_params",
-        overrides={
-            "scoring": {"rsi_14": 1.0},
-            "scoring_directions": {"rsi_14": "low"},
-            "scoring_replace": True,
+    request: Any = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                strategy_engine=engine,
+                repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
+            )
+        )
+    )
+    strategy_config.save_override(
+        tmp_path,
+        "saved_params",
+        {
+            "params": {"min_value": 2},
+            "stop_loss": -0.05,
         },
-    ), request)
+    )
+
+    strategy_api.patch_config(
+        strategy_api.SaveConfigRequest(
+            strategy_id="saved_params",
+            overrides={
+                "scoring": {"rsi_14": 1.0},
+                "scoring_directions": {"rsi_14": "low"},
+                "scoring_replace": True,
+            },
+        ),
+        request,
+    )
 
     saved = strategy_config.load_override(tmp_path, "saved_params")
     assert saved["params"] == {"min_value": 2}
@@ -91,13 +103,17 @@ def test_strategy_detail_echoes_saved_risk_overrides():
     详情与回测页默认 overrides 都要能看到, 与 stop_loss 同口径。"""
     engine, _ = _make_engine()
     s = engine.get("saved_params")
-    detail = strategy_api._strategy_detail(s, {
-        "stop_loss": -0.05,
-        "take_profit": 0.15,
-        "trailing_stop": -0.08,
-        "trailing_take_profit_activate": 0.2,
-        "trailing_take_profit_drawdown": 0.05,
-    }, engine)
+    detail = strategy_api._strategy_detail(
+        s,
+        {
+            "stop_loss": -0.05,
+            "take_profit": 0.15,
+            "trailing_stop": -0.08,
+            "trailing_take_profit_activate": 0.2,
+            "trailing_take_profit_drawdown": 0.05,
+        },
+        engine,
+    )
     assert detail["stop_loss"] == -0.05
     assert detail["take_profit"] == 0.15
     assert detail["trailing_stop"] == -0.08
@@ -119,13 +135,20 @@ def test_strategy_detail_risk_falls_back_to_definition():
 
 def test_save_config_rejects_invalid_scoring_direction(tmp_path):
     engine, _ = _make_engine()
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        strategy_engine=engine,
-        repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
-    )))
+    request: Any = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                strategy_engine=engine,
+                repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
+            )
+        )
+    )
 
     with pytest.raises(HTTPException, match="方向无效"):
-        strategy_api.save_config(strategy_api.SaveConfigRequest(
-            strategy_id="saved_params",
-            overrides={"scoring_directions": {"rsi_14": "sideways"}},
-        ), request)
+        strategy_api.save_config(
+            strategy_api.SaveConfigRequest(
+                strategy_id="saved_params",
+                overrides={"scoring_directions": {"rsi_14": "sideways"}},
+            ),
+            request,
+        )

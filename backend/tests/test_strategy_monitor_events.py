@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -17,19 +18,21 @@ from app.strategy.monitor import MonitorRuleEngine
 
 
 def _rule(*events: str, **overrides) -> dict:
-    return monitor_rules.normalize({
-        "id": "strategy_rule",
-        "name": "策略监控",
-        "type": "strategy",
-        "asset_type": "stock",
-        "scope": "all",
-        "symbols": [],
-        "strategy_id": "demo",
-        "notify_events": list(events),
-        "conditions": [],
-        "cooldown_seconds": 3600,
-        **overrides,
-    })
+    return monitor_rules.normalize(
+        {
+            "id": "strategy_rule",
+            "name": "策略监控",
+            "type": "strategy",
+            "asset_type": "stock",
+            "scope": "all",
+            "symbols": [],
+            "strategy_id": "demo",
+            "notify_events": list(events),
+            "conditions": [],
+            "cooldown_seconds": 3600,
+            **overrides,
+        }
+    )
 
 
 class _SequenceStrategyEngine:
@@ -78,17 +81,22 @@ def _result(
 
 
 def _quotes() -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": ["A", "B"],
-        "close": [10.0, 20.0],
-        "change_pct": [0.01, -0.02],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["A", "B"],
+            "close": [10.0, 20.0],
+            "change_pct": [0.01, -0.02],
+        }
+    )
 
 
 def test_strategy_rule_compatibility_and_validation(tmp_path):
     legacy = {
-        "id": "legacy", "name": "旧规则", "type": "strategy",
-        "scope": "all", "strategy_id": "demo",
+        "id": "legacy",
+        "name": "旧规则",
+        "type": "strategy",
+        "scope": "all",
+        "strategy_id": "demo",
     }
     monitor_rules.save_one(tmp_path, legacy)
 
@@ -109,36 +117,49 @@ def test_strategy_rule_compatibility_and_validation(tmp_path):
         monitor_rules.validate(_rule("pool_entry", score_min=90, score_max=70))
     monitor_rules.validate(_rule("buy_signal", "pool_exit"))
 
-    normalized = monitor_rules.normalize(_rule(
-        "pool_entry",
-        webhook_channels=["feishu", "custom", "email", "unsupported"],
-    ))
+    normalized = monitor_rules.normalize(
+        _rule(
+            "pool_entry",
+            webhook_channels=["feishu", "custom", "email", "unsupported"],
+        )
+    )
     assert normalized["webhook_channels"] == ["feishu", "custom", "email"]
 
 
 def test_strategy_score_range_filters_pool_and_buy_signals_but_not_sell_signals():
     day = date(2026, 7, 24)
     engine = MonitorRuleEngine()
-    engine.set_strategy_engine(_SequenceStrategyEngine([
-        _result(
-            day,
-            pool=("A", "B", "D"),
-            buys=("A", "B", "D"),
-            scores={"A": 69, "B": 80},
-        ),
-        _result(
-            day,
-            pool=("A", "B", "C", "D"),
-            buys=("A", "B", "C", "D"),
-            sells=("B",),
-            scores={"A": 70, "B": 91, "C": 90},
-        ),
-    ]))
-    engine.set_rules([_rule(
-        "buy_signal", "sell_signal", "pool_entry", "pool_exit",
-        score_min=70,
-        score_max=90,
-    )])
+    engine.set_strategy_engine(
+        _SequenceStrategyEngine(
+            [
+                _result(
+                    day,
+                    pool=("A", "B", "D"),
+                    buys=("A", "B", "D"),
+                    scores={"A": 69, "B": 80},
+                ),
+                _result(
+                    day,
+                    pool=("A", "B", "C", "D"),
+                    buys=("A", "B", "C", "D"),
+                    sells=("B",),
+                    scores={"A": 70, "B": 91, "C": 90},
+                ),
+            ]
+        )
+    )
+    engine.set_rules(
+        [
+            _rule(
+                "buy_signal",
+                "sell_signal",
+                "pool_entry",
+                "pool_exit",
+                score_min=70,
+                score_max=90,
+            )
+        ]
+    )
 
     with patch("app.strategy.monitor.time.time", side_effect=[100, 101]):
         assert engine.evaluate(_quotes()) == []
@@ -157,10 +178,14 @@ def test_strategy_score_range_filters_pool_and_buy_signals_but_not_sell_signals(
 def test_strategy_score_range_edit_resets_pool_baseline():
     day = date(2026, 7, 24)
     engine = MonitorRuleEngine()
-    engine.set_strategy_engine(_SequenceStrategyEngine([
-        _result(day, pool=("A",), scores={"A": 80}),
-        _result(day, pool=("A",), scores={"A": 80}),
-    ]))
+    engine.set_strategy_engine(
+        _SequenceStrategyEngine(
+            [
+                _result(day, pool=("A",), scores={"A": 80}),
+                _result(day, pool=("A",), scores={"A": 80}),
+            ]
+        )
+    )
     rule = _rule("pool_exit", score_min=70)
     engine.set_rules([rule])
     assert engine.evaluate(_quotes()) == []
@@ -174,13 +199,17 @@ def test_strategy_events_baseline_dedupe_and_next_day_replay():
     day1 = date(2026, 7, 24)
     day2 = date(2026, 7, 25)
     engine = MonitorRuleEngine()
-    engine.set_strategy_engine(_SequenceStrategyEngine([
-        _result(day1, pool=("A",), buys=("A",)),
-        _result(day1, pool=("A", "B"), buys=("A", "B")),
-        _result(day1, pool=("A", "B")),
-        _result(day1, pool=("A", "B"), buys=("B",)),
-        _result(day2, pool=("A", "B"), buys=("B",)),
-    ]))
+    engine.set_strategy_engine(
+        _SequenceStrategyEngine(
+            [
+                _result(day1, pool=("A",), buys=("A",)),
+                _result(day1, pool=("A", "B"), buys=("A", "B")),
+                _result(day1, pool=("A", "B")),
+                _result(day1, pool=("A", "B"), buys=("B",)),
+                _result(day2, pool=("A", "B"), buys=("B",)),
+            ]
+        )
+    )
     engine.set_rules([_rule("buy_signal", "pool_entry")])
 
     with patch("app.strategy.monitor.time.time", side_effect=[100, 101, 102, 103, 4000]):
@@ -200,10 +229,14 @@ def test_strategy_events_baseline_dedupe_and_next_day_replay():
 def test_strategy_sell_and_pool_exit_are_independent_events():
     day = date(2026, 7, 24)
     engine = MonitorRuleEngine()
-    engine.set_strategy_engine(_SequenceStrategyEngine([
-        _result(day, pool=("A", "B")),
-        _result(day, pool=("A",), sells=("B",)),
-    ]))
+    engine.set_strategy_engine(
+        _SequenceStrategyEngine(
+            [
+                _result(day, pool=("A", "B")),
+                _result(day, pool=("A",), sells=("B",)),
+            ]
+        )
+    )
     engine.set_rules([_rule("sell_signal", "pool_exit")])
 
     with patch("app.strategy.monitor.time.time", side_effect=[100, 101]):
@@ -219,12 +252,16 @@ def test_strategy_sell_and_pool_exit_are_independent_events():
 def test_strategy_rule_reload_preserves_state_and_semantic_edit_resets_it():
     day = date(2026, 7, 24)
     engine = MonitorRuleEngine()
-    engine.set_strategy_engine(_SequenceStrategyEngine([
-        _result(day, buys=("A",)),
-        _result(day, buys=("A",)),
-        _result(day, buys=("A",)),
-        _result(day, buys=("A",)),
-    ]))
+    engine.set_strategy_engine(
+        _SequenceStrategyEngine(
+            [
+                _result(day, buys=("A",)),
+                _result(day, buys=("A",)),
+                _result(day, buys=("A",)),
+                _result(day, buys=("A",)),
+            ]
+        )
+    )
     rule = _rule("buy_signal")
     engine.set_rules([rule])
     assert engine.evaluate(_quotes()) == []
@@ -256,16 +293,18 @@ def test_matrix_signal_hits_map_codes_and_keep_unlabelled_hits():
 
 def test_matrix_strategy_pool_masks_rows_and_both_signal_directions():
     day = date(2026, 7, 24)
-    panel = pl.DataFrame({
-        "symbol": ["A", "B"],
-        "date": [day, day],
-        "open": [10.0, 20.0],
-        "high": [10.0, 20.0],
-        "low": [10.0, 20.0],
-        "close": [10.0, 20.0],
-        "volume": [100.0, 100.0],
-        "amount": [1000.0, 2000.0],
-    })
+    panel = pl.DataFrame(
+        {
+            "symbol": ["A", "B"],
+            "date": [day, day],
+            "open": [10.0, 20.0],
+            "high": [10.0, 20.0],
+            "low": [10.0, 20.0],
+            "close": [10.0, 20.0],
+            "volume": [100.0, 100.0],
+            "amount": [1000.0, 2000.0],
+        }
+    )
     calls = 0
 
     class _AllSignals:
@@ -329,13 +368,15 @@ def test_matrix_strategy_pool_masks_rows_and_both_signal_directions():
 
 def test_ordinary_strategy_uses_signal_overrides_and_ignores_malformed_values():
     day = date(2026, 7, 24)
-    quotes = pl.DataFrame({
-        "symbol": ["A", "B"],
-        "signal_default_buy": [True, False],
-        "signal_override_buy": [False, True],
-        "signal_default_sell": [False, True],
-        "signal_override_sell": [True, False],
-    })
+    quotes = pl.DataFrame(
+        {
+            "symbol": ["A", "B"],
+            "signal_default_buy": [True, False],
+            "signal_override_buy": [False, True],
+            "signal_default_sell": [False, True],
+            "signal_override_sell": [True, False],
+        }
+    )
     strategy = StrategyDef(
         meta={"id": "ordinary", "scoring": {}, "limit": 100},
         basic_filter={"enabled": False},
@@ -395,7 +436,7 @@ def test_quote_service_forwards_real_strategy_id(monkeypatch, tmp_path):
         rule_count = 1
 
         def __init__(self):
-            self.rules = {"strategy_rule": {"webhook_channels": []}}
+            self.rules: dict = {"strategy_rule": {"webhook_channels": []}}
 
         def set_name_map(self, name_map):
             pass
@@ -425,7 +466,7 @@ def test_quote_service_forwards_real_strategy_id(monkeypatch, tmp_path):
     subscriber = service.subscribe()
     service.set_app_state(SimpleNamespace(monitor_engine=_Engine(), repo=_Repo()))
     service._repo = _Repo()
-    service.get_enriched_today = lambda: (_quotes(), quote_service.cn_today())
+    cast(Any, service).get_enriched_today = lambda: (_quotes(), quote_service.cn_today())
 
     with patch.object(QuoteService, "_is_continuous_trading", return_value=True):
         service._evaluate_monitors(pl.DataFrame(), None)
@@ -441,7 +482,8 @@ def test_system_notifications_delivered_off_calling_thread(monkeypatch):
     """
     import threading
 
-    from app.services import preferences, quote_service as qs_mod
+    from app.services import preferences
+    from app.services import quote_service as qs_mod
 
     monkeypatch.setattr(preferences, "get_system_notify_enabled", lambda: True)
 
@@ -458,10 +500,18 @@ def test_system_notifications_delivered_off_calling_thread(monkeypatch):
     monkeypatch.setattr(notify_adapter, "notify", fake_notify)
 
     svc = object.__new__(qs_mod.QuoteService)  # 只测该方法, 不跑完整 __init__
-    svc._maybe_send_system_notifications([{
-        "source": "price", "symbol": "000001.SZ", "name": "平安银行",
-        "message": "涨幅突破阈值", "close": 10.0, "change_pct": 0.0366,
-    }])
+    svc._maybe_send_system_notifications(
+        [
+            {
+                "source": "price",
+                "symbol": "000001.SZ",
+                "name": "平安银行",
+                "message": "涨幅突破阈值",
+                "close": 10.0,
+                "change_pct": 0.0366,
+            }
+        ]
+    )
 
     assert delivered.wait(2), "系统通知应在专用线程池内被投递"
     thread_name, title, body = records[0]

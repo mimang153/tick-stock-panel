@@ -14,7 +14,7 @@ import threading
 import time
 from pathlib import Path
 
-from app.storage.cache import CacheBackend, MemoryCacheBackend
+from app.storage.cache import CacheBackend, MemoryCacheBackend, RedisCacheBackend
 from app.storage.clickhouse import ClickHouseClient
 from app.storage.schema import ensure_schema
 from app.storage.store import ClickHouseStore
@@ -50,7 +50,12 @@ class StorageRuntime:
         try:
             self.writer.close()
         finally:
-            self.client.close()
+            try:
+                close_cache = getattr(self.cache, "close", None)
+                if close_cache is not None:
+                    close_cache()
+            finally:
+                self.client.close()
 
     def health(self) -> dict:
         started = time.monotonic()
@@ -64,7 +69,23 @@ class StorageRuntime:
         }
 
 
-def init_storage(*, client: ClickHouseClient | None = None) -> StorageRuntime:
+def _build_cache() -> CacheBackend:
+    from app.config import settings
+
+    if settings.cache_backend == "memory":
+        return MemoryCacheBackend()
+    return RedisCacheBackend(
+        settings.cache_redis_url,
+        prefix=settings.cache_redis_prefix,
+        socket_timeout_s=settings.cache_redis_socket_timeout_s,
+    )
+
+
+def init_storage(
+    *,
+    client: ClickHouseClient | None = None,
+    cache: CacheBackend | None = None,
+) -> StorageRuntime:
     """初始化全局存储；重复调用返回同一实例。"""
     global _runtime
     with _lock:
@@ -84,7 +105,7 @@ def init_storage(*, client: ClickHouseClient | None = None) -> StorageRuntime:
             client=client,
             store=store,
             writer=BufferedWriter.from_settings(store),
-            cache=MemoryCacheBackend(),
+            cache=cache if cache is not None else _build_cache(),
             sync_state=sync_state,
         )
         logger.info("存储层就绪（%s/%s）", client.url, client.database)
@@ -130,6 +151,30 @@ def shutdown_storage() -> None:
         runtime, _runtime = _runtime, None
     if runtime is not None:
         runtime.close()
+
+
+def cache_health() -> dict:
+    """供 /api/health 使用；缓存未接线时不做连接尝试。"""
+    runtime = _runtime
+    if runtime is None:
+        return {"status": "not_initialized", "backend": "unknown", "reachable": False}
+    cache = runtime.cache
+    backend = "redis" if isinstance(cache, RedisCacheBackend) else "memory"
+    ping = getattr(cache, "ping", None)
+    if ping is None:
+        reachable, detail = True, "custom backend without ping"
+    else:
+        try:
+            reachable = bool(ping())
+            detail = "ok" if reachable else "ping returned false"
+        except Exception as exc:  # noqa: BLE001 - 健康端点必须把故障显式暴露
+            reachable, detail = False, str(exc)
+    return {
+        "status": "ok" if reachable else "degraded",
+        "backend": backend,
+        "reachable": reachable,
+        "detail": detail,
+    }
 
 
 def storage_health() -> dict:

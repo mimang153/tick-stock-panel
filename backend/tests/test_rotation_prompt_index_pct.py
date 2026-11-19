@@ -5,6 +5,7 @@ CONTRIBUTING §3.1: build_market_overview 的 indices[].change_pct 是百分数
 概念/行业涨幅则是小数。两者共用一个 _fmt_pct 会把指数再放大 100 倍,
 喂给 LLM 的大盘背景变成「上证指数 +123.00%」。
 """
+
 from __future__ import annotations
 
 from app.services.concept_rotation_analyzer import (
@@ -43,13 +44,15 @@ def test_missing_index_change_pct_renders_placeholder():
 
 def test_dimension_pct_is_still_scaled_from_decimal():
     """概念/行业涨幅仍是小数口径, 必须乘 100 后展示 (不能被一起改掉)。"""
-    items = [{
-        "concept": "人工智能",
-        "ranks": [3, 1],
-        "pcts": [0.05, 0.07],
-        "avg_rank": 2.0,
-        "rank_std": 1.0,
-    }]
+    items = [
+        {
+            "concept": "人工智能",
+            "ranks": [3, 1],
+            "pcts": [0.05, 0.07],
+            "avg_rank": 2.0,
+            "rank_std": 1.0,
+        }
+    ]
 
     block = _build_signal_block("主线", items)
 

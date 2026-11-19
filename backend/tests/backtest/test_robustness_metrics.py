@@ -6,6 +6,7 @@
 - _calc_stats / _calc_portfolio_stats 输出新增 sortino / mc_maxdd_p50 / mc_maxdd_p95 /
   median_pnl / best / worst / avg_holding_days 字段
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -17,6 +18,7 @@ from app.backtest.engine import BacktestEngine, SimulationOptions, TradeRecord
 # ---------------------------------------------------------------
 # Sortino
 # ---------------------------------------------------------------
+
 
 def test_sortino_all_losses_is_exact():
     """全亏损序列: mean/downside_dev * sqrt(252) 可手算校验。"""
@@ -78,7 +80,9 @@ def test_mc_drawdown_p95_strictly_worse_and_negative():
 def test_mc_drawdown_ignores_non_finite():
     """含 nan/inf 的收益应被剔除, 结果与纯净输入完全一致 (不污染分位/序列化)。"""
     dirty = np.concatenate([_MC_INPUT, [np.nan, np.inf, -np.inf]])
-    assert BacktestEngine._mc_drawdown_percentiles(dirty) == BacktestEngine._mc_drawdown_percentiles(_MC_INPUT)
+    assert BacktestEngine._mc_drawdown_percentiles(
+        dirty
+    ) == BacktestEngine._mc_drawdown_percentiles(_MC_INPUT)
 
 
 def test_mc_drawdown_clips_sub_minus_100pct_pnl():
@@ -109,21 +113,37 @@ def test_mc_drawdown_too_few_trades():
 # 集成: stats 输出新字段
 # ---------------------------------------------------------------
 
+
 def _trades(pnls: list[float], durations: list[int]) -> list[TradeRecord]:
     out = []
     for p, d in zip(pnls, durations, strict=True):
-        out.append(TradeRecord(
-            symbol="A", entry_date=date(2024, 1, 1), exit_date=date(2024, 1, 1 + d),
-            entry_price=10.0, exit_price=10.0 * (1 + p), pnl_pct=p, duration=d,
-            exit_reason="signal",
-        ))
+        out.append(
+            TradeRecord(
+                symbol="A",
+                entry_date=date(2024, 1, 1),
+                exit_date=date(2024, 1, 1 + d),
+                entry_price=10.0,
+                exit_price=10.0 * (1 + p),
+                pnl_pct=p,
+                duration=d,
+                exit_reason="signal",
+            )
+        )
     return out
 
 
 def test_calc_stats_emits_robustness_fields():
     trades = _trades([0.10, -0.05, 0.08, -0.06], [3, 2, 5, 4])
     stats = BacktestEngine._calc_stats(trades, 100_000, date(2024, 1, 1), date(2024, 6, 1))
-    for k in ("sortino", "mc_maxdd_p50", "mc_maxdd_p95", "median_pnl", "best", "worst", "avg_holding_days"):
+    for k in (
+        "sortino",
+        "mc_maxdd_p50",
+        "mc_maxdd_p95",
+        "median_pnl",
+        "best",
+        "worst",
+        "avg_holding_days",
+    ):
         assert k in stats, f"缺字段 {k}"
     assert stats["best"] == round(0.10, 4)
     assert stats["worst"] == round(-0.06, 4)
@@ -147,7 +167,15 @@ def test_portfolio_stats_emits_robustness_fields():
     ]
     trades = _trades([0.06, -0.02, 0.04], [2, 1, 3])
     stats = BacktestEngine._calc_portfolio_stats(equity_curve, trades, 100_000)
-    for k in ("sortino", "mc_maxdd_p50", "mc_maxdd_p95", "median_pnl", "best", "worst", "avg_holding_days"):
+    for k in (
+        "sortino",
+        "mc_maxdd_p50",
+        "mc_maxdd_p95",
+        "median_pnl",
+        "best",
+        "worst",
+        "avg_holding_days",
+    ):
         assert k in stats, f"缺字段 {k}"
 
 
@@ -159,7 +187,9 @@ def test_independent_candidate_stats_emits_sortino_and_mc():
     # 构造足量交易 (>=3) 以触发 mc; 用引擎产出真实结果而非直接调私有函数
     trades = _trades([0.10, -0.05, 0.08, -0.06, 0.03], [2, 1, 3, 2, 4])
     result = BacktestEngine._calc_independent_candidate_result(
-        trades, n_candidates=5, execution_stats={},
+        trades,
+        n_candidates=5,
+        execution_stats={},
     )
     for k in ("sortino", "mc_maxdd_p50", "mc_maxdd_p95"):
         assert k in result.stats, f"independent 分支缺字段 {k}"

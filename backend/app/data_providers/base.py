@@ -4,6 +4,7 @@ The first implementation wraps TickFlow. Other providers (Tushare/AkShare/etc.)
 should return the same normalized Polars schemas so storage, indicators and
 backtests stay data-source agnostic.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
@@ -35,8 +36,12 @@ class StreamingMinuteProvider(Protocol):
     """可选的分钟流式能力;请求分批/分页/限频与有界输出由源负责。"""
 
     def iter_minute(
-        self, symbols: list[str], start_time: datetime | None, end_time: datetime | None,
-        asset_type: AssetType = "stock", freq: str = "1m",
+        self,
+        symbols: list[str],
+        start_time: datetime | None,
+        end_time: datetime | None,
+        asset_type: AssetType = "stock",
+        freq: str = "1m",
         on_chunk_done: Callable[[int, int], None] | None = None,
     ) -> Iterator[pl.DataFrame]:
         """逐批返回标准分钟帧;正常空批可用,请求失败须明确抛错。

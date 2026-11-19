@@ -4,6 +4,7 @@
 记账/加减仓属"交易口径", 不在本模块 (issue #230)。纯函数 + 文件存储 (统一契约 Store,
 收口见 app/definitions.py), 不做 API、不做引擎重载。
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -34,11 +35,11 @@ def validate_lot(lot: dict) -> None:
     if not (lot.get("symbol") or "").strip():
         raise ValueError("symbol 不能为空")
     cost = lot.get("cost_price")
-    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or cost <= 0:
+    if isinstance(cost, bool) or not isinstance(cost, int | float) or cost <= 0:
         raise ValueError("cost_price 必须是正数")
     for key, label in (("qty", "数量"), ("target_pct", "止盈%"), ("stop_pct", "止损%")):
         v = lot.get(key, 0)
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+        if isinstance(v, bool) or not isinstance(v, int | float) or v < 0:
             raise ValueError(f"{label} 不能为负数")
     lead = lot.get("lead_days", 0)
     if isinstance(lead, bool) or not isinstance(lead, int) or lead < 0:

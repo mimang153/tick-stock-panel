@@ -6,6 +6,7 @@ _load_enriched_history(as_of, required_history_bars)。缓存命中路径
 缓存里晚于 as_of 的交易日也被算进去: as_of 越早窗口越短, 早于 N 个交易日时
 直接是空窗口。慢路径只读 date <= as_of, 本来就是按目标日计数的。
 """
+
 from __future__ import annotations
 
 import math
@@ -36,7 +37,9 @@ def _cache(days: list[date]) -> pl.DataFrame:
     for symbol, phase in (("600001.SH", 0.0), ("000002.SZ", 1.0)):
         for i, day in enumerate(days):
             rows.append((symbol, day, round(10 + math.sin(i * 0.2 + phase), 2)))
-    return pl.DataFrame(rows, schema=["symbol", "date", "close"], orient="row").sort(["symbol", "date"])
+    return pl.DataFrame(rows, schema=["symbol", "date", "close"], orient="row").sort(
+        ["symbol", "date"]
+    )
 
 
 def _repo(tmp_path: Path, cache: pl.DataFrame) -> KlineRepository:
@@ -52,7 +55,7 @@ def test_history_window_counts_trading_days_up_to_target(tmp_path, back):
     out = _repo(tmp_path, _cache(days)).get_enriched_history(target, LOOKBACK)
 
     assert out is not None
-    want = [d for d in days if d <= target][-(LOOKBACK + 1):]
+    want = [d for d in days if d <= target][-(LOOKBACK + 1) :]
     assert out["date"].unique().sort().to_list() == want
 
 
@@ -63,8 +66,12 @@ def test_screener_history_does_not_depend_on_later_cached_days(tmp_path):
     full = _cache(days)
     upto = full.filter(pl.col("date") <= as_of)
 
-    with_later = ScreenerService(_repo(tmp_path / "a", full))._load_enriched_history(as_of, LOOKBACK)
-    without_later = ScreenerService(_repo(tmp_path / "b", upto))._load_enriched_history(as_of, LOOKBACK)
+    with_later = ScreenerService(_repo(tmp_path / "a", full))._load_enriched_history(
+        as_of, LOOKBACK
+    )
+    without_later = ScreenerService(_repo(tmp_path / "b", upto))._load_enriched_history(
+        as_of, LOOKBACK
+    )
 
     assert without_later["date"].n_unique() == LOOKBACK + 1
     assert with_later["date"].n_unique() == without_later["date"].n_unique()

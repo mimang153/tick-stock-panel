@@ -1,4 +1,5 @@
 """Numba parallel kernels must stay safe under concurrent callers."""
+
 from __future__ import annotations
 
 import threading

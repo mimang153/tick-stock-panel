@@ -1,6 +1,6 @@
 ---
 description: Docker Compose standards Rule
-globs: 
+globs:
 alwaysApply: false
 ---
 

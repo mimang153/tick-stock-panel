@@ -140,12 +140,12 @@ def route_to(client, monkeypatch):
     return provider
 
 
-def test_events_flow_to_parquet_with_existing_per_share_formula(
+def test_events_flow_to_ck_with_existing_per_share_formula(
     make_client, monkeypatch, tmp_path, ck_runtime
 ):
     client, _ = make_client([EVENT])
     route_to(client, monkeypatch)
-    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path), storage=ck_runtime)
     added, affected = kline_sync.sync_adj_factor(
         ["600000.SH"],
         repo,  # type: ignore[arg-type]
@@ -154,7 +154,7 @@ def test_events_flow_to_parquet_with_existing_per_share_formula(
         end_time=datetime(2024, 12, 31),
     )
     assert added == 1 and affected == ["600000.SH"]
-    row = pl.read_parquet(tmp_path / "adj_factor/all.parquet").row(0, named=True)
+    row = ck_runtime.read_adj_factor().row(0, named=True)
     assert row["trade_date"] == date(2024, 6, 19)
     assert row["dividend"] == pytest.approx(0.2)
     assert row["bonus"] == pytest.approx(0.1)

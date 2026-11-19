@@ -1,7 +1,9 @@
 """个股详情日 K 最新行接口测试。"""
+
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import Any
 
 import polars as pl
 import pytest
@@ -58,18 +60,20 @@ def _client(
 
 
 def _live_frame() -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": ["600000.SH"],
-        "date": [date.today()],
-        "open": [10.0],
-        "high": [10.8],
-        "low": [9.9],
-        "close": [10.6],
-        "volume": [123_456.0],
-        "amount": [1_234_560.0],
-        "ma5": [10.2],
-        "signal_limit_up": [False],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "date": [date.today()],
+            "open": [10.0],
+            "high": [10.8],
+            "low": [9.9],
+            "close": [10.6],
+            "volume": [123_456.0],
+            "amount": [1_234_560.0],
+            "ma5": [10.2],
+            "signal_limit_up": [False],
+        }
+    )
 
 
 def test_daily_latest_returns_only_current_memory_row(monkeypatch) -> None:
@@ -126,13 +130,17 @@ def test_daily_latest_returns_none_for_stale_cache(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("opening", [4.6, 4.75])
-def test_live_daily_preserves_raw_limit_metadata_for_both_recovery_directions(monkeypatch, opening) -> None:
+def test_live_daily_preserves_raw_limit_metadata_for_both_recovery_directions(
+    monkeypatch, opening
+) -> None:
     from app.api import kline as kline_api
 
     monkeypatch.setattr(kline_api, "cn_today", lambda: BJ)
     frame = _frame_on(BJ).with_columns(
-        pl.lit(opening).alias("open"), pl.lit(4.7).alias("close"),
-        pl.lit(9.0).alias("raw_low"), pl.lit(9.4).alias("raw_close"),
+        pl.lit(opening).alias("open"),
+        pl.lit(4.7).alias("close"),
+        pl.lit(9.0).alias("raw_low"),
+        pl.lit(9.4).alias("raw_close"),
         pl.lit(9.005).alias("limit_down_price"),
         pl.lit(False).alias("signal_limit_down"),
         pl.lit(opening < 4.7).alias("signal_limit_down_recovery"),
@@ -155,13 +163,27 @@ def test_live_daily_clears_stale_limit_metadata_when_source_fields_are_missing(m
     from app.api import kline as kline_api
 
     monkeypatch.setattr(kline_api, "cn_today", lambda: BJ)
-    old_row = {"date": str(BJ), "raw_low": 9.0, "raw_close": 9.4, "limit_down_price": 9.005,
-               "signal_limit_down": True, "signal_limit_down_recovery": True,
-               "signal_broken_limit_up": True, "consecutive_limit_ups": 2}
+    old_row = {
+        "date": str(BJ),
+        "raw_low": 9.0,
+        "raw_close": 9.4,
+        "limit_down_price": 9.005,
+        "signal_limit_down": True,
+        "signal_limit_down_recovery": True,
+        "signal_broken_limit_up": True,
+        "consecutive_limit_ups": 2,
+    }
     rows = kline_api._maybe_inject_live_candle(_request(_frame_on(BJ), BJ), "600000.SH", [old_row])
     assert rows[0]["close"] == 10.6
-    for key in ("raw_low", "raw_close", "limit_down_price", "signal_limit_down",
-                "signal_limit_down_recovery", "signal_broken_limit_up", "consecutive_limit_ups"):
+    for key in (
+        "raw_low",
+        "raw_close",
+        "limit_down_price",
+        "signal_limit_down",
+        "signal_limit_down_recovery",
+        "signal_broken_limit_up",
+        "consecutive_limit_ups",
+    ):
         assert rows[0][key] is None
     assert rows[0]["signal_limit_up"] is False
 
@@ -228,25 +250,29 @@ def test_daily_latest_uses_index_enriched_cache(monkeypatch) -> None:
     assert body["source"] == "live"
     assert repo.latest_asset_calls == 1
     assert repo.latest_asset_refresh is False
+
+
 BJ = date(2026, 3, 2)  # 钉死的北京日期, 不会碰巧等于跑测试那天的 date.today()
 
 
 def _frame_on(day: date, symbol: str = "600000.SH") -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": [symbol],
-        "date": [day],
-        "open": [10.0],
-        "high": [10.8],
-        "low": [9.9],
-        "close": [10.6],
-        "volume": [123_456.0],
-        "amount": [1_234_560.0],
-        "ma5": [10.2],
-        "signal_limit_up": [False],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": [symbol],
+            "date": [day],
+            "open": [10.0],
+            "high": [10.8],
+            "low": [9.9],
+            "close": [10.6],
+            "volume": [123_456.0],
+            "amount": [1_234_560.0],
+            "ma5": [10.2],
+            "signal_limit_up": [False],
+        }
+    )
 
 
-def _request(frame: pl.DataFrame, trade_date: date):
+def _request(frame: pl.DataFrame, trade_date: date) -> Any:
     from types import SimpleNamespace
 
     repo = _FakeRepo()
@@ -275,7 +301,9 @@ def test_live_candle_stale_vs_beijing_today(monkeypatch) -> None:
 
     monkeypatch.setattr(kline_api, "cn_today", lambda: BJ, raising=False)
     row = kline_api._latest_live_candle(
-        _request(_frame_on(date(2026, 3, 1)), date(2026, 3, 1)), "600000.SH", "stock",
+        _request(_frame_on(date(2026, 3, 1)), date(2026, 3, 1)),
+        "600000.SH",
+        "stock",
     )
     assert row is None
 
@@ -299,24 +327,43 @@ def test_get_daily_default_end_is_beijing_today(monkeypatch) -> None:
             return "stock"
 
         def get_instruments(self) -> pl.DataFrame:
-            return pl.DataFrame({
-                "symbol": ["600000.SH"], "name": ["浦发银行"],
-                "total_shares": [1.0], "float_shares": [1.0],
-            })
+            return pl.DataFrame(
+                {
+                    "symbol": ["600000.SH"],
+                    "name": ["浦发银行"],
+                    "total_shares": [1.0],
+                    "float_shares": [1.0],
+                }
+            )
 
         def get_daily_asset(self, asset_type, symbol, start, end, columns=None):
             captured.append((start, end))
-            return pl.DataFrame({
-                "symbol": ["600000.SH"], "date": [BJ],
-                "open": [10.0], "high": [10.6], "low": [9.9], "close": [10.6],
-                "volume": [1.0], "amount": [1.0],
-            })
+            return pl.DataFrame(
+                {
+                    "symbol": ["600000.SH"],
+                    "date": [BJ],
+                    "open": [10.0],
+                    "high": [10.6],
+                    "low": [9.9],
+                    "close": [10.6],
+                    "volume": [1.0],
+                    "amount": [1.0],
+                }
+            )
 
     monkeypatch.setattr(kline_api, "cn_today", lambda: BJ, raising=False)
-    req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        repo=_Repo(), quote_service=None, capabilities=None,
-    )))
-    kline_api.get_daily(req, symbol="600000.SH", days=120, start_date=None, end_date=None, ext_columns=None)
+    req: Any = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                repo=_Repo(),
+                quote_service=None,
+                capabilities=None,
+            )
+        )
+    )
+    kline_api.get_daily(
+        req, symbol="600000.SH", days=120, start_date=None, end_date=None, ext_columns=None
+    )
     assert captured, "应查询日K"
     _start, end = captured[0]
     assert end == BJ, f"窗口右端必须是北京日期 {BJ}, 实际 {end} (服务器本地 {date.today()})"

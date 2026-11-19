@@ -8,6 +8,7 @@ tool_result 事件被丢, 分时图不附、后续 delta 也对不上。
 日K 小图走 _rows → _clean_value, nan 已变 None; 分时路径直接读分钟分区,
 没有同一层清洗。
 """
+
 from __future__ import annotations
 
 import json
@@ -37,24 +38,28 @@ class _MinuteRepo:
 
     def get_minute(self, symbol, trade_date, asset_type="stock") -> pl.DataFrame:
         n = len(self.closes)
-        return pl.DataFrame({
-            "datetime": [
-                datetime.combine(trade_date, datetime.min.time()).replace(hour=9, minute=31 + i)
-                for i in range(n)
-            ],
-            "close": self.closes,
-            "volume": self.volumes,
-        })
+        return pl.DataFrame(
+            {
+                "datetime": [
+                    datetime.combine(trade_date, datetime.min.time()).replace(hour=9, minute=31 + i)
+                    for i in range(n)
+                ],
+                "close": self.closes,
+                "volume": self.volumes,
+            }
+        )
 
 
 class _QuoteService:
     def get_quotes_compat(self) -> pl.DataFrame:
-        return pl.DataFrame({
-            "symbol": ["600519.SH"],
-            "close": [1500.0],
-            "prev_close": [1481.8],
-            "change_pct": [0.0123],
-        })
+        return pl.DataFrame(
+            {
+                "symbol": ["600519.SH"],
+                "close": [1500.0],
+                "prev_close": [1481.8],
+                "change_pct": [0.0123],
+            }
+        )
 
 
 def _dump(payload: dict) -> str:
@@ -68,7 +73,9 @@ async def test_intraday_chart_skips_nan_and_inf_close() -> None:
     repo = _MinuteRepo([1490.0, float("nan"), 1500.0, float("inf"), 1501.0])
     ctx = assistant_tools.ToolContext.build(repo=repo, quote_service=_QuoteService())
     payload = await assistant_tools.execute_assistant_tool(
-        "get_stock_quote", {"symbols": ["600519.SH"]}, ctx,
+        "get_stock_quote",
+        {"symbols": ["600519.SH"]},
+        ctx,
     )
 
     assert payload["ok"] is True
@@ -83,7 +90,9 @@ async def test_intraday_chart_nonfinite_volume_becomes_zero() -> None:
     repo = _MinuteRepo([1490.0, 1500.0], volumes=[float("nan"), 80.0])
     ctx = assistant_tools.ToolContext.build(repo=repo, quote_service=_QuoteService())
     payload = await assistant_tools.execute_assistant_tool(
-        "get_stock_quote", {"symbols": ["600519.SH"]}, ctx,
+        "get_stock_quote",
+        {"symbols": ["600519.SH"]},
+        ctx,
     )
 
     _dump(payload)
@@ -97,7 +106,9 @@ async def test_intraday_chart_omitted_when_all_closes_nonfinite() -> None:
     repo = _MinuteRepo([float("nan"), float("inf")])
     ctx = assistant_tools.ToolContext.build(repo=repo, quote_service=_QuoteService())
     payload = await assistant_tools.execute_assistant_tool(
-        "get_stock_quote", {"symbols": ["600519.SH"]}, ctx,
+        "get_stock_quote",
+        {"symbols": ["600519.SH"]},
+        ctx,
     )
 
     assert payload["ok"] is True

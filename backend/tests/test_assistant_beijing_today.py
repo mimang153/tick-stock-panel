@@ -8,6 +8,7 @@ CONTRIBUTING §3.3: A 股交易时段按北京时间, 服务器时区不能成�
 UTC 主机在北京 00:00-08:00、以及整个美西交易日对应的中国时段, 本地日历日比
 北京晚一天或早一天: 日线窗口少取/多取一个自然日, 模型被告知错误的「今天」。
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -32,14 +33,16 @@ class _FakeDate(date):
 
 def _frame(end: date, n: int = 5) -> pl.DataFrame:
     days = [end - timedelta(days=i) for i in range(n)][::-1]
-    return pl.DataFrame({
-        "date": days,
-        "open": [10.0] * n,
-        "high": [11.0] * n,
-        "low": [9.0] * n,
-        "close": [10.5] * n,
-        "volume": [100.0] * n,
-    })
+    return pl.DataFrame(
+        {
+            "date": days,
+            "open": [10.0] * n,
+            "high": [11.0] * n,
+            "low": [9.0] * n,
+            "close": [10.5] * n,
+            "volume": [100.0] * n,
+        }
+    )
 
 
 class _DailyRepo:
@@ -62,12 +65,16 @@ def _patch_clocks(monkeypatch: pytest.MonkeyPatch, module) -> None:
     monkeypatch.setattr(module, "date", _FakeDate)
 
 
-async def test_get_stock_daily_window_ends_on_beijing_today(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_stock_daily_window_ends_on_beijing_today(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _patch_clocks(monkeypatch, assistant_tools)
     repo = _DailyRepo()
     ctx = assistant_tools.ToolContext.build(repo=repo)
     payload = await assistant_tools.execute_assistant_tool(
-        "get_stock_daily", {"symbol": "600519.SH", "days": 10}, ctx,
+        "get_stock_daily",
+        {"symbol": "600519.SH", "days": 10},
+        ctx,
     )
     assert payload["ok"] is True
     assert repo.windows, "应调用 get_daily_asset"
@@ -76,12 +83,16 @@ async def test_get_stock_daily_window_ends_on_beijing_today(monkeypatch: pytest.
     assert end != LOCAL
 
 
-async def test_get_stock_analysis_window_ends_on_beijing_today(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_stock_analysis_window_ends_on_beijing_today(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _patch_clocks(monkeypatch, assistant_tools)
     repo = _DailyRepo()
     ctx = assistant_tools.ToolContext.build(repo=repo)
     payload = await assistant_tools.execute_assistant_tool(
-        "get_stock_analysis", {"symbol": "600519.SH"}, ctx,
+        "get_stock_analysis",
+        {"symbol": "600519.SH"},
+        ctx,
     )
     assert payload["ok"] is True
     assert repo.windows

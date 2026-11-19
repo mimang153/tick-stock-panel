@@ -4,10 +4,12 @@
 切断连接(前端报裸 network error)。with_heartbeat 在空闲期插入
 {"type":"ping"} 行保活; _openai_client 的 max_retries 让首包前失败可重试。
 """
+
 from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any, cast
 
 import pytest
 
@@ -17,10 +19,7 @@ from app.services.ndjson_heartbeat import with_heartbeat
 
 
 async def _collect(gen) -> list[dict]:
-    out = []
-    async for line in gen:
-        out.append(json.loads(line))
-    return out
+    return [json.loads(line) async for line in gen]
 
 
 @pytest.mark.asyncio
@@ -62,7 +61,7 @@ async def test_with_heartbeat_propagates_source_error():
     lines: list[str] = []
     with pytest.raises(RuntimeError, match="boom"):
         async for line in with_heartbeat(bad_source(), interval=0.05):
-            lines.append(line)
+            lines += [line]
     assert len(lines) == 1  # 异常前已收到的数据不丢
 
 
@@ -76,7 +75,7 @@ async def test_with_heartbeat_cancels_pump_on_client_disconnect():
     gen = with_heartbeat(endless_source(), interval=0.05)
     first = await gen.__anext__()
     assert json.loads(first)["type"] == "delta"
-    await gen.aclose()  # 模拟客户端断连; pump 应被取消且不挂起
+    await cast(Any, gen).aclose()  # 模拟客户端断连; pump 应被取消且不挂起
 
 
 def test_openai_client_enables_bounded_retries(monkeypatch):

@@ -12,6 +12,8 @@ alwaysApply: false
 - 测试写数据必须使用唯一**表名前缀**（如 `t_ab12cd_`），放在独立 database（`tsp_test`），结束统一 `DROP TABLE`，仓储层统一收口前缀，业务代码不感知
 
 ## 表设计
+- **每张表必须包含五个审计列**：`id UUID DEFAULT generateUUIDv4()`（行主键）、`created_at DateTime64(3)`（创建时间）、`created_by LowCardinality(String)`（创建人）、`updated_at DateTime64(3) DEFAULT now64(3)`（更新时间）、`updated_by LowCardinality(String)`（更新人）。行主键用 `id`，业务去重键仍由 `ORDER BY` 表达，两者不冲突：已有自增/序号列必须另起名（如事件序号 `event_id`），不得占用 `id`
+- **表注释与字段注释必须完整**：每张表在 `ENGINE` 子句之后写表级 `COMMENT '...'`，说明表的用途与粒度；每个字段在类型之后写列级 `COMMENT '...'`，说明业务含义/单位/取值，五个审计列也要有注释。CK 24.8 实测支持这两种语法（列级 `col Type COMMENT '...'`，表级 `... ENGINE=... ORDER BY ... COMMENT '...'`）。注释随 DDL 入库（`SHOW CREATE TABLE` 可见），设计文档与 `schema.py` 的 DDL 必须同步维护
 - 使用 `ReplacingMergeTree` 承接 upsert 语义，`ORDER BY` 必须体现去重键（如 `(date, kind, member)`、`symbol, date`）
 - 分钟表按月分区；时序表以 `date` / `time_value` 承载，注意时区（跨午休、交易日/盘次区分）
 - 需要去重的最新态读取：用 `argMax(col, updated_at)` / 带 `FINAL` 查询；CK 合并是后台异步的，`FINAL` 只保证查询可见最新版本，不保证物理去重

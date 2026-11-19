@@ -15,9 +15,7 @@ from typing import Any
 from app.backtest.guards import PRIMARY_OBJECTIVES
 
 GUARDIAN_ALGORITHM_VERSION = "guardian-v1"
-GUARDIAN_STATUSES: frozenset[str] = frozenset(
-    {"pending", "healthy", "watch", "retired"}
-)
+GUARDIAN_STATUSES: frozenset[str] = frozenset({"pending", "healthy", "watch", "retired"})
 BASELINE_KINDS: frozenset[str] = frozenset({"mining_gate", "trailing_reference"})
 
 # 新数据不足时跳过本轮复验: 太短的窗口切出的稳健分只是噪声, 判定只会制造假告警。
@@ -69,9 +67,7 @@ class GuardianVerdict:
 def objective_soft_floor(objective: str) -> float:
     """目标得分的软底线: 回撤类目标为 max_soft_drawdown 口径, 其余为 0。"""
     if objective not in PRIMARY_OBJECTIVES:
-        raise ValueError(
-            f"守护目标必须在稳健优化白名单内: {sorted(PRIMARY_OBJECTIVES)}"
-        )
+        raise ValueError(f"守护目标必须在稳健优化白名单内: {sorted(PRIMARY_OBJECTIVES)}")
     return -0.30 if objective in _DRAWDOWN_OBJECTIVES else 0.0
 
 
@@ -85,6 +81,32 @@ def degradation_pct(baseline_score: float, current_score: float) -> float | None
         return None
     pct = (baseline_score - current_score) / baseline_score
     return max(0.0, pct)
+
+
+def _soft_floor_reasons(
+    *,
+    objective: str,
+    current_score: float | None,
+    worst_drawdown: float | None,
+    baseline_n_trades: int,
+    current_n_trades: int,
+    thresholds: GuardianThresholds,
+    hard_drought: bool,
+) -> list[str]:
+    """数据完整且未触发硬枯竭时的软底线判定, 与硬判定拆分以控制圈复杂度。"""
+    if hard_drought:
+        return []
+    reasons: list[str] = []
+    soft_floor = objective_soft_floor(objective)
+    if current_score is not None and current_score < soft_floor:
+        reasons.append(f"{objective}={current_score:.3f} 击穿软底线 {soft_floor}")
+    if worst_drawdown is not None and worst_drawdown < thresholds.max_soft_drawdown:
+        reasons.append(f"最差段回撤 {worst_drawdown:.1%} 差于 {thresholds.max_soft_drawdown:.0%}")
+    if baseline_n_trades > 0:
+        soft_floor_trades = int(baseline_n_trades * _TRADES_RATIO_SOFT)
+        if current_n_trades < soft_floor_trades:
+            reasons.append(f"交易数 {current_n_trades} 低于基线 {baseline_n_trades} 的 1/3")
+    return reasons
 
 
 def evaluate_check(
@@ -107,7 +129,6 @@ def evaluate_check(
     失败的交易数按 0 计入, 残缺时的"枯竭"可能是数据问题而非策略失效)。
     """
     reasons: list[str] = []
-    soft_floor = objective_soft_floor(objective)
     if missing_segments > 0:
         reasons.append(f"{missing_segments} 个验证段回测失败, 退化程度无法可靠估计")
 
@@ -121,37 +142,28 @@ def evaluate_check(
 
     hard_drought = False
     if baseline_n_trades > 0:
-        drought_floor = max(
-            _TRADES_DROUGHT_ABS, int(baseline_n_trades * _TRADES_RATIO_HARD)
-        )
+        drought_floor = max(_TRADES_DROUGHT_ABS, int(baseline_n_trades * _TRADES_RATIO_HARD))
         if current_n_trades < drought_floor:
             hard_drought = True
             reasons.append(
                 f"交易数枯竭: 本轮 {current_n_trades} < 基线 {baseline_n_trades} 的硬底线 {drought_floor}"
             )
 
-    if not hard_drought:
-        if current_score is not None and current_score < soft_floor:
-            reasons.append(f"{objective}={current_score:.3f} 击穿软底线 {soft_floor}")
-        if (
-            worst_drawdown is not None
-            and worst_drawdown < thresholds.max_soft_drawdown
-        ):
-            reasons.append(
-                f"最差段回撤 {worst_drawdown:.1%} 差于 {thresholds.max_soft_drawdown:.0%}"
-            )
-        if baseline_n_trades > 0:
-            soft_floor_trades = int(baseline_n_trades * _TRADES_RATIO_SOFT)
-            if current_n_trades < soft_floor_trades:
-                reasons.append(
-                    f"交易数 {current_n_trades} 低于基线 {baseline_n_trades} 的 1/3"
-                )
+    reasons.extend(
+        _soft_floor_reasons(
+            objective=objective,
+            current_score=current_score,
+            worst_drawdown=worst_drawdown,
+            baseline_n_trades=baseline_n_trades,
+            current_n_trades=current_n_trades,
+            thresholds=thresholds,
+            hard_drought=hard_drought,
+        )
+    )
 
     if not reasons:
         return GuardianVerdict("healthy", (), pct, incomplete_data)
-    if not incomplete_data and (
-        hard_drought or (pct is not None and pct > thresholds.retire_pct)
-    ):
+    if not incomplete_data and (hard_drought or (pct is not None and pct > thresholds.retire_pct)):
         return GuardianVerdict("retired", tuple(reasons), pct, incomplete_data)
     return GuardianVerdict("watch", tuple(reasons), pct, incomplete_data)
 

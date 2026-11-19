@@ -7,6 +7,7 @@
   - 无 overrides  → 返回策略默认 entry_signals / exit_signals
   - 有 overrides  → 返回 overrides 里保存的 list (即使为空, 也代表用户主动清空)
 """
+
 from __future__ import annotations
 
 from app.api.strategy import _strategy_detail

@@ -6,10 +6,12 @@
   - 结果与逐组独立加载完全一致 (stats 剔除计时字段后相等, 交易一致);
   - fail-closed: 签名不匹配 / 组合所需列缺失 → 显式报错, 不静默回退。
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
 from types import SimpleNamespace
+from typing import Any, cast
 
 import polars as pl
 import pytest
@@ -25,7 +27,7 @@ from app.strategy.engine import StrategyDef
 
 
 def _strategy(**kwargs) -> StrategyDef:
-    defaults = dict(
+    defaults: dict[str, Any] = dict(
         meta={"id": "test", "name": "test", "scoring": {}, "params": [], "limit": 100},
         basic_filter=None,
         entry_signals=[],
@@ -36,9 +38,8 @@ def _strategy(**kwargs) -> StrategyDef:
         trailing_take_profit_drawdown=None,
         max_hold_days=None,
         # 参数驱动依赖: ma_proximity=1 引用 ma5, 否则 ma10 — 并集必须两者都载
-        filter_fn=lambda df, params: pl.col("close") > pl.col(
-            "ma5" if int(params.get("ma_proximity", 1)) == 1 else "ma10"
-        ),
+        filter_fn=lambda df, params: pl.col("close")
+        > pl.col("ma5" if int(params.get("ma_proximity", 1)) == 1 else "ma10"),
         filter_history_fn=None,
         lookback_days=1,
         source="custom",
@@ -79,7 +80,9 @@ class _EngineStub:
     def load_panel_for_backtest(self, symbols, start, end, feature_plan, asset_type="stock"):
         return self.load_panel(symbols, start, end, columns=sorted(feature_plan.base_columns))
 
-    def simulate_market_matrix(self, matrix, config, progress_cb=None, cancel_event=None, options=None):
+    def simulate_market_matrix(
+        self, matrix, config, progress_cb=None, cancel_event=None, options=None
+    ):
         return SimResult(
             equity_curve=[{"date": "2024-01-01", "value": config.initial_capital}],
             drawdown_curve=[{"date": "2024-01-01", "value": 0.0}],
@@ -95,25 +98,39 @@ def _panel(n_days: int = 40) -> pl.DataFrame:
     for i in range(n_days):
         for sym in ("A", "B"):
             close = 10.0 + i * 0.1
-            rows.append({
-                "symbol": sym, "name": sym, "date": base + timedelta(days=i),
-                "open": close - 0.05, "high": close + 0.1, "low": close - 0.1, "close": close,
-                "volume": 100_000.0, "amount": close * 100_000.0,
-                "raw_close": close, "raw_high": close + 0.1, "raw_low": close - 0.1,
-                "ma5": close - 0.2, "ma10": close - 0.5,
-                "signal_limit_up": False, "signal_limit_down": False,
-            })
+            rows.append(
+                {
+                    "symbol": sym,
+                    "name": sym,
+                    "date": base + timedelta(days=i),
+                    "open": close - 0.05,
+                    "high": close + 0.1,
+                    "low": close - 0.1,
+                    "close": close,
+                    "volume": 100_000.0,
+                    "amount": close * 100_000.0,
+                    "raw_close": close,
+                    "raw_high": close + 0.1,
+                    "raw_low": close - 0.1,
+                    "ma5": close - 0.2,
+                    "ma10": close - 0.5,
+                    "signal_limit_up": False,
+                    "signal_limit_down": False,
+                }
+            )
     return pl.DataFrame(rows).sort(["symbol", "date"])
 
 
 def _service(panel: pl.DataFrame, strategy: StrategyDef | None = None):
     engine = _EngineStub(panel)
     strategy = strategy or _strategy()
-    return StrategyBacktestService(engine, _StrategyEngineStub(strategy)), engine
+    return StrategyBacktestService(
+        cast(Any, engine), cast(Any, _StrategyEngineStub(strategy))
+    ), engine
 
 
 def _cfg(params: dict | None = None, **kw) -> StrategyBacktestConfig:
-    base = dict(
+    base: dict[str, Any] = dict(
         strategy_id="test",
         symbols=["A", "B"],
         start=date(2024, 1, 20),
@@ -128,6 +145,7 @@ def _cfg(params: dict | None = None, **kw) -> StrategyBacktestConfig:
 @pytest.fixture(autouse=True)
 def _migrated_signal_definitions(monkeypatch):
     from tests.signal_seeds import install_pipeline_caches
+
     install_pipeline_caches(monkeypatch)
 
 
@@ -156,8 +174,9 @@ def test_shared_panel_results_match_independent_runs() -> None:
         shared = service.run(cfg, prepared_panel=prepared)
         assert plain.error is None and shared.error is None
         # 计时字段天然不同 (load_panel=0), 金融口径必须一致
-        assert {k: v for k, v in (plain.stats or {}).items() if k != "timing_ms"} == \
-               {k: v for k, v in (shared.stats or {}).items() if k != "timing_ms"}
+        assert {k: v for k, v in (plain.stats or {}).items() if k != "timing_ms"} == {
+            k: v for k, v in (shared.stats or {}).items() if k != "timing_ms"
+        }
         assert plain.trades == shared.trades
 
 
@@ -192,7 +211,9 @@ def test_shared_panel_missing_columns_fail_closed() -> None:
 
 def test_prepare_rejects_matrix_backend() -> None:
     matrix_strategy = _strategy(execution_backend="matrix_native", filter_fn=None)
-    matrix_service = StrategyBacktestService(_EngineStub(_panel()), _StrategyEngineStub(matrix_strategy))
+    matrix_service = StrategyBacktestService(
+        cast(Any, _EngineStub(_panel())), cast(Any, _StrategyEngineStub(matrix_strategy))
+    )
     with pytest.raises(ValueError, match="panel-path"):
         matrix_service.prepare_panel_optimization([_cfg()])
 
@@ -206,6 +227,7 @@ def test_panel_backend_predicate() -> None:
 
 
 # ── P2a-2: 共享矩阵编码 ──────────────────────────────────
+
 
 def test_matrix_encoding_equivalence() -> None:
     """编码路径与整建路径逐元素一致 (含 score 的 null→nan→0 语义)。"""
@@ -223,33 +245,51 @@ def test_matrix_encoding_equivalence() -> None:
     for i in range(30):
         for order, sym in enumerate(("A", "B", "C")):
             close = 10.0 + i * 0.1
-            rows.append({
-                "symbol": sym, "name": sym, "date": date(2024, 1, 1) + timedelta(days=i),
-                "open": close - 0.05, "high": close + 0.1, "low": close - 0.1, "close": close,
-                "volume": 1000.0 + i, "ma5": close - 0.1, "ma10": close - 0.2, "ma20": close - 0.3,
-                # null (非候选行) 与负值/越界值都要走到 — nan_to_num(0) 语义一致
-                "score": None if i % 7 == 0 else (i * 0.01 if order != 1 else -1.0),
-                "signal_limit_up": i % 11 == 0, "signal_limit_down": False,
-                "signal_golden": (i + order) % 9 == 0,
-            })
-    panel = pl.DataFrame(rows).sort(["symbol", "date"]).with_columns(
-        pl.col("score").cast(pl.Float64, strict=False)
+            rows.append(
+                {
+                    "symbol": sym,
+                    "name": sym,
+                    "date": date(2024, 1, 1) + timedelta(days=i),
+                    "open": close - 0.05,
+                    "high": close + 0.1,
+                    "low": close - 0.1,
+                    "close": close,
+                    "volume": 1000.0 + i,
+                    "ma5": close - 0.1,
+                    "ma10": close - 0.2,
+                    "ma20": close - 0.3,
+                    # null (非候选行) 与负值/越界值都要走到 — nan_to_num(0) 语义一致
+                    "score": None if i % 7 == 0 else (i * 0.01 if order != 1 else -1.0),
+                    "signal_limit_up": i % 11 == 0,
+                    "signal_limit_down": False,
+                    "signal_golden": (i + order) % 9 == 0,
+                }
+            )
+    panel = (
+        pl.DataFrame(rows)
+        .sort(["symbol", "date"])
+        .with_columns(pl.col("score").cast(pl.Float64, strict=False))
     )
     n = len(panel)
     entries = pl.Series([(i + j) % 13 == 0 for i in range(30) for j in range(3)][:n])
     exits = pl.Series([(i * j) % 17 == 0 for i in range(30) for j in range(3)][:n])
 
     direct = build_market_matrix(
-        panel, entries, exits,
-        entry_delay_bars=1, exit_delay_bars=1,
+        panel,
+        entries,
+        exits,
+        entry_delay_bars=1,
+        exit_delay_bars=1,
         entry_signal_ids=["signal_golden"],
     )
     encoding = encode_panel_matrix(panel, entry_signal_ids=["signal_golden"])
     via_encoding = build_market_matrix_from_encoding(
         encoding,
         score=panel.get_column("score"),
-        entries=entries, exits=exits,
-        entry_delay_bars=1, exit_delay_bars=1,
+        entries=entries,
+        exits=exits,
+        entry_delay_bars=1,
+        exit_delay_bars=1,
     )
 
     for field in dataclasses.fields(direct):

@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 
-from app.services import sector_monitor
 from app.services.ext_data import ExtConfig, ExtConfigStore, ExtField
 from app.services.sector_monitor import SectorMonitorService
 from app.strategy import monitor_rules
@@ -54,17 +53,19 @@ def test_validate_accepts_sector_rule_and_rejects_mixed_target_kinds():
     rule = _sector_rule([_index_target("000001.SH", "上证指数")])
     monitor_rules.validate(rule)
 
-    mixed = _sector_rule([
-        _index_target("000001.SH", "上证指数"),
-        {
-            "key": "concept:test:field:人工智能",
-            "kind": "concept",
-            "name": "人工智能",
-            "source_id": "test",
-            "field": "field",
-            "value": "人工智能",
-        },
-    ])
+    mixed = _sector_rule(
+        [
+            _index_target("000001.SH", "上证指数"),
+            {
+                "key": "concept:test:field:人工智能",
+                "kind": "concept",
+                "name": "人工智能",
+                "source_id": "test",
+                "field": "field",
+                "value": "人工智能",
+            },
+        ]
+    )
     try:
         monitor_rules.validate(mixed)
     except ValueError as exc:
@@ -80,7 +81,9 @@ def test_dimension_values_preserve_names_with_spaces_and_filter_nulls(tmp_path):
     assert service._dimension_values("nan") == []
     assert service._dimension_values(float("nan")) == []
     assert service._industry_paths("电子-半导体-数字芯片设计")[-1] == (
-        "电子-半导体-数字芯片设计", 3, "电子 / 半导体 / 数字芯片设计",
+        "电子-半导体-数字芯片设计",
+        3,
+        "电子 / 半导体 / 数字芯片设计",
     )
 
 
@@ -93,12 +96,14 @@ def test_index_targets_are_evaluated_independently(tmp_path):
     cyb = _index_target("399006.SZ", "创业板指")
     engine.set_rules([_sector_rule([sh, cyb])])
 
-    first = pl.DataFrame({
-        "symbol": ["000001.SH", "399006.SZ"],
-        "name": ["上证指数", "创业板指"],
-        "close": [3000.0, 2000.0],
-        "change_pct": [0.8, 0.9],
-    })
+    first = pl.DataFrame(
+        {
+            "symbol": ["000001.SH", "399006.SZ"],
+            "name": ["上证指数", "创业板指"],
+            "close": [3000.0, 2000.0],
+            "change_pct": [0.8, 0.9],
+        }
+    )
     assert engine.evaluate_sectors(pl.DataFrame(), first, now=1000.0) == []
 
     second = first.with_columns(
@@ -124,7 +129,11 @@ def test_index_targets_always_available(tmp_path):
 
     changed_quote = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [1.3]})
     snapshot = service.build_snapshots(
-        pl.DataFrame(), changed_quote, [first], {5}, now=1300.0,
+        pl.DataFrame(),
+        changed_quote,
+        [first],
+        {5},
+        now=1300.0,
     )
     assert snapshot["index:000001.SH"]["window_changes"][5] is not None
 
@@ -141,22 +150,25 @@ def test_concept_snapshot_uses_member_average_and_full_window(tmp_path):
     )
     ExtConfigStore(tmp_path).upsert(config)
     ext_dir = tmp_path / "ext_data" / config.id
-    pl.DataFrame({
-        "symbol": ["A", "B", "C", "D", "E"],
-        "concept": ["人工智能", "人工智能", "人工智能", "人工智能", "人工智能"],
-    }).write_parquet(ext_dir / "part.parquet")
+    pl.DataFrame(
+        {
+            "symbol": ["A", "B", "C", "D", "E"],
+            "concept": ["人工智能", "人工智能", "人工智能", "人工智能", "人工智能"],
+        }
+    ).write_parquet(ext_dir / "part.parquet")
 
     service = SectorMonitorService(_Repo(tmp_path))
     target = next(
-        target for target in service.list_targets()["concept"]
-        if target["name"] == "人工智能"
+        target for target in service.list_targets()["concept"] if target["name"] == "人工智能"
     )
-    first = pl.DataFrame({
-        "symbol": ["A", "B", "C", "D", "E"],
-        "name": ["甲", "乙", "丙", "丁", "戊"],
-        "close": [10.0] * 5,
-        "change_pct": [0.01, 0.02, 0.03, -0.01, 0.0],
-    })
+    first = pl.DataFrame(
+        {
+            "symbol": ["A", "B", "C", "D", "E"],
+            "name": ["甲", "乙", "丙", "丁", "戊"],
+            "close": [10.0] * 5,
+            "change_pct": [0.01, 0.02, 0.03, -0.01, 0.0],
+        }
+    )
     snapshots = service.build_snapshots(first, pl.DataFrame(), [target], {5}, now=1000.0)
     assert snapshots[target["key"]]["change_pct"] == pytest.approx(0.01)
     assert snapshots[target["key"]]["coverage_ratio"] == 1.0
@@ -188,18 +200,24 @@ def test_momentum_rule_triggers_after_complete_window(tmp_path):
     engine = MonitorRuleEngine()
     engine.set_sector_monitor_service(service)
     target = _index_target("000001.SH", "上证指数")
-    engine.set_rules([_sector_rule(
-        [target],
-        sector_trigger="momentum",
-        threshold_pct=1.0,
-        window_minutes=5,
-    )])
-    start = pl.DataFrame({
-        "symbol": ["000001.SH"],
-        "name": ["上证指数"],
-        "close": [3000.0],
-        "change_pct": [0.2],
-    })
+    engine.set_rules(
+        [
+            _sector_rule(
+                [target],
+                sector_trigger="momentum",
+                threshold_pct=1.0,
+                window_minutes=5,
+            )
+        ]
+    )
+    start = pl.DataFrame(
+        {
+            "symbol": ["000001.SH"],
+            "name": ["上证指数"],
+            "close": [3000.0],
+            "change_pct": [0.2],
+        }
+    )
     assert engine.evaluate_sectors(pl.DataFrame(), start, now=1000.0) == []
 
     early = start.with_columns(pl.lit(1.3).alias("change_pct"))

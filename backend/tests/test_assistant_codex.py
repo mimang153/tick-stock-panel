@@ -1,8 +1,10 @@
 """Codex CLI 结构化工具轮次: 协议往返、非法输出拒绝、沿用动作确认。"""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -24,7 +26,7 @@ def _schema(name):
 
 @pytest.fixture
 def cli_process(monkeypatch):
-    captured = {}
+    captured: dict = {}
 
     def run(args, prompt, env, timeout):
         captured.update(args=list(args), prompt=prompt, timeout=timeout)
@@ -52,13 +54,19 @@ async def test_codex_round_uses_schema_and_preserves_full_history(cli_process):
             {"name": "get_capabilities", "arguments": '{"scope":"daily"}'},
         ],
     }
-    messages = [
+    messages: list[Any] = [
         {"role": "system", "content": "只能使用本地数据"},
         {"role": "user", "content": "我有哪些策略？"},
-        {"role": "assistant", "tool_calls": [{
-            "id": "previous", "type": "function",
-            "function": {"name": "list_strategies", "arguments": "{}"},
-        }]},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "previous",
+                    "type": "function",
+                    "function": {"name": "list_strategies", "arguments": "{}"},
+                }
+            ],
+        },
         {"role": "tool", "tool_call_id": "previous", "content": '{"ok":true,"result":[]}'},
     ]
     schemas = [_schema("list_strategies"), _schema("get_capabilities")]
@@ -85,9 +93,13 @@ async def test_codex_round_uses_schema_and_preserves_full_history(cli_process):
 
 async def test_codex_round_final_text(cli_process):
     cli_process["response"] = {"content": "当前没有策略。", "tool_calls": []}
-    events = [event async for event in codex.stream_codex_round(
-        [{"role": "user", "content": "你好"}], [_schema("list_strategies")],
-    )]
+    events = [
+        event
+        async for event in codex.stream_codex_round(
+            [{"role": "user", "content": "你好"}],
+            [_schema("list_strategies")],
+        )
+    ]
     assert events == [
         {"type": "text", "delta": "当前没有策略。"},
         {"type": "round_end", "tool_calls": [], "finish_reason": "stop"},
@@ -96,9 +108,14 @@ async def test_codex_round_final_text(cli_process):
 
 async def test_codex_round_preserves_longer_explicit_timeout(cli_process):
     cli_process["response"] = {"content": "完成", "tool_calls": []}
-    _ = [event async for event in codex.stream_codex_round(
-        [{"role": "user", "content": "你好"}], [_schema("list_strategies")], timeout=900,
-    )]
+    _ = [
+        event
+        async for event in codex.stream_codex_round(
+            [{"role": "user", "content": "你好"}],
+            [_schema("list_strategies")],
+            timeout=900,
+        )
+    ]
     assert cli_process["timeout"] == 900
 
 
@@ -119,10 +136,13 @@ async def test_codex_process_timeout_keeps_duration_and_distinct_error_kind(monk
     assert "600" in caplog.text and "timed out" in caplog.text
 
 
-@pytest.mark.parametrize("message", [
-    "Codex CLI 调用超时(600 秒), 本轮生成已终止。",
-    "Codex CLI 调用超时, 请稍后重试或检查本机 Codex 登录状态",
-])
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Codex CLI 调用超时(600 秒), 本轮生成已终止。",
+        "Codex CLI 调用超时, 请稍后重试或检查本机 Codex 登录状态",
+    ],
+)
 async def test_codex_chat_timeout_is_not_collapsed_into_network_error(monkeypatch, message):
     async def fake_cli(*args, **kwargs):
         raise RuntimeError(message)
@@ -130,9 +150,12 @@ async def test_codex_chat_timeout_is_not_collapsed_into_network_error(monkeypatc
     monkeypatch.setattr(ai_provider, "_run_codex_cli", fake_cli)
     monkeypatch.setattr(chat_service, "ai_configured", lambda: True)
     monkeypatch.setattr(chat_service, "is_codex_cli_provider", lambda: True)
-    events = [json.loads(line) async for line in chat_service.chat_stream(
-        history=[{"role": "user", "content": "分析工具结果"}],
-    )]
+    events = [
+        json.loads(line)
+        async for line in chat_service.chat_stream(
+            history=[{"role": "user", "content": "分析工具结果"}],
+        )
+    ]
     assert events[0]["kind"] == "timeout"
     assert events[0]["message"] == message
     assert events[-1]["type"] == "done"
@@ -143,23 +166,31 @@ def test_connection_failure_still_uses_network_error():
     assert event["kind"] == "network"
 
 
-@pytest.mark.parametrize("response", [
-    "not JSON",
-    "[]",
-    '{"content":"答复"}',
-    '{"content":null,"tool_calls":[]}',
-    '{"content":"答复","tool_calls":{}}',
-    '{"content":"答复","tool_calls":[null]}',
-    '{"content":"答复","tool_calls":[{"name":"shell","arguments":"{}"}]}',
-    '{"content":"答复","tool_calls":[{"name":"list_strategies","arguments":"broken"}]}',
-    '{"content":"答复","tool_calls":[{"name":"list_strategies","arguments":"[]"}]}',
-    '{"content":"答复","tool_calls":[{"name":"list_strategies","arguments":{}}]}',
-    '{"content":"","tool_calls":[]}',
-    json.dumps({"content": "不能显示", "tool_calls": [
-        {"name": "list_strategies", "arguments": "{}"},
-        {"name": "shell", "arguments": "{}"},
-    ]}),
-])
+@pytest.mark.parametrize(
+    "response",
+    [
+        "not JSON",
+        "[]",
+        '{"content":"答复"}',
+        '{"content":null,"tool_calls":[]}',
+        '{"content":"答复","tool_calls":{}}',
+        '{"content":"答复","tool_calls":[null]}',
+        '{"content":"答复","tool_calls":[{"name":"shell","arguments":"{}"}]}',
+        '{"content":"答复","tool_calls":[{"name":"list_strategies","arguments":"broken"}]}',
+        '{"content":"答复","tool_calls":[{"name":"list_strategies","arguments":"[]"}]}',
+        '{"content":"答复","tool_calls":[{"name":"list_strategies","arguments":{}}]}',
+        '{"content":"","tool_calls":[]}',
+        json.dumps(
+            {
+                "content": "不能显示",
+                "tool_calls": [
+                    {"name": "list_strategies", "arguments": "{}"},
+                    {"name": "shell", "arguments": "{}"},
+                ],
+            }
+        ),
+    ],
+)
 async def test_codex_round_rejects_invalid_output_before_any_event(monkeypatch, response):
     async def fake_cli(*args, **kwargs):
         return response
@@ -168,7 +199,7 @@ async def test_codex_round_rejects_invalid_output_before_any_event(monkeypatch, 
     events = []
     with pytest.raises(RuntimeError, match="Codex CLI"):
         async for event in codex.stream_codex_round([], [_schema("list_strategies")]):
-            events.append(event)
+            events += [event]
     assert events == []
 
 
@@ -184,7 +215,10 @@ async def test_codex_round_old_cli_reports_upgrade_instead_of_text_fallback(monk
 @pytest.mark.parametrize("approve", [True, False])
 async def test_codex_tools_still_use_action_confirmation(monkeypatch, approve):
     outputs = [
-        {"content": "", "tool_calls": [{"name": "add_to_watchlist", "arguments": '{"symbol":"600519.SH"}'}]},
+        {
+            "content": "",
+            "tool_calls": [{"name": "add_to_watchlist", "arguments": '{"symbol":"600519.SH"}'}],
+        },
         {"content": "完成" if approve else "已取消", "tool_calls": []},
     ]
     requests = []
@@ -212,7 +246,11 @@ async def test_codex_tools_still_use_action_confirmation(monkeypatch, approve):
             await actions.registry.resolve(event["call_id"], approve)
 
     assert [event["type"] for event in events] == [
-        "tool_call", "action_confirm", "tool_result", "delta", "done",
+        "tool_call",
+        "action_confirm",
+        "tool_result",
+        "delta",
+        "done",
     ]
     assert executed == ([("add_to_watchlist", {"symbol": "600519.SH"})] if approve else [])
     result = requests[1]["messages"][-1]
@@ -229,8 +267,11 @@ async def test_codex_failure_becomes_error_and_done(monkeypatch):
     monkeypatch.setattr(ai_provider, "_run_codex_cli", fake_cli)
     monkeypatch.setattr(chat_service, "ai_configured", lambda: True)
     monkeypatch.setattr(chat_service, "is_codex_cli_provider", lambda: True)
-    events = [json.loads(line) async for line in chat_service.chat_stream(
-        history=[{"role": "user", "content": "hi"}],
-    )]
+    events = [
+        json.loads(line)
+        async for line in chat_service.chat_stream(
+            history=[{"role": "user", "content": "hi"}],
+        )
+    ]
     assert [event["type"] for event in events] == ["error", "done"]
     assert "401" in events[0]["message"]

@@ -6,6 +6,7 @@ calls from FastAPI worker threads terminate the process
 
 A process-wide lock is enough: overlapping kernels queue instead of crashing.
 """
+
 from __future__ import annotations
 
 import threading

@@ -12,6 +12,7 @@
 
 消费方: app.services.market_overview_builder (看板总览 + 复盘情绪分)。
 """
+
 from __future__ import annotations
 
 import math
@@ -34,38 +35,64 @@ def _default_config() -> dict:
         return {"label": label, "weight": 1.0, "terms": terms, **extra}
 
     def term(key: str, label: str, weight: float, low: float, high: float, unit: str = "") -> dict:
-        return {"key": key, "label": label, "weight": weight, "low": low, "high": high, "unit": unit}
+        return {
+            "key": key,
+            "label": label,
+            "weight": weight,
+            "low": low,
+            "high": high,
+            "unit": unit,
+        }
 
     return {
         "dimensions": {
-            "index": dim("指数", [
-                term("avg_index_pct", "指数平均涨跌", 1.0, -2.5, 2.5, "%"),
-            ]),
-            "profit": dim("赚钱", [
-                term("up_pct", "上涨占比", 0.45, 20, 80, "%"),
-                term("avg_pct", "平均涨跌", 0.25, -0.02, 0.02),
-                term("median_pct", "中位涨跌", 0.20, -0.02, 0.02),
-                term("strong_diff_pct", "强涨-强跌占比差", 0.10, -8, 8, "%"),
-            ]),
-            "money": dim("量能", [
-                term("avg_vol_ratio", "平均量比", 0.70, 0.6, 1.8),
-                term("high_vol_pct", "放量股占比", 0.30, 2, 12, "%"),
-            ]),
-            "speculation": dim("投机", [
-                term("limit_up", "涨停家数", 0.25, 5, 90, "家"),
-                term("seal_rate", "封板率", 0.35, 30, 85, "%"),
-                term("max_boards", "最高连板", 0.25, 1, 8, "板"),
-                term("tier2_count", "2板及以上", 0.15, 0, 30, "家"),
-            ]),
+            "index": dim(
+                "指数",
+                [
+                    term("avg_index_pct", "指数平均涨跌", 1.0, -2.5, 2.5, "%"),
+                ],
+            ),
+            "profit": dim(
+                "赚钱",
+                [
+                    term("up_pct", "上涨占比", 0.45, 20, 80, "%"),
+                    term("avg_pct", "平均涨跌", 0.25, -0.02, 0.02),
+                    term("median_pct", "中位涨跌", 0.20, -0.02, 0.02),
+                    term("strong_diff_pct", "强涨-强跌占比差", 0.10, -8, 8, "%"),
+                ],
+            ),
+            "money": dim(
+                "量能",
+                [
+                    term("avg_vol_ratio", "平均量比", 0.70, 0.6, 1.8),
+                    term("high_vol_pct", "放量股占比", 0.30, 2, 12, "%"),
+                ],
+            ),
+            "speculation": dim(
+                "投机",
+                [
+                    term("limit_up", "涨停家数", 0.25, 5, 90, "家"),
+                    term("seal_rate", "封板率", 0.35, 30, 85, "%"),
+                    term("max_boards", "最高连板", 0.25, 1, 8, "板"),
+                    term("tier2_count", "2板及以上", 0.15, 0, 30, "家"),
+                ],
+            ),
             # 抗跌为逆向维度: 下跌越多分越低, 故 invert
-            "resilience": dim("抗跌", [
-                term("down_pct", "下跌占比", 0.55, 20, 80, "%"),
-                term("strong_down_pct", "强跌占比", 0.45, 1, 12, "%"),
-            ], invert=True),
-            "mainline": dim("主线", [
-                term("mainline_avg", "主线平均涨跌", 0.65, -0.005, 0.03),
-                term("mainline_cover_pct", "主线覆盖率", 0.35, 1, 12, "%"),
-            ]),
+            "resilience": dim(
+                "抗跌",
+                [
+                    term("down_pct", "下跌占比", 0.55, 20, 80, "%"),
+                    term("strong_down_pct", "强跌占比", 0.45, 1, 12, "%"),
+                ],
+                invert=True,
+            ),
+            "mainline": dim(
+                "主线",
+                [
+                    term("mainline_avg", "主线平均涨跌", 0.65, -0.005, 0.03),
+                    term("mainline_cover_pct", "主线覆盖率", 0.35, 1, 12, "%"),
+                ],
+            ),
         },
         "thresholds": {"strong": 70, "warm": 55, "neutral": 45, "cold": 30},
     }
@@ -97,6 +124,25 @@ def score_of(value, low: float, high: float) -> int:
     return max(0, min(100, round((v - low) / (high - low) * 100)))
 
 
+def _merge_dimension(dim: dict, user_dim: dict) -> None:
+    """把用户维度配置按 term key 合并到出厂维度, 仅接纳合法有限数值。"""
+    weight = _finite(user_dim.get("weight"))
+    if weight is not None and weight >= 0:
+        dim["weight"] = weight
+    user_terms = user_dim.get("terms")
+    if not isinstance(user_terms, list):
+        return
+    by_key = {t["key"]: t for t in user_terms if isinstance(t, dict)}
+    for term in dim["terms"]:
+        user_term = by_key.get(term["key"])
+        if not isinstance(user_term, dict):
+            continue
+        for field in ("weight", "low", "high"):
+            val = _finite(user_term.get(field))
+            if val is not None:
+                term[field] = val
+
+
 def merge_config(raw: dict | None) -> dict:
     """用户配置 → 完整配置 (逐字段合并, 缺项补默认)。
 
@@ -112,23 +158,8 @@ def merge_config(raw: dict | None) -> dict:
     if isinstance(raw_dims, dict):
         for key, dim in merged["dimensions"].items():
             user_dim = raw_dims.get(key)
-            if not isinstance(user_dim, dict):
-                continue
-            weight = _finite(user_dim.get("weight"))
-            if weight is not None and weight >= 0:
-                dim["weight"] = weight
-            user_terms = user_dim.get("terms")
-            if not isinstance(user_terms, list):
-                continue
-            by_key = {t["key"]: t for t in user_terms if isinstance(t, dict)}
-            for term in dim["terms"]:
-                user_term = by_key.get(term["key"])
-                if not isinstance(user_term, dict):
-                    continue
-                for field in ("weight", "low", "high"):
-                    val = _finite(user_term.get(field))
-                    if val is not None:
-                        term[field] = val
+            if isinstance(user_dim, dict):
+                _merge_dimension(dim, user_dim)
 
     raw_th = raw.get("thresholds")
     if isinstance(raw_th, dict):
@@ -150,7 +181,7 @@ def _normalize_thresholds(th: dict) -> None:
         val = _finite(th.get(key))
         th[key] = NEUTRAL if val is None else max(0.0, min(100.0, val))
     values = sorted((th[k] for k in th), reverse=True)
-    for (key, _), val in zip(LABELS, values):
+    for (key, _), val in zip(LABELS, values, strict=False):
         th[key] = val
 
 
@@ -167,7 +198,7 @@ def dimension_value(dim: dict, metrics: dict) -> int:
     acc = 0.0
     for term in dim["terms"]:
         if term["key"] not in metrics:
-            continue   # 该指标本次不可用 → 跳过, 不当作 0
+            continue  # 该指标本次不可用 → 跳过, 不当作 0
         value = score_of(metrics[term["key"]], term["low"], term["high"])
         weight = max(0.0, float(term.get("weight") or 0))
         if weight <= 0:
@@ -200,13 +231,15 @@ def compute(metrics: dict, config: dict | None = None) -> dict:
         dim = cfg["dimensions"][key]
         value = dimension_value(dim, metrics)
         radar.append({"key": key, "label": dim["label"], "value": value})
-        dims.append({
-            "key": key,
-            "label": dim["label"],
-            "value": value,
-            "weight": dim["weight"],
-            "invert": bool(dim.get("invert")),
-        })
+        dims.append(
+            {
+                "key": key,
+                "label": dim["label"],
+                "value": value,
+                "weight": dim["weight"],
+                "invert": bool(dim.get("invert")),
+            }
+        )
 
     # 等权时直接取整数均值: 权重在均值里本就约掉, 而 Python 3.12+ 的 sum() 对
     # 浮点走补偿求和、对整数是精确累加 —— 走 `int * 1.0` 会引入浮点误差, 让恰好
@@ -239,5 +272,6 @@ def public_config(config: dict | None = None) -> dict:
         "config": cfg,
         "defaults": DEFAULT_CONFIG,
         "dimension_order": list(DIMENSION_ORDER),
-        "labels": [{"key": k, "name": n} for k, n in LABELS] + [{"key": "fallback", "name": FALLBACK_LABEL}],
+        "labels": [{"key": k, "name": n} for k, n in LABELS]
+        + [{"key": "fallback", "name": FALLBACK_LABEL}],
     }

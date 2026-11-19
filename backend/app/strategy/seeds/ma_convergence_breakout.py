@@ -63,13 +63,18 @@ MAX_HOLD_DAYS = 15
 
 
 class MAConvergenceBreakoutMatrixStrategy:
+    """均线粘合突破策略：三线收敛后放量向上突破，捕捉变盘启动点。"""
+
     def required_fields(self) -> frozenset[str]:
+        """返回策略所需的最小字段集。"""
         return frozenset({"close", "volume"})
 
     def required_warmup_bars(self, params: dict) -> int:
+        """返回预热根数（20 根基线 + 粘合持续天数）。"""
         return 20 + int(params.get("squeeze_days", 5))
 
     def compute_signals(self, market: MarketDataMatrix, params: dict) -> SignalMatrix:
+        """粘合带持续收敛后，放量站上三线上方入场，跌破 MA10 离场。"""
         ma5 = matrix_feature(market, "ma5")
         ma10 = matrix_feature(market, "ma10")
         ma20 = matrix_feature(market, "ma20")
@@ -86,7 +91,9 @@ class MAConvergenceBreakoutMatrixStrategy:
 
         # 今日变盘: 放量阳线脱离粘合带, 收盘站上三线上方
         entry = squeeze & (market.close > band_top)
-        entry &= matrix_feature(market, "change_pct") >= float(params.get("min_change_pct", 2.0)) / 100.0
+        entry &= (
+            matrix_feature(market, "change_pct") >= float(params.get("min_change_pct", 2.0)) / 100.0
+        )
         if params.get("require_volume", True):
             entry &= matrix_feature(market, "vol_ratio_5d") >= 1.2
 

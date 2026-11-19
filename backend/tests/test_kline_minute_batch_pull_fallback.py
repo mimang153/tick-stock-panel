@@ -5,8 +5,9 @@
 只剩竞价栏。修复后: 回退返回本地已落盘的行 (图冻结在最后落盘时刻), 并以
 truncated 字段标记残缺 symbol, 供前端提示。
 """
-import json
+
 import datetime as _dt
+import json
 
 import polars as pl
 import pytest
@@ -23,17 +24,23 @@ _COLS = ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount
 def _bars(symbol: str, start_hm: _dt.datetime, n: int) -> pl.DataFrame:
     """n 根连续 1 分钟 bar (datetime 为 Datetime 类型, 供 sort/diff 用)。"""
     ts = pl.datetime_range(start_hm, start_hm + _dt.timedelta(minutes=n - 1), "1m", eager=True)
-    return pl.DataFrame({
-        "symbol": pl.Series([symbol] * n, dtype=pl.String),
-        "datetime": ts,
-        "open": [10.0] * n, "high": [10.1] * n, "low": [9.9] * n, "close": [10.0] * n,
-        "volume": [100.0] * n, "amount": [1000.0] * n,
-    })
+    return pl.DataFrame(
+        {
+            "symbol": pl.Series([symbol] * n, dtype=pl.String),
+            "datetime": ts,
+            "open": [10.0] * n,
+            "high": [10.1] * n,
+            "low": [9.9] * n,
+            "close": [10.0] * n,
+            "volume": [100.0] * n,
+            "amount": [1000.0] * n,
+        }
+    )
 
 
 @pytest.fixture()
-def repo(tmp_path):
-    return KlineRepository(DataStore(tmp_path))
+def repo(tmp_path, ck_runtime):
+    return KlineRepository(DataStore(tmp_path), storage=ck_runtime)
 
 
 def _fake_req(repo):
@@ -43,7 +50,13 @@ def _fake_req(repo):
     return type("R", (), {"app": type("A", (), {"state": state})()})()
 
 
-def _pin_clock(repo, monkeypatch, local_df_by_symbol: dict[str, pl.DataFrame], pull_df: pl.DataFrame, calls: list):
+def _pin_clock(
+    repo,
+    monkeypatch,
+    local_df_by_symbol: dict[str, pl.DataFrame],
+    pull_df: pl.DataFrame,
+    calls: list,
+):
     """钉死北京时钟 + 本地分区 + 补拉结果。pull_df 为空帧即模拟补拉失败/断网。"""
     from app.api import kline as kline_api
 
@@ -69,8 +82,13 @@ def test_pull_failure_falls_back_to_local_rows(repo, monkeypatch):
     from app.api import kline as kline_api
 
     calls: list = []
-    _pin_clock(repo, monkeypatch, {_SYM: _bars(_SYM, _dt.datetime(2026, 10, 23, 9, 30), 30)},
-               pl.DataFrame(), calls)
+    _pin_clock(
+        repo,
+        monkeypatch,
+        {_SYM: _bars(_SYM, _dt.datetime(2026, 10, 23, 9, 30), 30)},
+        pl.DataFrame(),
+        calls,
+    )
 
     out = json.loads(kline_api.get_minute_batch(_fake_req(repo), {"symbols": [_SYM]}).body)
     rows = out["data"].get(_SYM)
@@ -85,8 +103,13 @@ def test_pull_success_merges_without_truncated(repo, monkeypatch):
     from app.api import kline as kline_api
 
     calls: list = []
-    _pin_clock(repo, monkeypatch, {_SYM: _bars(_SYM, _dt.datetime(2026, 10, 23, 9, 30), 30)},
-               _bars(_SYM, _dt.datetime(2026, 10, 23, 10, 0), 30), calls)
+    _pin_clock(
+        repo,
+        monkeypatch,
+        {_SYM: _bars(_SYM, _dt.datetime(2026, 10, 23, 9, 30), 30)},
+        _bars(_SYM, _dt.datetime(2026, 10, 23, 10, 0), 30),
+        calls,
+    )
 
     out = json.loads(kline_api.get_minute_batch(_fake_req(repo), {"symbols": [_SYM]}).body)
     rows = out["data"][_SYM]
@@ -100,10 +123,14 @@ def test_pull_merges_legacy_column_order_and_overwrites_the_live_bar(repo, monke
     from app.api import kline as kline_api
 
     local = _bars(_SYM, _dt.datetime(2026, 10, 23, 9, 30), 30)
-    live = _bars(_SYM, _dt.datetime(2026, 10, 23, 9, 59), 3).with_columns(
-        pl.lit(10.5).alias("close"),
-    ).select("symbol", "open", "high", "low", "close", "volume", "amount", "datetime")
-    calls = []
+    live = (
+        _bars(_SYM, _dt.datetime(2026, 10, 23, 9, 59), 3)
+        .with_columns(
+            pl.lit(10.5).alias("close"),
+        )
+        .select("symbol", "open", "high", "low", "close", "volume", "amount", "datetime")
+    )
+    calls: list = []
     _pin_clock(repo, monkeypatch, {_SYM: local}, live, calls)
 
     out = json.loads(kline_api.get_minute_batch(_fake_req(repo), {"symbols": [_SYM]}).body)
@@ -119,8 +146,13 @@ def test_fresh_local_skips_pull_and_truncated(repo, monkeypatch):
     from app.api import kline as kline_api
 
     calls: list = []
-    _pin_clock(repo, monkeypatch, {_SYM: _bars(_SYM, _dt.datetime(2026, 10, 23, 9, 30), 90)},
-               pl.DataFrame(), calls)
+    _pin_clock(
+        repo,
+        monkeypatch,
+        {_SYM: _bars(_SYM, _dt.datetime(2026, 10, 23, 9, 30), 90)},
+        pl.DataFrame(),
+        calls,
+    )
 
     out = json.loads(kline_api.get_minute_batch(_fake_req(repo), {"symbols": [_SYM]}).body)
     assert len(out["data"][_SYM]) == 90
@@ -145,11 +177,19 @@ def test_since_filter_drops_symbol_and_truncated_marker(repo, monkeypatch):
     from app.api import kline as kline_api
 
     calls: list = []
-    _pin_clock(repo, monkeypatch, {_SYM: _bars(_SYM, _dt.datetime(2026, 10, 23, 9, 30), 30)},
-               pl.DataFrame(), calls)
+    _pin_clock(
+        repo,
+        monkeypatch,
+        {_SYM: _bars(_SYM, _dt.datetime(2026, 10, 23, 9, 30), 30)},
+        pl.DataFrame(),
+        calls,
+    )
 
-    out = json.loads(kline_api.get_minute_batch(
-        _fake_req(repo), {"symbols": [_SYM], "since": "2026-10-23T10:50:00"},
-    ).body)
+    out = json.loads(
+        kline_api.get_minute_batch(
+            _fake_req(repo),
+            {"symbols": [_SYM], "since": "2026-10-23T10:50:00"},
+        ).body
+    )
     assert _SYM not in out["data"]
     assert "truncated" not in out, "标记必须与 data 键一致, 不回传的标的不得标记"

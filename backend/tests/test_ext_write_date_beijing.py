@@ -12,12 +12,14 @@ UTC 容器里北京 00:00-08:00 之间写入的数据会落进前一天的分区
 
 判据不依赖跑测试的机器时区: 把北京日期钉在 2026-03-02, 断言分区按它落盘。
 """
+
 from __future__ import annotations
 
 import io
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import polars as pl
 import pytest
@@ -32,12 +34,14 @@ BEIJING_DAY = date(2026, 3, 2)
 
 @pytest.fixture
 def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    ExtConfigStore(tmp_path).upsert(ExtConfig(
-        id="hot",
-        label="人气",
-        mode="timeseries",
-        fields=[ExtField("symbol", "string"), ExtField("heat", "float")],
-    ))
+    ExtConfigStore(tmp_path).upsert(
+        ExtConfig(
+            id="hot",
+            label="人气",
+            mode="timeseries",
+            fields=[ExtField("symbol", "string"), ExtField("heat", "float")],
+        )
+    )
     # 北京日期钉死; raising=False: 未修复代码里模块没有 cn_today, 钉了也不会被用到
     monkeypatch.setattr(ext_api, "cn_today", lambda: BEIJING_DAY, raising=False)
     monkeypatch.setattr(ext_svc, "cn_today", lambda: BEIJING_DAY, raising=False)
@@ -46,7 +50,7 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def _request(data_dir: Path) -> SimpleNamespace:
+def _request(data_dir: Path) -> Any:
     state = SimpleNamespace(repo=SimpleNamespace(store=SimpleNamespace(data_dir=data_dir)))
     return SimpleNamespace(app=SimpleNamespace(state=state))
 
@@ -61,7 +65,9 @@ def _csv_upload() -> UploadFile:
 
 
 async def test_upload_without_snapshot_date_lands_in_the_beijing_day(data_dir: Path) -> None:
-    resp = await ext_api.upload_data(_request(data_dir), "hot", file=_csv_upload(), snapshot_date=None)
+    resp = await ext_api.upload_data(
+        _request(data_dir), "hot", file=_csv_upload(), snapshot_date=None
+    )
 
     assert resp["date"] == "2026-03-02"
     assert _partitions(data_dir) == ["date=2026-03-02"]
@@ -82,14 +88,17 @@ def test_service_default_snapshot_date_is_the_beijing_day(data_dir: Path) -> Non
     config = ExtConfigStore(data_dir).get("hot")
     df = pl.DataFrame({"symbol": ["000001.SZ"], "heat": [3.5]})
 
-    ext_svc.write_ext_parquet(df, config, data_dir, snapshot_date=None)
+    ext_svc.write_ext_parquet(df, cast(Any, config), data_dir, snapshot_date=None)
 
     assert _partitions(data_dir) == ["date=2026-03-02"]
 
 
 async def test_explicit_dates_still_win(data_dir: Path) -> None:
     resp = await ext_api.upload_data(
-        _request(data_dir), "hot", file=_csv_upload(), snapshot_date="2026-01-05",
+        _request(data_dir),
+        "hot",
+        file=_csv_upload(),
+        snapshot_date="2026-01-05",
     )
     assert resp["date"] == "2026-01-05"
 

@@ -1,4 +1,8 @@
-"""Custom data source extension points."""
+"""Custom data source extension points.
+
+Re-exports loader APIs so callers depend on this package, not the loader module.
+"""
+
 from app.data_providers.custom.loader import (
     create_provider,
     data_sources_dir,

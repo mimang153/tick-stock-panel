@@ -3,6 +3,7 @@
 These validate orchestration, not financial formulas or production user capacity.
 Run with -s to collect request counts and latency evidence.
 """
+
 import json
 import threading
 import time
@@ -10,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
@@ -74,7 +76,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(metrics, "submissions", metrics.SubmissionLimiter(limit=30))
     app = FastAPI()
     app.middleware("http")(workload_middleware)
-    app.add_exception_handler(WorkBusyError, shared_work_busy_handler)
+    app.add_exception_handler(WorkBusyError, cast(Any, shared_work_busy_handler))
     app.include_router(screener.router)
     app.include_router(data.router)
     app.state.repo, app.state.strategy_engine = repo, engine
@@ -118,9 +120,17 @@ def test_shared_page_load_and_polling_do_not_repeat_work(client, clients):
     # Sequential later visitors share the completed result as well.
     assert http.post("/api/screener/run_all", json=body()).json()["task_id"] == task_id
     latencies = sorted(ms for _, ms in responses)
-    print(json.dumps({"clients": clients, "autoload_requests": clients + 1, "status_polls": 10,
-                      "strategy_executions": len(engine.calls),
-                      "p95_ms": round(latencies[min(len(latencies) - 1, int(len(latencies) * .95))], 2)}))
+    print(
+        json.dumps(
+            {
+                "clients": clients,
+                "autoload_requests": clients + 1,
+                "status_polls": 10,
+                "strategy_executions": len(engine.calls),
+                "p95_ms": round(latencies[min(len(latencies) - 1, int(len(latencies) * 0.95))], 2),
+            }
+        )
+    )
 
 
 def test_completed_manual_runs_keep_legacy_rerun_behavior(client):
@@ -136,7 +146,11 @@ def test_distinct_heavy_requests_are_bounded_and_health_stays_available(client):
     engine.release = threading.Event()
     try:
         with ThreadPoolExecutor(10) as pool:
-            responses = list(pool.map(lambda i: http.post("/api/screener/run_all", json=body(sid=str(i))), range(10)))
+            responses = list(
+                pool.map(
+                    lambda i: http.post("/api/screener/run_all", json=body(sid=str(i))), range(10)
+                )
+            )
         assert sum(response.status_code == 200 for response in responses) == 2
         busy = [response for response in responses if response.status_code == 503]
         assert len(busy) == 8
@@ -167,12 +181,16 @@ def test_preset_views_share_results_and_manual_rerun_bypasses_completed_cache(cl
     http, engine, _ = client
     request = {"strategy_id": "0", "as_of": "2026-11-04", "ensure": True}
     with ThreadPoolExecutor(20) as pool:
-        responses = list(pool.map(lambda _: http.post("/api/screener/run_preset", json=request), range(20)))
+        responses = list(
+            pool.map(lambda _: http.post("/api/screener/run_preset", json=request), range(20))
+        )
     assert all(response.status_code == 200 for response in responses)
     assert engine.calls == ["0"]
     assert http.post("/api/screener/run_preset", json=request).status_code == 200
     assert engine.calls == ["0"]
-    assert http.post("/api/screener/run_preset", json={**request, "ensure": False}).status_code == 200
+    assert (
+        http.post("/api/screener/run_preset", json={**request, "ensure": False}).status_code == 200
+    )
     assert engine.calls == ["0", "0"]
 
 

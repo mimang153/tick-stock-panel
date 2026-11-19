@@ -30,7 +30,7 @@ def _normalize_regime_point(value: Any) -> RegimePoint:
         state = str(value.get("state", ""))
         score = float(value.get("score", 0) or 0)
         return state, score
-    if isinstance(value, (tuple, list)) and len(value) >= 2:
+    if isinstance(value, tuple | list) and len(value) >= 2:
         return str(value[0]), float(value[1] or 0)
     raise ValueError("市场环境数据格式无效")
 
@@ -80,8 +80,7 @@ def align_regime_t_minus_one(
     跳过首日不参与分组即可, 不应阻断整个回测。内部缺口仍 fail-closed。
     """
     regime_map = {
-        _date_text(key): _normalize_regime_point(value)
-        for key, value in regime_by_date.items()
+        _date_text(key): _normalize_regime_point(value) for key, value in regime_by_date.items()
     }
     if not regime_map:
         raise ValueError("市场环境数据为空, 请先在数据页完成市场环境计算后再回测")
@@ -106,9 +105,8 @@ def align_regime_t_minus_one(
         if point is not None:
             aligned[index] = point
             continue
-        required = (
-            (required_start_text is None or current_label >= required_start_text)
-            and (required_end_text is None or current_label <= required_end_text)
+        required = (required_start_text is None or current_label >= required_start_text) and (
+            required_end_text is None or current_label <= required_end_text
         )
         if required:
             missing_dates.append(previous_label)
@@ -117,8 +115,7 @@ def align_regime_t_minus_one(
         first_missing = missing_dates[0]
         suffix = f" 等 {len(missing_dates)} 天" if len(missing_dates) > 1 else ""
         raise ValueError(
-            f"市场环境数据覆盖不完整: 缺少前一交易日环境 {first_missing}{suffix}, "
-            "请先补算对应区间"
+            f"市场环境数据覆盖不完整: 缺少前一交易日环境 {first_missing}{suffix}, 请先补算对应区间"
         )
     return aligned
 
@@ -140,10 +137,7 @@ def build_regime_filter_mask(
     """
     if not regime_filter:
         return None
-    allowed_states = {
-        str(state)
-        for state in (regime_filter.get("states") or [])
-    }
+    allowed_states = {str(state) for state in (regime_filter.get("states") or [])}
     min_score = regime_filter.get("min_score")
     if not allowed_states and min_score is None:
         return None
@@ -159,8 +153,7 @@ def build_regime_filter_mask(
         if point is None:
             continue
         state, score = point
-        mask[index] = (
-            (not allowed_states or state in allowed_states)
-            and (min_score is None or score >= float(min_score))
+        mask[index] = (not allowed_states or state in allowed_states) and (
+            min_score is None or score >= float(min_score)
         )
     return mask

@@ -4,6 +4,7 @@
   - 纯读 O(1): 缓存冷/预热中不得触发 _refresh_enriched (端点随行情 tick 被反复调用);
   - 缓存不可用时返回 None, 而不是把「预热中」和「日期超窗」混为一谈。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -37,8 +38,11 @@ def test_span_none_when_cache_cold():
 
 
 def test_span_none_when_cache_empty():
-    repo = _bare_repo(cache=pl.DataFrame(schema={"symbol": pl.Utf8, "date": pl.Date}),
-                      start=date(2026, 1, 1), cache_date=date(2026, 8, 14))
+    repo = _bare_repo(
+        cache=pl.DataFrame(schema={"symbol": pl.Utf8, "date": pl.Date}),
+        start=date(2026, 1, 1),
+        cache_date=date(2026, 8, 14),
+    )
 
     assert repo.get_enriched_history_span() is None
 
@@ -52,10 +56,12 @@ def test_span_none_when_start_missing():
 
 
 def test_span_returns_bounds_without_refresh():
-    cache = pl.DataFrame({
-        "symbol": ["600000.SH", "600000.SH"],
-        "date": [date(2026, 1, 1), date(2026, 8, 14)],
-    })
+    cache = pl.DataFrame(
+        {
+            "symbol": ["600000.SH", "600000.SH"],
+            "date": [date(2026, 1, 1), date(2026, 8, 14)],
+        }
+    )
     repo = _bare_repo(cache=cache, start=date(2026, 1, 1), cache_date=date(2026, 8, 14))
     calls = _spy_refresh(repo)
 
@@ -65,10 +71,12 @@ def test_span_returns_bounds_without_refresh():
 
 def test_span_falls_back_to_column_max():
     """cache_date 缺失时回退取日期列最大值 (仍不触发刷新)。"""
-    cache = pl.DataFrame({
-        "symbol": ["600000.SH", "600000.SH"],
-        "date": [date(2026, 1, 1), date(2026, 8, 14)],
-    })
+    cache = pl.DataFrame(
+        {
+            "symbol": ["600000.SH", "600000.SH"],
+            "date": [date(2026, 1, 1), date(2026, 8, 14)],
+        }
+    )
     repo = _bare_repo(cache=cache, start=date(2026, 1, 1), cache_date=None)
     calls = _spy_refresh(repo)
 

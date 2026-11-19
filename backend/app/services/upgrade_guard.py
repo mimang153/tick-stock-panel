@@ -16,6 +16,7 @@
 
 源码运行 (无清单) 时功能整体停用, 二开者走 git + scripts/upgrade_check.py。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -59,8 +60,11 @@ class UpgradeGuardBusyError(RuntimeError):
 
 
 def _safe_path(base: Path, relative: str) -> Path:
-    if not relative or "\\" in relative or ":" in relative or any(
-        part in ("", ".", "..") for part in relative.split("/")
+    if (
+        not relative
+        or "\\" in relative
+        or ":" in relative
+        or any(part in ("", ".", "..") for part in relative.split("/"))
     ):
         raise ValueError("非法升级备份路径")
     path = base
@@ -137,7 +141,9 @@ class UpgradeGuard:
         self.manifest: dict[str, str] = {}
         if self.root is not None:
             try:
-                payload = json.loads((self.root / "app" / MANIFEST_NAME).read_text(encoding="utf-8"))
+                payload = json.loads(
+                    (self.root / "app" / MANIFEST_NAME).read_text(encoding="utf-8")
+                )
                 self.manifest = {str(k): str(v) for k, v in payload.get("files", {}).items()}
                 self.manifest_version = str(payload.get("version") or "") or None
             except Exception as e:  # noqa: BLE001 — 清单损坏按未启用处理
@@ -194,16 +200,20 @@ class UpgradeGuard:
 
     def _classify(self, cache: dict[str, Any]) -> tuple[list[str], list[str]]:
         """磁盘 vs 当前清单 → (用户修改的, 用户新增的)。命中缓存免重哈希。"""
+        root = self.root
+        if root is None:
+            return [], []
         modified: list[str] = []
         added: list[str] = []
         seen: set[str] = set()
         data_root = self.data_dir.resolve()
-        if self.root == data_root:
+        if root == data_root:
             raise ValueError("程序目录与数据目录相同，无法安全扫描升级备份")
 
-        for parent, directories, filenames in os.walk(self.root, onerror=_unreadable_directory):
+        for parent, directories, filenames in os.walk(root, onerror=_unreadable_directory):
             directories[:] = [
-                name for name in directories
+                name
+                for name in directories
                 if name not in EXCLUDED_DIRS and (Path(parent) / name).resolve() != data_root
             ]
             for name in filenames:
@@ -245,7 +255,44 @@ class UpgradeGuard:
             shutil.rmtree(snapshot, ignore_errors=True)
             raise
 
-    def _build_report(self, from_version: str, prev_manifest: dict[str, str]) -> dict[str, Any] | None:
+    @staticmethod
+    def _classify_backup_diff(disk_sha: str | None, user_sha: str, prev_sha: str | None) -> str:
+        """按新旧磁盘与用户快照的哈希关系判定差异类别。"""
+        if disk_sha == user_sha:
+            return "match"
+        if disk_sha is None:
+            return "added_lost"
+        if prev_sha is not None and disk_sha == prev_sha:
+            # 新版内容 == 旧版基线 → 新版没动此文件, 用户的修改被升级覆盖
+            return "restorable"
+        return "conflict"
+
+    def _write_report_files(
+        self,
+        live: Path,
+        rows: list[dict[str, Any]],
+        temporary: Path,
+        report: dict[str, Any],
+        report_dir: Path,
+    ) -> None:
+        """把用户备份文件与报告落盘到临时目录后原子改名。"""
+        try:
+            for row in rows:
+                src = live / row["relpath"]
+                dst = temporary / "files" / row["relpath"]
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+            atomic_write_text(
+                temporary / "report.json", json.dumps(report, ensure_ascii=False, indent=1)
+            )
+            temporary.rename(report_dir)
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary, ignore_errors=True)
+
+    def _build_report(
+        self, from_version: str, prev_manifest: dict[str, str]
+    ) -> dict[str, Any] | None:
         """版本变化时, 用旧 live 备份 + 旧清单快照 + 新磁盘生成对比报告。"""
         rows: list[dict[str, Any]] = []
         live = self.live_dir
@@ -270,22 +317,16 @@ class UpgradeGuard:
             disk = _safe_path(self.root, rel)  # type: ignore[arg-type]
             disk_sha = _sha256(disk) if disk.is_file() else None
             prev_sha = prev_manifest.get(rel)
-            if disk_sha == user_sha:
-                category = "match"
-            elif disk_sha is None:
-                category = "added_lost"
-            elif prev_sha is not None and disk_sha == prev_sha:
-                # 新版内容 == 旧版基线 → 新版没动此文件, 用户的修改被升级覆盖
-                category = "restorable"
-            else:
-                category = "conflict"
-            rows.append({
-                "relpath": rel,
-                "category": category,
-                "user_modified": True,
-                "in_old_manifest": prev_sha is not None,
-                "current_exists": disk_sha is not None,
-            })
+            category = self._classify_backup_diff(disk_sha, user_sha, prev_sha)
+            rows.append(
+                {
+                    "relpath": rel,
+                    "category": category,
+                    "user_modified": True,
+                    "in_old_manifest": prev_sha is not None,
+                    "current_exists": disk_sha is not None,
+                }
+            )
         if not rows:
             return None
         token = uuid.uuid4().hex
@@ -304,17 +345,7 @@ class UpgradeGuard:
             "files": rows,
             "dir": str(report_dir),
         }
-        try:
-            for row in rows:
-                src = live / row["relpath"]
-                dst = temporary / "files" / row["relpath"]
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dst)
-            atomic_write_text(temporary / "report.json", json.dumps(report, ensure_ascii=False, indent=1))
-            temporary.rename(report_dir)
-        finally:
-            if temporary.exists():
-                shutil.rmtree(temporary, ignore_errors=True)
+        self._write_report_files(live, rows, temporary, report, report_dir)
         return report
 
     def _latest_report_id(self, state: dict[str, Any]) -> str | None:
@@ -337,7 +368,12 @@ class UpgradeGuard:
     def _prune_backups(self, snapshot: Path, report_id: str | None) -> None:
         """仅清理本功能生成的自动副本, 新快照已提交后才调用。"""
         for path in snapshot.parent.iterdir():
-            if path != snapshot and not path.is_symlink() and path.is_dir() and _SNAPSHOT_ID.fullmatch(path.name):
+            if (
+                path != snapshot
+                and not path.is_symlink()
+                and path.is_dir()
+                and _SNAPSHOT_ID.fullmatch(path.name)
+            ):
                 shutil.rmtree(path)
         legacy = self.state_dir / "live"
         if legacy.exists() and not legacy.is_symlink():
@@ -345,7 +381,9 @@ class UpgradeGuard:
         reports_dir = _safe_path(self.state_dir, "reports")
         if reports_dir.exists():
             for path in reports_dir.iterdir():
-                owned = _REPORT_ID.fullmatch(path.name) or re.fullmatch(r"\.report-[0-9a-f]{32}", path.name)
+                owned = _REPORT_ID.fullmatch(path.name) or re.fullmatch(
+                    r"\.report-[0-9a-f]{32}", path.name
+                )
                 if owned and path.name != report_id and not path.is_symlink() and path.is_dir():
                     shutil.rmtree(path)
 
@@ -364,7 +402,8 @@ class UpgradeGuard:
         committed = False
         try:
             state = self._load_state()
-            cache = state.get("file_cache") if isinstance(state.get("file_cache"), dict) else {}
+            raw_cache = state.get("file_cache")
+            cache = raw_cache if isinstance(raw_cache, dict) else {}
             cache = {str(k): v for k, v in cache.items()}
 
             modified, added = self._classify(cache)
@@ -373,7 +412,11 @@ class UpgradeGuard:
             prev_version = state.get("last_version")
             if prev_version and prev_version != __version__:
                 prev_manifest = state.get("manifest_snapshot")
-                prev_manifest = {str(k): str(v) for k, v in prev_manifest.items()} if isinstance(prev_manifest, dict) else {}
+                prev_manifest = (
+                    {str(k): str(v) for k, v in prev_manifest.items()}
+                    if isinstance(prev_manifest, dict)
+                    else {}
+                )
                 report = self._build_report(str(prev_version), prev_manifest)
 
             snapshot = self._sync_live(modified + added)
@@ -400,7 +443,9 @@ class UpgradeGuard:
                 "added": added,
                 "backup_dir": str(snapshot),
                 "reports_dir": str(self.reports_dir),
-                "pending_report": self._load_report(report["id"]) if report else self._pending_report(state),
+                "pending_report": self._load_report(report["id"])
+                if report
+                else self._pending_report(state),
             }
             with self._lock:
                 self._last_status = status
@@ -495,7 +540,9 @@ class UpgradeGuard:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
-            self._thread = threading.Thread(target=self._scan_worker, name="upgrade-guard", daemon=True)
+            self._thread = threading.Thread(
+                target=self._scan_worker, name="upgrade-guard", daemon=True
+            )
             self._thread.start()
 
     def _scan_worker(self) -> None:
@@ -504,14 +551,16 @@ class UpgradeGuard:
             if status.get("enabled"):
                 logger.info(
                     "upgrade guard: %d modified, %d added files backed up (manifest %s)",
-                    len(status.get("modified", [])), len(status.get("added", [])),
+                    len(status.get("modified", [])),
+                    len(status.get("added", [])),
                     status.get("manifest_version"),
                 )
                 report = status.get("pending_report")
                 if report:
                     logger.warning(
                         "upgrade guard: upgrade %s → %s detected: %s",
-                        report.get("from_version"), report.get("to_version"),
+                        report.get("from_version"),
+                        report.get("to_version"),
                         report.get("counts"),
                     )
             else:

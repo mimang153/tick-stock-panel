@@ -113,7 +113,9 @@ def _recent_limit_ups(daily: pl.DataFrame | None, lookback: int) -> pl.DataFrame
     )
 
 
-def filter_minute_history(df: pl.DataFrame, params: dict, *, daily: pl.DataFrame | None = None) -> pl.DataFrame:
+def filter_minute_history(
+    df: pl.DataFrame, params: dict, *, daily: pl.DataFrame | None = None
+) -> pl.DataFrame:
     """红K形态过滤: 全向量化, 无逐行 Python 循环。
 
     - 每标的按时间取当日最早 bars 根 (开盘窗口); 不足 bars 根不触发

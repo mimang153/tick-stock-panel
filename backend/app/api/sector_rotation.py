@@ -1,4 +1,5 @@
 """板块切换(盘中轮动) API — 基于全量分钟数据 + 扩展资金流。薄层, 计算在 services。"""
+
 from __future__ import annotations
 
 import json
@@ -14,12 +15,24 @@ router = APIRouter(prefix="/api/sector-rotation", tags=["sector-rotation"])
 @router.get("")
 def get_sector_rotation(
     request: Request,
-    kind: Literal["concept", "industry"] = Query("concept", description="板块维度: 概念/行业 二选一"),
-    flow: str | None = Query(None, max_length=200, description="资金流扩展列 (表id.列名), 缺省纯涨幅"),
+    kind: Literal["concept", "industry"] = Query(
+        "concept", description="板块维度: 概念/行业 二选一"
+    ),
+    flow: str | None = Query(
+        None, max_length=200, description="资金流扩展列 (表id.列名), 缺省纯涨幅"
+    ),
     top: int = Query(30, ge=5, le=100, description="返回板块数上限"),
     bucket: int = Query(5, description="分钟桶粒度 (1/5/15)"),
-    series_names: str | None = Query(None, max_length=2000, description='自定义展示板块 JSON 数组, 如 ["A题材","B题材"]; 缺省=自动榜'),
-    exclude_sectors: str | None = Query(None, max_length=4000, description='自动活跃榜排除板块 JSON 字符串数组; 缺省=内置属性板块名单, 传 [] = 清空名称过滤'),
+    series_names: str | None = Query(
+        None,
+        max_length=2000,
+        description='自定义展示板块 JSON 数组, 如 ["A题材","B题材"]; 缺省=自动榜',
+    ),
+    exclude_sectors: str | None = Query(
+        None,
+        max_length=4000,
+        description="自动活跃榜排除板块 JSON 字符串数组; 缺省=内置属性板块名单, 传 [] = 清空名称过滤",
+    ),
     auto_rows: int | None = Query(None, ge=1, le=20, description="自动模式展示行数 (前N), 缺省 10"),
     sort_by: Literal["activity", "score", "pct", "rank_change", "momentum", "flow"] = Query(
         "activity",

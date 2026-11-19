@@ -1,4 +1,5 @@
 """Merge persistent watchlist demand and short-lived detail leases for one market worker."""
+
 from __future__ import annotations
 
 import logging
@@ -15,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 class QuoteDemand:
+    """合并持久化自选与短期详情页订阅, 供同一行情 worker 决定取数标的。"""
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._leases: dict[str, tuple[float, frozenset[str]]] = {}
@@ -42,11 +45,12 @@ class QuoteDemand:
             self._leases.pop(client_id, None)
 
     def symbols(self, data_dir: Path) -> set[str]:
+        """返回自选清单与未过期订阅标的的并集; 读盘失败时沿用上一份有效清单。"""
         now = time.monotonic()
         path = data_dir / "user_data" / "watchlist.parquet"
         try:
             stat = path.stat()
-            signature = (str(path), stat.st_mtime_ns, stat.st_size, watchlist.revision())
+            signature: tuple = (str(path), stat.st_mtime_ns, stat.st_size, watchlist.revision())
         except OSError:
             signature = (str(path), None, watchlist.revision())
         with self._lock:
@@ -55,7 +59,7 @@ class QuoteDemand:
             # Disk IO stays outside the lease lock; all page readers share this worker.
             try:
                 saved = frozenset(r["symbol"] for r in watchlist.list_symbols() if r.get("symbol"))
-            except Exception:  # noqa: BLE001 -- a broken watchlist must not stop market/detail quotes
+            except Exception:  # noqa: BLE001 - 自选清单读取失败保留上一份有效缓存, 不阻断行情
                 logger.warning("自选订阅读取失败，保留上一份有效清单", exc_info=True)
                 saved = cached[1] if cached else frozenset()
             else:

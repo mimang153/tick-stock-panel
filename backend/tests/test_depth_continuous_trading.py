@@ -9,6 +9,7 @@
 午间 11:30-13:00 停止轮询, 缓存保持 11:30 正确值。窗口定义须与
 quote_service._is_continuous_trading 一致。
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -124,8 +125,11 @@ def test_window_matches_quote_service():
         for hour in range(0, 24):
             for minute in (0, 30):
                 fn = _cn_now_at(hour, minute, weekday)
-                with patch.object(depth_service, "cn_now", fn), \
-                        patch.object(quote_service, "cn_now", fn):
-                    assert DepthService._is_continuous_trading() == QuoteService._is_continuous_trading(), (
-                        f"窗口不一致 @ weekday={weekday} {hour:02d}:{minute:02d}"
-                    )
+                with (
+                    patch.object(depth_service, "cn_now", fn),
+                    patch.object(quote_service, "cn_now", fn),
+                ):
+                    assert (
+                        DepthService._is_continuous_trading()
+                        == QuoteService._is_continuous_trading()
+                    ), f"窗口不一致 @ weekday={weekday} {hour:02d}:{minute:02d}"

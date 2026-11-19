@@ -11,6 +11,7 @@
   - 登录限流: 错5次锁5分钟(见 auth router 内存计数)。
   - 单密码, 不做多用户(避免重构全项目数据层)。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -45,6 +46,7 @@ _configured_cache: bool | None = None
 
 def _path() -> Path:
     from app.config import settings
+
     p = settings.data_dir / "user_data" / "auth.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
@@ -63,7 +65,9 @@ def _load() -> dict:
 def _save(data: dict) -> None:
     p = _path()
     atomic_write_text(
-        p, json.dumps(data, indent=2, ensure_ascii=False), mode=0o600,
+        p,
+        json.dumps(data, indent=2, ensure_ascii=False),
+        mode=0o600,
     )
 
 
@@ -89,6 +93,7 @@ def _verify_password(password: str, salt_hex: str, hash_hex: str) -> bool:
 # ================================================================
 # 密码管理
 # ================================================================
+
 
 def invalidate_runtime_caches() -> None:
     """auth.json 被外部写入后 (配置备份导入) 失效进程内缓存。
@@ -122,12 +127,14 @@ def set_password(password: str) -> None:
     salt_hex, hash_hex = _hash_password(password)
     with _lock:
         _sessions.clear()  # 改密码 = 旧会话全部失效
-        _save({
-            "password_hash": hash_hex,
-            "password_salt": salt_hex,
-            "updated_at": int(time.time()),
-            "sessions": {},  # 清空持久化会话
-        })
+        _save(
+            {
+                "password_hash": hash_hex,
+                "password_salt": salt_hex,
+                "updated_at": int(time.time()),
+                "sessions": {},  # 清空持久化会话
+            }
+        )
     _configured_cache = None  # 失效缓存, 下次 is_configured 重读最新真值
     logger.info("access password set")
 
@@ -218,9 +225,13 @@ def _restore_sessions() -> None:
         d = _load()
         now = time.time()
         saved = d.get("sessions") or {}
-        for token, expire in saved.items():
-            if isinstance(expire, (int, float)) and expire > now:
-                _sessions[token] = expire
+        _sessions.update(
+            {
+                token: expire
+                for token, expire in saved.items()
+                if isinstance(expire, int | float) and expire > now
+            }
+        )
         if len(_sessions) != len(saved):
             # 有过期会话被清理, 落盘一次
             _persist_sessions_locked()

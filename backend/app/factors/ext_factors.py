@@ -18,7 +18,8 @@
 
 缓存与失效 (CONTRIBUTING §6.1):
 - 配置清单复用 ExtConfigStore.load_all 的目录签名缓存;
-- 已加载的扩展帧按 (config 目录/分区签名) 缓存, 数据/配置变更后由
+- 已加载的扩展帧按 (config_id/模式/内容签名) 缓存, 键不含本机目录路径;
+  数据/配置变更后由
   invalidate_ext_caches 清除 (写入端 write_ext_parquet / upsert / delete 自动调用),
   同时清策略结果缓存 —— 策略历史窗口与 enriched 内存缓存里的帧含旧扩展列。
 """
@@ -26,6 +27,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import re
 from pathlib import Path
@@ -42,8 +44,9 @@ _NUMERIC_DTYPES = frozenset({"int", "float"})
 # 信号通道支持的 dtype: 数值 (Float64) + 字符串 (Utf8, contains/==/!=)
 _SIGNAL_DTYPES = _NUMERIC_DTYPES | {"string"}
 
-# 帧缓存: (data_dir, config_id, mode) -> (目录/分区签名, DataFrame)
-_frame_cache: dict[tuple[str, str, str], tuple[tuple, pl.DataFrame]] = {}
+# 帧缓存: (config_id, mode, 内容签名) -> (写入方逻辑根 ID, DataFrame)。
+# 键不含绝对路径，保证不同挂载点上的相同数据可共享；根 ID 只用于按 data_dir 失效。
+_frame_cache: dict[tuple[str, str, tuple], tuple[str, pl.DataFrame]] = {}
 # 注册同步状态: (data_dir, 配置签名); None/失配 → 下次调用重新同步。
 # 已注册集合以注册表为权威 (ext_ 前缀条目), 不单独记账 —— 失效入口清空
 # 状态后, 重新同步仍能从注册表注销已移除的扩展因子。
@@ -66,6 +69,20 @@ def _resolve_dir(data_dir: Path | None) -> Path:
     from app.config import settings
 
     return Path(settings.data_dir)
+
+
+def _cache_root_id(root: Path) -> str:
+    """缓存条目的写入方逻辑根标识；只用于失效，不参与跨实例共享键。"""
+    return str(root.resolve())
+
+
+def _parquet_digest(path: Path) -> tuple[str, int] | None:
+    """快照 parquet 的内容指纹，避免把本机 mtime 带进共享缓存键。"""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha256(data).hexdigest(), len(data)
 
 
 def _load_configs(data_dir: Path):
@@ -244,9 +261,10 @@ def _timeseries_frame(root: Path, config, fields: list) -> pl.DataFrame:
     if not dates:
         return pl.DataFrame()
     sig = tuple(d.isoformat() for d in dates)
-    key = (str(root), config.id, "timeseries")
+    root_id = _cache_root_id(root)
+    key = (config.id, "timeseries", sig)
     cached = _frame_cache.get(key)
-    if cached is not None and cached[0] == sig:
+    if cached is not None and cached[0] == root_id:
         return cached[1]
     try:
         raw = store.read_ext_timeseries(config.id)
@@ -264,7 +282,7 @@ def _timeseries_frame(root: Path, config, fields: list) -> pl.DataFrame:
         frame = frame.with_columns(raw["_ext_date"]).unique(
             subset=["symbol", "_ext_date"], keep="last"
         )
-    _frame_cache[key] = (sig, frame)
+    _frame_cache[key] = (root_id, frame)
     return frame
 
 
@@ -272,20 +290,18 @@ def _snapshot_frame(root: Path, config, fields: list) -> pl.DataFrame:
     """快照扩展帧 (symbol, ext 列); 按 part.parquet (mtime, size) 签名缓存。"""
     path = root / "ext_data" / config.id / "part.parquet"
     try:
-        sig = None
-        if path.exists():
-            st = path.stat()
-            sig = (st.st_mtime_ns, st.st_size)
+        sig = _parquet_digest(path) if path.exists() else None
         if sig is None:
             return pl.DataFrame()
-        key = (str(root), config.id, "snapshot")
+        root_id = _cache_root_id(root)
+        key = (config.id, "snapshot", sig)
         cached = _frame_cache.get(key)
-        if cached is not None and cached[0] == sig:
+        if cached is not None and cached[0] == root_id:
             return cached[1]
         frame = _select_fields(pl.read_parquet(path), config, fields, with_date=None)
         if not frame.is_empty():
             frame = frame.unique(subset=["symbol"], keep="last")
-        _frame_cache[key] = (sig, frame)
+        _frame_cache[key] = (root_id, frame)
         return frame
     except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("扩展表 %s 快照读取失败, 跳过: %s", config.id, e)
@@ -412,9 +428,10 @@ def invalidate_ext_caches(
     结果 (页面秒加载) 而非黑屏; 手动上传/配置变更仍走全清。
     """
     global _sync_state
-    root_key = str(_resolve_dir(data_dir))
-    for key in [k for k in _frame_cache if k[0] == root_key]:
-        _frame_cache.pop(key, None)
+    root_key = _cache_root_id(_resolve_dir(data_dir))
+    for key, (owner, _frame) in list(_frame_cache.items()):
+        if owner == root_key:
+            _frame_cache.pop(key, None)
     _sync_state = None
     if keep_strategy_cache:
         return

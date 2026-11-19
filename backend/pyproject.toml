@@ -44,6 +44,8 @@ dependencies = [
     "pytesseract>=0.3.10",
     "Pillow>=10.0",
     "clickhouse-connect>=0.9",
+    # PostgreSQL 事务层：模拟盘账户资金状态（DES-005），binary 自带 libpq 免系统依赖。
+    "psycopg[binary]>=3.1",
 ]
 
 [project.optional-dependencies]
@@ -61,6 +63,11 @@ backtest = [
     "vectorbt>=0.26",
 ]
 
+# 多实例缓存后端：默认 memory，不需要该 extra；CACHE_BACKEND=redis 时使用。
+cache-redis = [
+    "redis>=5.0,<7",
+]
+
 # 桌面客户端依赖: pywebview 桌面窗口。打包用 (PyInstaller), 生产/Docker 不需要。
 # 启用:`uv sync --extra desktop`
 desktop = [
@@ -72,6 +79,8 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
     "mypy>=1.10",
+    "fakeredis>=2.20",
+    "redis>=5.0,<7",
 ]
 
 [build-system]

@@ -13,6 +13,7 @@
 且失败位置固定 (第一批日K响应后 ~0.3s), 与并发无关 —— `recover=True`、清理标记、
 停掉实时轮询都不能绕过。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -25,15 +26,17 @@ from app.tickflow.repository import DataStore, KlineRepository
 
 
 def _frame(day: str, close: float) -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": ["000001.SZ"],
-        "date": [date.fromisoformat(day)],
-        "open": [close],
-        "high": [close],
-        "low": [close],
-        "close": [close],
-        "volume": [1_000.0],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["000001.SZ"],
+            "date": [date.fromisoformat(day)],
+            "open": [close],
+            "high": [close],
+            "low": [close],
+            "close": [close],
+            "volume": [1_000.0],
+        }
+    )
 
 
 def _two_days(close_13: float, close_14: float) -> pl.DataFrame:

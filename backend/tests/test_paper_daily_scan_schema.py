@@ -4,6 +4,7 @@
 没有。裸 pl.scan_parquet 以首个文件定 schema, 遇到多列即抛 SchemaError, 被
 吞成 None: 昨收取不到(涨跌停校验失效)、次日开盘/收盘单与盘后定版拿不到价格。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -18,9 +19,14 @@ SYM = "002893.SZ"
 
 def _write(tmp_path, day: date, close: float, *, with_quote_ts: bool) -> None:
     data = {
-        "symbol": [SYM], "date": [day],
-        "open": [close - 0.1], "high": [close + 0.1], "low": [close - 0.2], "close": [close],
-        "volume": [10000.0], "amount": [close * 10000.0],
+        "symbol": [SYM],
+        "date": [day],
+        "open": [close - 0.1],
+        "high": [close + 0.1],
+        "low": [close - 0.2],
+        "close": [close],
+        "volume": [10000.0],
+        "amount": [close * 10000.0],
     }
     if with_quote_ts:
         data["quote_ts"] = [1_790_000_000_000]
@@ -44,15 +50,28 @@ def test_prev_close_reads_across_partitions_with_extra_quote_ts(tmp_path):
 def test_read_daily_bar_reads_across_partitions_with_extra_quote_ts(tmp_path):
     _mixed_partitions(tmp_path)
 
-    assert paper.read_daily_bar(tmp_path, SYM, "stock", "2026-10-08") == pytest.approx({"open": 10.52, "close": 10.62})
-    assert paper.read_daily_bar(tmp_path, SYM, "stock", "2026-09-30") == pytest.approx({"open": 10.61, "close": 10.71})
+    assert paper.read_daily_bar(tmp_path, SYM, "stock", "2026-10-08") == pytest.approx(
+        {"open": 10.52, "close": 10.62}
+    )
+    assert paper.read_daily_bar(tmp_path, SYM, "stock", "2026-09-30") == pytest.approx(
+        {"open": 10.61, "close": 10.71}
+    )
 
 
 def test_index_close_reads_across_partitions_with_extra_quote_ts(tmp_path):
-    for day, close, with_ts in ((date(2026, 9, 30), 4500.0, False), (date(2026, 10, 8), 4520.0, True)):
+    for day, close, with_ts in (
+        (date(2026, 9, 30), 4500.0, False),
+        (date(2026, 10, 8), 4520.0, True),
+    ):
         data = {
-            "symbol": ["000300.SH"], "date": [day], "open": [close], "high": [close],
-            "low": [close], "close": [close], "volume": [1.0], "amount": [1.0],
+            "symbol": ["000300.SH"],
+            "date": [day],
+            "open": [close],
+            "high": [close],
+            "low": [close],
+            "close": [close],
+            "volume": [1.0],
+            "amount": [1.0],
         }
         if with_ts:
             data["quote_ts"] = [1_790_000_000_000]

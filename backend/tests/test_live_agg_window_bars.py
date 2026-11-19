@@ -7,6 +7,7 @@ _build_live_agg 按「自然日 90 天」切历史再 tail(59)/tail(60) 取部�
 - 次新股历史不足窗口长度时, tail(N) 取到的是全部已有 K 线, 盘中 MA60 等于
   (已有收盘价之和 + 今收) / 60 这类残缺值, 而盘后全量在窗口不满时为空。
 """
+
 from __future__ import annotations
 
 import math
@@ -23,9 +24,19 @@ TODAY = date(2025, 3, 3)
 CLOSED = {date(2025, 1, 1)} | {date(2025, 1, 28) + timedelta(days=i) for i in range(8)}
 
 VALUE_COLUMNS = (
-    "ma5", "ma10", "ma20", "ma30", "ma60",
-    "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
-    "vol_ma5", "vol_ma10", "vol_ratio_5d",
+    "ma5",
+    "ma10",
+    "ma20",
+    "ma30",
+    "ma60",
+    "momentum_5d",
+    "momentum_10d",
+    "momentum_20d",
+    "momentum_30d",
+    "momentum_60d",
+    "vol_ma5",
+    "vol_ma10",
+    "vol_ratio_5d",
 )
 # 以下列在窗口不满时全量为空; 数值口径另有独立问题, 这里只核对空与非空
 NULLNESS_COLUMNS = ("high_60d", "low_60d", "boll_upper", "boll_lower", "annual_vol_20d")
@@ -45,7 +56,7 @@ def _bars() -> pl.DataFrame:
     days = _history_days()
     rows = []
     listings = {
-        "600001.SH": days,       # 老股: 约 200 个历史交易日
+        "600001.SH": days,  # 老股: 约 200 个历史交易日
         "000002.SZ": days,
         "001003.SZ": days[-12:],  # 次新股: 12 个历史交易日
         "001004.SZ": days[-40:],  # 次新股: 40 个历史交易日
@@ -55,16 +66,20 @@ def _bars() -> pl.DataFrame:
             close = round(10.0 + n + 0.6 * math.sin(i * 0.37 + n) + 0.004 * i, 2)
             volume = 1000.0 + 300.0 * math.cos(i * 0.51 + n)
             rows.append((symbol, day, close, close + 0.08, close - 0.08, close, volume))
-    return pl.DataFrame(
-        rows,
-        schema=["symbol", "date", "open", "high", "low", "close", "volume"],
-        orient="row",
-    ).with_columns(
-        (pl.col("close") * pl.col("volume")).alias("amount"),
-        pl.col("close").alias("raw_close"),
-        pl.col("high").alias("raw_high"),
-        pl.col("low").alias("raw_low"),
-    ).sort(["symbol", "date"])
+    return (
+        pl.DataFrame(
+            rows,
+            schema=["symbol", "date", "open", "high", "low", "close", "volume"],
+            orient="row",
+        )
+        .with_columns(
+            (pl.col("close") * pl.col("volume")).alias("amount"),
+            pl.col("close").alias("raw_close"),
+            pl.col("high").alias("raw_high"),
+            pl.col("low").alias("raw_low"),
+        )
+        .sort(["symbol", "date"])
+    )
 
 
 def _incremental(repo: KlineRepository, bars: pl.DataFrame, latest: date) -> pl.DataFrame:
@@ -84,13 +99,17 @@ def _assert_matches_full(incremental: pl.DataFrame, bars: pl.DataFrame) -> None:
     mismatches: list[str] = []
     for column in (*VALUE_COLUMNS, *NULLNESS_COLUMNS):
         pairs = zip(
-            full["symbol"].to_list(), incremental[column].to_list(), full[column].to_list(),
+            full["symbol"].to_list(),
+            incremental[column].to_list(),
+            full[column].to_list(),
             strict=True,
         )
         for symbol, got, want in pairs:
             if (got is None) != (want is None):
                 mismatches.append(f"{symbol} {column}: 盘中={got} 全量={want}")
-            elif column in VALUE_COLUMNS and got is not None and got != pytest.approx(want, rel=1e-9):
+            elif (
+                column in VALUE_COLUMNS and got is not None and got != pytest.approx(want, rel=1e-9)
+            ):
                 mismatches.append(f"{symbol} {column}: 盘中={got:.6f} 全量={want:.6f}")
     assert mismatches == []
 

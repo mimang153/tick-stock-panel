@@ -17,6 +17,7 @@
 (标定脚本一次性运行, 不提交); 关键异常段抽查(2024-09/10 rally→climax→ebb,
 2024-01/02 微盘退潮)人工核过归属。阈值集中在下方, 调整只需改这里。
 """
+
 from __future__ import annotations
 
 import logging
@@ -47,32 +48,32 @@ _PHASE_PRIORITY = (PHASE_CLIMAX, PHASE_RALLY, PHASE_EBB, PHASE_IGNITE, PHASE_ICE
 
 # ───────────────────────── 阈值(标定自 2020-08~2026-08 分位数) ─────────────────────────
 # 高潮: 情绪极端宣泄 — 二板以上宽度或首板数达到 p90 的 ~2 倍以上(历史 <2% 天数)
-CLIMAX_GE2 = 50            # p90(25) 的 2 倍
-CLIMAX_FIRST_BOARD = 220   # p90(88) 的 2.5 倍
+CLIMAX_GE2 = 50  # p90(25) 的 2 倍
+CLIMAX_FIRST_BOARD = 220  # p90(88) 的 2.5 倍
 # 主升: 高度/宽度/晋级率同时高于中位 (p60), 或晋级率极强 (p85+)
-RALLY_HEIGHT = 7           # p60
-RALLY_GE2 = 15             # p60
-RALLY_PROMO = 0.23         # p60
-RALLY_PROMO_ALT = 0.30     # p85+
+RALLY_HEIGHT = 7  # p60
+RALLY_GE2 = 15  # p60
+RALLY_PROMO = 0.23  # p60
+RALLY_PROMO_ALT = 0.30  # p85+
 RALLY_GE2_ALT = 12
 RALLY_HEIGHT_ALT = 5
 # 退潮: 晋级率崩至 p20 以下且宽度自近期高位回落; 或晋级率/封板率双弱
-EBB_PROMO = 0.15           # p20
+EBB_PROMO = 0.15  # p20
 EBB_PROMO_STRICT = 0.13
-EBB_SEAL = 0.57            # ~p10-p15
-EBB_RECENT_GE2 = 12        # 5 日前 ge2 高于此才认定"自高位退潮"
+EBB_SEAL = 0.57  # ~p10-p15
+EBB_RECENT_GE2 = 12  # 5 日前 ge2 高于此才认定"自高位退潮"
 EBB_RECENT_HEIGHT = 6
 # 启动: 宽度/高度自低位扩张且晋级率恢复
-IGNITE_GE2_DELTA = 3       # ge2 较 5 日前增加量
-IGNITE_GE2 = 8             # p20-p40
-IGNITE_PROMO = 0.20        # ~p55
-IGNITE_HEIGHT_DELTA = 1    # height 较 5 日前抬升
-IGNITE_HEIGHT = 5          # p40
+IGNITE_GE2_DELTA = 3  # ge2 较 5 日前增加量
+IGNITE_GE2 = 8  # p20-p40
+IGNITE_PROMO = 0.20  # ~p55
+IGNITE_HEIGHT_DELTA = 1  # height 较 5 日前抬升
+IGNITE_HEIGHT = 5  # p40
 IGNITE_PROMO_SOFT = 0.19
 # 冰点: 高度/宽度/首板同时贴地 (p10)
-ICE_HEIGHT = 4             # p10-p20
-ICE_GE2 = 6                # p10
-ICE_FIRST_BOARD = 24       # p10
+ICE_HEIGHT = 4  # p10-p20
+ICE_GE2 = 6  # p10
+ICE_FIRST_BOARD = 24  # p10
 
 # 晋级率最小池(家数), 低于此记 null(小样本噪声)
 PROMO_MIN_POOL = 10
@@ -94,11 +95,8 @@ def with_prev_consecutive(df: pl.DataFrame) -> pl.DataFrame:
     """
     if "_prev_consec" in df.columns:
         return df
-    return (
-        df.sort(["symbol", "date"])
-        .with_columns(
-            pl.col("consecutive_limit_ups").shift(1).over("symbol").alias("_prev_consec")
-        )
+    return df.sort(["symbol", "date"]).with_columns(
+        pl.col("consecutive_limit_ups").shift(1).over("symbol").alias("_prev_consec")
     )
 
 
@@ -147,8 +145,8 @@ def finalize_ladder_row(r: dict) -> dict:
     }
 
 
-def _ema(values: list[float], alpha: float = _EMA_ALPHA) -> list[float]:
-    out: list[float] = []
+def _ema(values: list[float | None], alpha: float = _EMA_ALPHA) -> list[float]:
+    out: list[float | None] = []
     cur = None
     for v in values:
         if v is None or v != v:  # None 或 NaN
@@ -166,7 +164,37 @@ def _ema(values: list[float], alpha: float = _EMA_ALPHA) -> list[float]:
             out[i] = out[first_valid]
     else:
         out = [0.0] * len(values)
-    return out
+    return [x if x is not None else 0.0 for x in out]
+
+
+def _raw_phase_label(
+    h: float,
+    fb: float,
+    g2: float,
+    pr: float,
+    sr: float,
+    g2_prev: float,
+    h_prev: float,
+) -> str:
+    """单日阶段规则判定, 按高潮/主升/冰点/退潮/启动优先级返回标签。"""
+    if g2 >= CLIMAX_GE2 or fb >= CLIMAX_FIRST_BOARD:
+        return PHASE_CLIMAX
+    if h >= RALLY_HEIGHT and g2 >= RALLY_GE2 and pr >= RALLY_PROMO:
+        return PHASE_RALLY
+    if pr >= RALLY_PROMO_ALT and g2 >= RALLY_GE2_ALT and h >= RALLY_HEIGHT_ALT:
+        return PHASE_RALLY
+    if h <= ICE_HEIGHT and g2 <= ICE_GE2 and fb <= ICE_FIRST_BOARD:
+        return PHASE_ICE
+    from_high = g2_prev >= EBB_RECENT_GE2 or h_prev >= EBB_RECENT_HEIGHT
+    if from_high and (pr <= EBB_PROMO and g2 < g2_prev):
+        return PHASE_EBB
+    if pr <= EBB_PROMO_STRICT and sr <= EBB_SEAL:
+        return PHASE_EBB
+    if g2 - g2_prev >= IGNITE_GE2_DELTA and g2 >= IGNITE_GE2 and pr >= IGNITE_PROMO:
+        return PHASE_IGNITE
+    if h - h_prev >= IGNITE_HEIGHT_DELTA and h >= IGNITE_HEIGHT and pr >= IGNITE_PROMO_SOFT:
+        return PHASE_IGNITE
+    return PHASE_REPAIR
 
 
 def classify_phase_series(daily: pl.DataFrame) -> pl.DataFrame:
@@ -184,41 +212,26 @@ def classify_phase_series(daily: pl.DataFrame) -> pl.DataFrame:
     rows = daily.sort("date")
     n = rows.height
     states = rows["state"].to_list() if "state" in rows.columns else None
-    height_s = _ema([float(v) if v is not None else None for v in rows["max_consecutive"].to_list()])
+    height_s = _ema(
+        [float(v) if v is not None else None for v in rows["max_consecutive"].to_list()]
+    )
     first_s = _ema([float(v) if v is not None else None for v in rows["first_board"].to_list()])
     ge2_s = _ema([float(v) if v is not None else None for v in rows["ge2_count"].to_list()])
     promo_s = _ema([float(v) if v is not None else None for v in rows["promo_rate"].to_list()])
     seal_s = _ema([float(v) if v is not None else None for v in rows["seal_rate"].to_list()])
 
     def raw_label(i: int) -> str:
-        h, fb, g2, pr, sr = height_s[i], first_s[i], ge2_s[i], promo_s[i], seal_s[i]
-        g2_prev = ge2_s[max(0, i - 5)]
-        h_prev = height_s[max(0, i - 5)]
-        # 高潮
-        if g2 >= CLIMAX_GE2 or fb >= CLIMAX_FIRST_BOARD:
-            return PHASE_CLIMAX
-        # 主升
-        if h >= RALLY_HEIGHT and g2 >= RALLY_GE2 and pr >= RALLY_PROMO:
-            return PHASE_RALLY
-        if pr >= RALLY_PROMO_ALT and g2 >= RALLY_GE2_ALT and h >= RALLY_HEIGHT_ALT:
-            return PHASE_RALLY
-        # 冰点: 高度/宽度/首板同时贴地 — 优先于退潮(持续死寂的市场是"冰点"
-        # 而非"自高位退潮"; 退潮的规则 B 不带 from_high 条件, 顺序反了会把
-        # 长期冰点误标成退潮)
-        if h <= ICE_HEIGHT and g2 <= ICE_GE2 and fb <= ICE_FIRST_BOARD:
-            return PHASE_ICE
-        # 退潮: 自高位回落 + 晋级率坍塌, 或晋级/封板双弱
-        from_high = g2_prev >= EBB_RECENT_GE2 or h_prev >= EBB_RECENT_HEIGHT
-        if from_high and (pr <= EBB_PROMO and g2 < g2_prev):
-            return PHASE_EBB
-        if pr <= EBB_PROMO_STRICT and sr <= EBB_SEAL:
-            return PHASE_EBB
-        # 启动: 自低位扩张
-        if g2 - g2_prev >= IGNITE_GE2_DELTA and g2 >= IGNITE_GE2 and pr >= IGNITE_PROMO:
-            return PHASE_IGNITE
-        if h - h_prev >= IGNITE_HEIGHT_DELTA and h >= IGNITE_HEIGHT and pr >= IGNITE_PROMO_SOFT:
-            return PHASE_IGNITE
-        return PHASE_REPAIR
+        # 冰点优先于退潮: 持续死寂的市场是"冰点"而非"自高位退潮";
+        # 退潮规则不带 from_high, 顺序颠倒会把长期冰点误标成退潮。
+        return _raw_phase_label(
+            height_s[i],
+            first_s[i],
+            ge2_s[i],
+            promo_s[i],
+            seal_s[i],
+            ge2_s[max(0, i - 5)],
+            height_s[max(0, i - 5)],
+        )
 
     labels: list[str] = []
     current = None
@@ -226,11 +239,7 @@ def classify_phase_series(daily: pl.DataFrame) -> pl.DataFrame:
     pending_run = 0
     for i in range(n):
         raw = raw_label(i)
-        if (
-            states is not None
-            and raw in _POSITIVE_PHASES
-            and states[i] in _VETO_STATES
-        ):
+        if states is not None and raw in _POSITIVE_PHASES and states[i] in _VETO_STATES:
             raw = PHASE_REPAIR
         if current is None:
             current = raw
@@ -250,6 +259,4 @@ def classify_phase_series(daily: pl.DataFrame) -> pl.DataFrame:
             pending, pending_run = None, 0
         else:
             labels.append(current)
-    return daily.with_columns(
-        pl.Series("phase", labels, dtype=pl.Utf8).alias("phase")
-    ).sort("date")
+    return daily.with_columns(pl.Series("phase", labels, dtype=pl.Utf8).alias("phase")).sort("date")

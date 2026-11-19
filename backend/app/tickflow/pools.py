@@ -5,12 +5,14 @@ Phase 1 实现:
   - 全 A 通过 instruments.batch 获取
   - 自选池 = 用户的 watchlist
 """
+
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import date
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import polars as pl
 
@@ -27,7 +29,7 @@ PoolId = Literal["CSI300", "CSI500", "SSE50", "CN_Equity_A", "CN_Index", "watchl
 _POOL_NAME_HINTS = {
     "CSI300": ["沪深300", "HS300", "CSI300"],
     "CSI500": ["中证500", "ZZ500", "CSI500"],
-    "SSE50":  ["上证50",  "SH50", "SSE50"],
+    "SSE50": ["上证50", "SH50", "SSE50"],
 }
 
 
@@ -40,7 +42,11 @@ def _find_universe_id(hints: list[str]) -> str | None:
         logger.warning("universes.list failed: %s", e)
         return None
     for u in unis or []:
-        item = u if isinstance(u, dict) else {"id": getattr(u, "id", ""), "name": getattr(u, "name", "")}
+        item = (
+            u
+            if isinstance(u, dict)
+            else {"id": getattr(u, "id", ""), "name": getattr(u, "name", "")}
+        )
         haystack = (item.get("id", "") + " " + item.get("name", "")).lower()
         for h in hints:
             if h.lower() in haystack:
@@ -48,8 +54,46 @@ def _find_universe_id(hints: list[str]) -> str | None:
     return None
 
 
+_POOL_TTL_S = 24 * 3600
+
+
 def _pool_cache_path(pool_id: str) -> Path:
     return settings.data_dir / "pools" / f"{pool_id}.parquet"
+
+
+def _pool_cache_key(pool_id: str) -> str:
+    digest = hashlib.sha256(str(settings.data_dir.resolve()).encode("utf-8")).hexdigest()[:12]
+    return f"pool:{pool_id}:{digest}"
+
+
+def _cache_backend() -> Any | None:
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    return runtime.cache if runtime is not None else None
+
+
+def _read_pool_from_cache(cache: Any, key: str) -> list[str] | None:
+    try:
+        payload = cache.get_json(key)
+    except Exception as exc:  # noqa: BLE001 - 缓存不可用时回退本地 parquet
+        logger.warning("读取标的池缓存失败(%s): %s", key, exc)
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("symbols"), list):
+        return None
+    return [str(symbol) for symbol in payload["symbols"]]
+
+
+def _write_pool_to_cache(cache: Any, key: str, symbols: list[str]) -> None:
+    payload = {
+        "symbols": symbols,
+        "as_of": date.today().isoformat(),
+        "schema": 1,
+    }
+    try:
+        cache.set_json(key, payload, ttl_s=_POOL_TTL_S)
+    except Exception as exc:  # noqa: BLE001 - 缓存写入失败不影响本地原子落盘
+        logger.warning("写入标的池缓存失败(%s): %s", key, exc)
 
 
 def get_pool(pool_id: PoolId, refresh: bool = False) -> list[str]:
@@ -57,10 +101,20 @@ def get_pool(pool_id: PoolId, refresh: bool = False) -> list[str]:
     if pool_id == "watchlist":
         return _load_watchlist()
 
+    backend = _cache_backend()
+    key = _pool_cache_key(pool_id)
+    if not refresh and backend is not None:
+        symbols = _read_pool_from_cache(backend, key)
+        if symbols is not None:
+            return symbols
+
     cache = _pool_cache_path(pool_id)
     if cache.exists() and not refresh:
         df = pl.read_parquet(cache)
-        return df["symbol"].to_list()
+        symbols = df["symbol"].to_list()
+        if backend is not None:
+            _write_pool_to_cache(backend, key, symbols)
+        return symbols
 
     symbols = _fetch_pool(pool_id)
     if symbols:
@@ -68,11 +122,16 @@ def get_pool(pool_id: PoolId, refresh: bool = False) -> list[str]:
 
         cache.parent.mkdir(parents=True, exist_ok=True)
         # 原子写: 半截缓存会让上面的 read_parquet 每次都抛错, 不会自愈
-        atomic_write_parquet(pl.DataFrame({"symbol": symbols, "as_of": [date.today()] * len(symbols)}), cache)
+        atomic_write_parquet(
+            pl.DataFrame({"symbol": symbols, "as_of": [date.today()] * len(symbols)}),
+            cache,
+        )
+        if backend is not None:
+            _write_pool_to_cache(backend, key, symbols)
     return symbols
 
 
-def _fetch_pool(pool_id: PoolId) -> list[str]:
+def _fetch_pool(pool_id: PoolId) -> list[str]:  # noqa: C901 - 既有 TickFlow 多分支池拉取逻辑，本次仅接入缓存
     """从 TickFlow 拉取池成份。
 
     实现:先用 universes.list 找到 universe id,再 quotes.get_by_universes 拉成份。

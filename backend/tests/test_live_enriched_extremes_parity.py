@@ -6,6 +6,7 @@ distance_to_high_60d 的「60日最高/最低」都是 60 根收盘价的极值;
 历史上影线抬高, 「创60日新高/新低」(close >= high_60d) 几乎不可能成立,
 收盘后全量重算或盘中重启又变回收盘价口径, 同一时刻的值与信号前后跳变。
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -50,18 +51,24 @@ def _bars() -> pl.DataFrame:
     last_up = 10.0 + 0.01 * 79
     last_down = 20.0 - 0.01 * 79
     rows.append(("600001.SH", TODAY, last_up, last_up + 0.03, last_up - 0.05, last_up + 0.02))
-    rows.append(("000002.SZ", TODAY, last_down, last_down + 0.05, last_down - 0.03, last_down - 0.02))
-    return pl.DataFrame(
-        rows,
-        schema=["symbol", "date", "open", "high", "low", "close"],
-        orient="row",
-    ).with_columns(
-        pl.lit(1000.0).alias("volume"),
-        (pl.col("close") * 1000.0).alias("amount"),
-        pl.col("close").alias("raw_close"),
-        pl.col("high").alias("raw_high"),
-        pl.col("low").alias("raw_low"),
-    ).sort(["symbol", "date"])
+    rows.append(
+        ("000002.SZ", TODAY, last_down, last_down + 0.05, last_down - 0.03, last_down - 0.02)
+    )
+    return (
+        pl.DataFrame(
+            rows,
+            schema=["symbol", "date", "open", "high", "low", "close"],
+            orient="row",
+        )
+        .with_columns(
+            pl.lit(1000.0).alias("volume"),
+            (pl.col("close") * 1000.0).alias("amount"),
+            pl.col("close").alias("raw_close"),
+            pl.col("high").alias("raw_high"),
+            pl.col("low").alias("raw_low"),
+        )
+        .sort(["symbol", "date"])
+    )
 
 
 def _incremental_and_full(tmp_path) -> tuple[pl.DataFrame, pl.DataFrame]:
@@ -89,6 +96,7 @@ def _incremental_and_full(tmp_path) -> tuple[pl.DataFrame, pl.DataFrame]:
 def _migrated_signal_definitions(monkeypatch):
     """注入迁移自内置的信号定义 (信号列定义驱动, 不依赖运行目录)。"""
     from tests.signal_seeds import install_pipeline_caches
+
     install_pipeline_caches(monkeypatch)
 
 

@@ -21,12 +21,16 @@ _TRADE_DATE = date(2026, 1, 15)
 def _isolated_settings_and_clock(monkeypatch):
     from app.market_time import CN_TZ
 
-    monkeypatch.setattr("app.services.preferences.load", lambda: {"minute_data_provider": "tickflow"})
+    monkeypatch.setattr(
+        "app.services.preferences.load", lambda: {"minute_data_provider": "tickflow"}
+    )
     monkeypatch.setattr("app.services.preferences.get_daily_batch_compress", lambda: True)
     monkeypatch.setattr("app.services.preferences.get_minute_batch_compress", lambda: True)
     monkeypatch.setattr(kline, "cn_today", lambda: _TRADE_DATE)
     monkeypatch.setattr(kline, "cn_now", lambda: datetime(2026, 1, 15, 10, 30))
-    monkeypatch.setattr("app.services.quote_freshness.cn_now", lambda: datetime(2026, 1, 15, 10, 30, tzinfo=CN_TZ))
+    monkeypatch.setattr(
+        "app.services.quote_freshness.cn_now", lambda: datetime(2026, 1, 15, 10, 30, tzinfo=CN_TZ)
+    )
     monkeypatch.setattr(kline, "in_continuous_session", lambda: True)
 
 
@@ -51,8 +55,9 @@ class _DetailRepo:
         self.minute = minute if minute is not None else _minute_rows()
         # /minute 读取 repo.store.data_dir 判断分钟基准标记 (无标记即旧行为)
         import tempfile
-        from types import SimpleNamespace
         from pathlib import Path
+        from types import SimpleNamespace
+
         self.store = SimpleNamespace(data_dir=Path(tempfile.mkdtemp()))
 
     def resolve_asset_type(self, symbol: str) -> str:
@@ -259,7 +264,6 @@ def test_uncompressed_payload_strips_nonfinite_floats() -> None:
     json.dumps(result, allow_nan=False)
     assert result["rows"][0]["close"] is None
     assert result["rows"][1]["close"] is None
-
 
 
 def test_pro_tier_keeps_tickflow_minute_fallback(monkeypatch):

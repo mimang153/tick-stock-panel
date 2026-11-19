@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -32,19 +33,21 @@ def _market(scale: float = 1.0):
     for asset_id, symbol in enumerate(("000001.SZ", "600000.SH")):
         for time_id in range(140):
             close = scale * (10.0 + asset_id + time_id * 0.01)
-            rows.append({
-                "symbol": symbol,
-                "name": symbol,
-                "date": start + timedelta(days=time_id),
-                "open": close * 0.99,
-                "high": close * 1.01,
-                "low": close * 0.98,
-                "close": close,
-                "volume": 100_000.0 + time_id,
-                "amount": close * 100_000.0,
-                "signal_limit_up": False,
-                "signal_limit_down": False,
-            })
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "name": symbol,
+                    "date": start + timedelta(days=time_id),
+                    "open": close * 0.99,
+                    "high": close * 1.01,
+                    "low": close * 0.98,
+                    "close": close,
+                    "volume": 100_000.0 + time_id,
+                    "amount": close * 100_000.0,
+                    "signal_limit_up": False,
+                    "signal_limit_down": False,
+                }
+            )
     return build_market_data_matrix(pl.DataFrame(rows), field_columns={"amount"})
 
 
@@ -126,7 +129,9 @@ def test_additional_rolling_operators_match_pandas_and_hit_cache():
         assert rolling_quantile(market.close, 5, 0.25) is actual_quantile
 
     np.testing.assert_allclose(actual_sum, expected.rolling(5).sum(), equal_nan=True)
-    np.testing.assert_allclose(actual_std, expected.rolling(5).std(ddof=0), atol=1e-6, equal_nan=True)
+    np.testing.assert_allclose(
+        actual_std, expected.rolling(5).std(ddof=0), atol=1e-6, equal_nan=True
+    )
     np.testing.assert_allclose(
         actual_quantile,
         expected.rolling(5).quantile(0.25),
@@ -141,13 +146,11 @@ def test_additional_rolling_operators_match_pandas_and_hit_cache():
 
 def test_builtin_matrix_strategy_formula_is_unchanged_with_cache():
     market = _market()
-    strategy_path = (
-        REPO_ROOT / "backend" / "tests" / "fixtures" / "strategies" / "macd_golden.py"
-    )
+    strategy_path = REPO_ROOT / "backend" / "tests" / "fixtures" / "strategies" / "macd_golden.py"
     strategy_def = StrategyEngine._load_file(strategy_path)
     strategy = strategy_def.matrix_strategy
     assert strategy is not None
-    params = {}
+    params: dict[str, Any] = {}
     uncached = strategy.compute_signals(market, params)
     cache = MatrixComputeCache(max_bytes=64 * 1024 * 1024)
 
@@ -182,8 +185,8 @@ def test_pipeline_reuses_basic_asset_filter_and_raw_scoring_features():
     )
     pipeline = MatrixStrategyPipeline()
     with cache.activate(market):
-        first = pipeline.run(AllEntries(), market, {}, config)
-        second = pipeline.run(AllEntries(), market, {}, config)
+        first = pipeline.run(cast(Any, AllEntries()), market, {}, config)
+        second = pipeline.run(cast(Any, AllEntries()), market, {}, config)
 
     np.testing.assert_array_equal(first.entry, second.entry)
     operations = cache.snapshot()["operations"]
@@ -223,8 +226,8 @@ def test_pipeline_protects_strategy_working_set_when_scoring_would_overflow_cach
     )
     pipeline = MatrixStrategyPipeline()
     with cache.activate(market):
-        pipeline.run(RollingStrategy(), market, {}, config)
-        pipeline.run(RollingStrategy(), market, {}, config)
+        pipeline.run(cast(Any, RollingStrategy()), market, {}, config)
+        pipeline.run(cast(Any, RollingStrategy()), market, {}, config)
 
     operations = cache.snapshot()["operations"]
     assert operations["rolling_min"]["hits"] == 1

@@ -3,7 +3,10 @@
 覆盖: watched 聚合 (多账户/禁用排除/非 strategy 排除); sync 注入/幂等/与真
 监控规则去重/策略已删跳过/解绑移除; 合成规则产生的事件带 paper_watch 前缀
 并能驱动 paper_auto 自动下单 (两轮 evaluate: 首轮基线不刷事件)。
+
+DES-005: 账户/规则/订单按 account_id 存 PG，两个账户用 conftest 唯一 id。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -52,48 +55,86 @@ def _result(pool: tuple[str, ...], buys: tuple[str, ...] = ()) -> StrategyResult
 def _quotes():
     import polars as pl
 
-    return pl.DataFrame({
-        "symbol": ["A", "B"],
-        "close": [10.0, 20.0],
-        "change_pct": [0.01, -0.02],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["A", "B"],
+            "close": [10.0, 20.0],
+            "change_pct": [0.01, -0.02],
+        }
+    )
 
 
 @pytest.fixture()
-def paper_env(tmp_path):
-    """两个账户: acc1 绑 demo (启用), acc2 绑 demo (禁用) + 一条 rule 型规则。"""
-    paper.create_account(tmp_path, 100_000.0, account_id="acc1", name="一")
-    paper.create_account(tmp_path, 100_000.0, account_id="acc2", name="二")
-    paper_auto.create_auto_rule(tmp_path, {
-        "name": "跟demo", "match_kind": "strategy", "match_id": "demo",
-        "side": "buy", "size_mode": "fixed_amount", "size_value": 5000,
-        "order_type": "next_open", "cooldown_days": 5, "max_positions": 0,
-        "enabled": True,
-    }, account_id="acc1")
-    disabled = paper_auto.create_auto_rule(tmp_path, {
-        "name": "停用", "match_kind": "strategy", "match_id": "demo",
-        "side": "buy", "size_mode": "fixed_amount", "size_value": 5000,
-        "order_type": "next_open", "cooldown_days": 5, "max_positions": 0,
-        "enabled": False,
-    }, account_id="acc2")
-    rule_kind = paper_auto.create_auto_rule(tmp_path, {
-        "name": "跟规则", "match_kind": "rule", "match_id": "mr_x",
-        "side": "buy", "size_mode": "fixed_amount", "size_value": 5000,
-        "order_type": "next_open", "cooldown_days": 5, "max_positions": 0,
-        "enabled": True,
-    }, account_id="acc2")
-    return {"disabled_id": disabled["id"], "rule_kind_id": rule_kind["id"]}
+def paper_env(tmp_path, paper_account_ids):
+    """两个唯一账户: acc1 绑 demo (启用), acc2 绑 demo (禁用) + 一条 rule 型规则。"""
+    acc1, acc2 = paper_account_ids(2)
+    paper.create_account(tmp_path, 100_000.0, account_id=acc1, name="一")
+    paper.create_account(tmp_path, 100_000.0, account_id=acc2, name="二")
+    paper_auto.create_auto_rule(
+        tmp_path,
+        {
+            "name": "跟demo",
+            "match_kind": "strategy",
+            "match_id": "demo",
+            "side": "buy",
+            "size_mode": "fixed_amount",
+            "size_value": 5000,
+            "order_type": "next_open",
+            "cooldown_days": 5,
+            "max_positions": 0,
+            "enabled": True,
+        },
+        account_id=acc1,
+    )
+    disabled = paper_auto.create_auto_rule(
+        tmp_path,
+        {
+            "name": "停用",
+            "match_kind": "strategy",
+            "match_id": "demo",
+            "side": "buy",
+            "size_mode": "fixed_amount",
+            "size_value": 5000,
+            "order_type": "next_open",
+            "cooldown_days": 5,
+            "max_positions": 0,
+            "enabled": False,
+        },
+        account_id=acc2,
+    )
+    rule_kind = paper_auto.create_auto_rule(
+        tmp_path,
+        {
+            "name": "跟规则",
+            "match_kind": "rule",
+            "match_id": "mr_x",
+            "side": "buy",
+            "size_mode": "fixed_amount",
+            "size_value": 5000,
+            "order_type": "next_open",
+            "cooldown_days": 5,
+            "max_positions": 0,
+            "enabled": True,
+        },
+        account_id=acc2,
+    )
+    return {
+        "acc1": acc1,
+        "acc2": acc2,
+        "disabled_id": disabled["id"],
+        "rule_kind_id": rule_kind["id"],
+    }
 
 
 def test_watched_strategy_ids_aggregates(tmp_path, paper_env):
-    assert paper_watch.watched_strategy_ids(tmp_path) == {"demo"}
+    assert "demo" in paper_watch.watched_strategy_ids(tmp_path)
 
 
 def test_sync_injects_synthetic_rule_and_is_idempotent(tmp_path, paper_env):
     engine = MonitorRuleEngine()
     engine.set_strategy_engine(_FakeStrategyEngine([]))
     result = paper_watch.sync(tmp_path, engine, _FakeStrategyEngine([]))
-    assert result["added"] == ["demo"]
+    assert "demo" in result["added"]
     rule = engine.rules["paper_watch:demo"]
     assert rule["type"] == "strategy"
     assert rule["scope"] == "all"
@@ -107,13 +148,20 @@ def test_sync_injects_synthetic_rule_and_is_idempotent(tmp_path, paper_env):
 def test_sync_dedupes_against_real_monitor_rule(tmp_path, paper_env):
     engine = MonitorRuleEngine()
     engine.set_strategy_engine(_FakeStrategyEngine([]))
-    engine.add_rule({
-        "id": "mr_real", "name": "真监控", "type": "strategy", "strategy_id": "demo",
-        "asset_type": "stock", "scope": "all", "enabled": True,
-        "notify_events": ["pool_entry"],
-    })
+    engine.add_rule(
+        {
+            "id": "mr_real",
+            "name": "真监控",
+            "type": "strategy",
+            "strategy_id": "demo",
+            "asset_type": "stock",
+            "scope": "all",
+            "enabled": True,
+            "notify_events": ["pool_entry"],
+        }
+    )
     result = paper_watch.sync(tmp_path, engine, _FakeStrategyEngine([]))
-    assert result["watching"] == []
+    assert "demo" not in result["watching"]
     assert "paper_watch:demo" not in engine.rules
 
 
@@ -121,7 +169,7 @@ def test_sync_skips_deleted_strategy(tmp_path, paper_env):
     engine = MonitorRuleEngine()
     engine.set_strategy_engine(_FakeStrategyEngine([], known=set()))
     result = paper_watch.sync(tmp_path, engine, _FakeStrategyEngine([], known=set()))
-    assert result["watching"] == []
+    assert "demo" not in result["watching"]
 
 
 def test_sync_removes_unbound(tmp_path, paper_env):
@@ -129,9 +177,10 @@ def test_sync_removes_unbound(tmp_path, paper_env):
     engine.set_strategy_engine(_FakeStrategyEngine([]))
     paper_watch.sync(tmp_path, engine, _FakeStrategyEngine([]))
     assert "paper_watch:demo" in engine.rules
-    paper_auto.delete_auto_rule(tmp_path, _first_rule_id(tmp_path, "acc1"), account_id="acc1")
+    acc1 = paper_env["acc1"]
+    paper_auto.delete_auto_rule(tmp_path, _first_rule_id(tmp_path, acc1), account_id=acc1)
     result = paper_watch.sync(tmp_path, engine, _FakeStrategyEngine([]))
-    assert result["removed"] == ["demo"]
+    assert "demo" in result["removed"]
     assert "paper_watch:demo" not in engine.rules
 
 
@@ -142,10 +191,12 @@ def _first_rule_id(data_dir, account_id) -> str:
 def test_synthetic_rule_events_drive_paper_orders(tmp_path, paper_env, monkeypatch):
     """端到端: sync 注入 → 两轮 evaluate (首轮基线) → 事件带 paper_watch 前缀 →
     paper_auto 按绑定规则建买单; 同时验证公开事件流里看不到沙盒信号。"""
-    strat = _FakeStrategyEngine([
-        _result(pool=("A",)),
-        _result(pool=("A", "B"), buys=("B",)),
-    ])
+    strat = _FakeStrategyEngine(
+        [
+            _result(pool=("A",)),
+            _result(pool=("A", "B"), buys=("B",)),
+        ]
+    )
     engine = MonitorRuleEngine()
     engine.set_strategy_engine(strat)
     paper_watch.sync(tmp_path, engine, strat)
@@ -162,11 +213,11 @@ def test_synthetic_rule_events_drive_paper_orders(tmp_path, paper_env, monkeypat
     buys = [ev for ev in events if ev["type"] == "buy_signal"]
     assert {ev["symbol"] for ev in buys} == {"B"}
 
-    created = paper_auto.on_rule_events(tmp_path, events, account_id="acc1")
+    created = paper_auto.on_rule_events(tmp_path, events, account_id=paper_env["acc1"])
     assert len(created) == 1
     order = created[0]
     assert order["symbol"] == "B"
     assert order["side"] == "buy"
     assert order["status"] == "pending"  # next_open 次日开盘成交
     # 账户二无启用规则, 不会重复下单
-    assert paper_auto.on_rule_events(tmp_path, events, account_id="acc2") == []
+    assert paper_auto.on_rule_events(tmp_path, events, account_id=paper_env["acc2"]) == []

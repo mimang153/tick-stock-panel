@@ -12,12 +12,13 @@
     {"type":"error","message":"..."}
     {"type":"done"}
 """
+
 from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from datetime import date
-from typing import AsyncIterator
 
 from app.services.market_overview_builder import build_market_overview
 
@@ -109,6 +110,7 @@ def effective_system_prompt() -> str:
 # 用户消息构建(精简切片,控制 token)
 # ================================================================
 
+
 def _fmt_pct(v, suffix="%") -> str:
     if v is None:
         return "—"
@@ -142,22 +144,22 @@ def _build_breadth_block(overview: dict) -> str:
     amount_yi = total_amount / 1e8 if total_amount else 0
 
     lines = [
-        f"- 上涨/下跌/平盘: {b.get('up',0)} / {b.get('down',0)} / {b.get('flat',0)}"
-        f"  (上涨占比 {b.get('up_pct',0):.1f}%)",
-        f"- 涨停/炸板/跌停: {lim.get('limit_up',0)} / {lim.get('broken',0)} / {lim.get('limit_down',0)}"
-        f"  (封板率 {lim.get('seal_rate',0):.0f}%, 最高连板 {lim.get('max_boards',0)})",
+        f"- 上涨/下跌/平盘: {b.get('up', 0)} / {b.get('down', 0)} / {b.get('flat', 0)}"
+        f"  (上涨占比 {b.get('up_pct', 0):.1f}%)",
+        f"- 涨停/炸板/跌停: {lim.get('limit_up', 0)} / {lim.get('broken', 0)} / {lim.get('limit_down', 0)}"
+        f"  (封板率 {lim.get('seal_rate', 0):.0f}%, 最高连板 {lim.get('max_boards', 0)})",
     ]
     if lim.get("tiers"):
         tiers_str = "、".join(f"{t['boards']}板×{t['count']}" for t in lim["tiers"][:5])
         lines.append(f"- 连板梯队: {tiers_str}")
     lines.append(f"- 两市成交额: {amount_yi:.0f} 亿元")
     lines.append(
-        f"- 均线站位: MA5 {tr.get('above_ma5_pct',0):.0f}% / "
-        f"MA20 {tr.get('above_ma20_pct',0):.0f}% / MA60 {tr.get('above_ma60_pct',0):.0f}%"
+        f"- 均线站位: MA5 {tr.get('above_ma5_pct', 0):.0f}% / "
+        f"MA20 {tr.get('above_ma20_pct', 0):.0f}% / MA60 {tr.get('above_ma60_pct', 0):.0f}%"
     )
     lines.append(
-        f"- 量能: 平均换手 {act.get('avg_turnover',0):.2f}%, "
-        f"量比5日均 {act.get('vol_ratio',1):.2f}"
+        f"- 量能: 平均换手 {act.get('avg_turnover', 0):.2f}%, "
+        f"量比5日均 {act.get('vol_ratio', 1):.2f}"
     )
     return "\n".join(lines)
 
@@ -166,17 +168,16 @@ def _build_sector_block(rank: dict, label: str) -> str:
     """板块排名精简块(领涨/领跌 top5)。"""
     if not rank:
         return f"### {label}\n(暂无数据)"
+
     def _fmt(items):
         if not items:
             return "—"
         return "、".join(
-            f"{it.get('name')}({(it.get('avg_pct') or 0)*100:+.2f}%,领涨:{it.get('leader',{}).get('name','—')})"
+            f"{it.get('name')}({(it.get('avg_pct') or 0) * 100:+.2f}%,领涨:{it.get('leader', {}).get('name', '—')})"
             for it in items[:5]
         )
-    return (
-        f"- 领涨{label}: {_fmt(rank.get('leading'))}\n"
-        f"- 领跌{label}: {_fmt(rank.get('lagging'))}"
-    )
+
+    return f"- 领涨{label}: {_fmt(rank.get('leading'))}\n- 领跌{label}: {_fmt(rank.get('lagging'))}"
 
 
 def _build_emotion_block(overview: dict) -> str:
@@ -186,13 +187,14 @@ def _build_emotion_block(overview: dict) -> str:
     label = emo.get("label", "—")
     lines = [f"- 情绪温度: {score} ({label})"]
     if radar:
-        dims = "、".join(f"{r.get('label')}{r.get('value',0)}" for r in radar)
+        dims = "、".join(f"{r.get('label')}{r.get('value', 0)}" for r in radar)
         lines.append(f"- 六维雷达: {dims}")
     return "\n".join(lines)
 
 
-def _build_user_prompt(overview: dict, news: list[dict], focus: str, lhb_context: str = "",
-                       bench_context: str = "") -> str:
+def _build_user_prompt(
+    overview: dict, news: list[dict], focus: str, lhb_context: str = "", bench_context: str = ""
+) -> str:
     """构建用户消息:复盘日期 + 市场数据精简切片 + 龙虎榜(可选) + 盘前风向标(可选) + 新闻 + 关注点。"""
     as_of = overview.get("as_of") or "今日"
 
@@ -209,27 +211,31 @@ def _build_user_prompt(overview: dict, news: list[dict], focus: str, lhb_context
         _build_emotion_block(overview),
         "",
         "## 概念板块排名",
-        _build_sector_block(overview.get("concept_rank"), "概念"),
+        _build_sector_block(overview.get("concept_rank") or {}, "概念"),
         "",
         "## 行业板块排名",
-        _build_sector_block(overview.get("industry_rank"), "行业"),
+        _build_sector_block(overview.get("industry_rank") or {}, "行业"),
     ]
 
     # 龙虎榜资金动向 (fuyao 数据源, 摘要自带数据日期; 无数据源/失败时为空不占段)
     if lhb_context:
-        parts.extend([
-            "",
-            "## 龙虎榜资金动向",
-            lhb_context,
-        ])
+        parts.extend(
+            [
+                "",
+                "## 龙虎榜资金动向",
+                lhb_context,
+            ]
+        )
 
     # 盘前风向标 (fuyao 竞价筛选名单 + 当日实际表现对照; 失败为空不占段)
     if bench_context:
-        parts.extend([
-            "",
-            "## 盘前风向标(竞价)",
-            bench_context,
-        ])
+        parts.extend(
+            [
+                "",
+                "## 盘前风向标(竞价)",
+                bench_context,
+            ]
+        )
 
     if news:
         news_lines = []
@@ -239,17 +245,22 @@ def _build_user_prompt(overview: dict, news: list[dict], focus: str, lhb_context
             source = (n.get("source") or "").strip()
             pub = (n.get("published_date") or "").strip()
             meta = " / ".join(p for p in (source, pub) if p)
-            news_lines.append(f"{i}. {title} ({meta})\n   {snippet}" if meta else f"{i}. {title}\n   {snippet}")
+            news_lines.append(
+                f"{i}. {title} ({meta})\n   {snippet}" if meta else f"{i}. {title}\n   {snippet}"
+            )
         parts.extend(["", "## 近期市场新闻", "\n".join(news_lines)])
     else:
-        parts.extend([
-            "",
-            "## 近期市场新闻",
-            "(暂无新闻数据:本功能新闻检索能力将在后续版本接入。"
-            "消息催化一节请直接从量价异动给出可能的催化逻辑结论,不要编造具体消息,也不要复述本说明。)",
-        ])
+        parts.extend(
+            [
+                "",
+                "## 近期市场新闻",
+                "(暂无新闻数据:本功能新闻检索能力将在后续版本接入。"
+                "消息催化一节请直接从量价异动给出可能的催化逻辑结论,不要编造具体消息,也不要复述本说明。)",
+            ]
+        )
 
     from app.services.ai_provider import build_focus_instruction
+
     focus_instruction = build_focus_instruction(focus, report_name="大盘复盘报告")
     if focus_instruction:
         parts.extend(["", focus_instruction])
@@ -260,6 +271,7 @@ def _build_user_prompt(overview: dict, news: list[dict], focus: str, lhb_context
 # ================================================================
 # 摘要生成(供 meta 事件 / 历史报告 summary)
 # ================================================================
+
 
 def _recap_summary(overview: dict) -> str:
     """一句话摘要(供 meta 事件与历史列表展示)。
@@ -272,19 +284,51 @@ def _recap_summary(overview: dict) -> str:
     amt = overview.get("amount") or {}
     total_amount = (amt.get("total") or 0) / 1e8
 
-    idx_str = "、".join(
-        f"{_INDEX_SHORT.get(i.get('name') or '', i.get('name') or '')}{(i.get('change_pct') or 0):+.2f}%"
-        for i in indices[:4]
-    ) or "指数缺失"
+    idx_str = (
+        "、".join(
+            f"{_INDEX_SHORT.get(i.get('name') or '', i.get('name') or '')}{(i.get('change_pct') or 0):+.2f}%"
+            for i in indices[:4]
+        )
+        or "指数缺失"
+    )
     return (
-        f"{idx_str} | 情绪{emo.get('score',50)}({emo.get('label','—')}) | "
-        f"涨停{lim.get('limit_up',0)} | 成交{total_amount:.0f}亿"
+        f"{idx_str} | 情绪{emo.get('score', 50)}({emo.get('label', '—')}) | "
+        f"涨停{lim.get('limit_up', 0)} | 成交{total_amount:.0f}亿"
     )
 
 
 # ================================================================
 # 流式主入口
 # ================================================================
+
+
+async def _stream_recap_text(
+    repo,
+    overview: dict,
+    focus: str,
+    news: list[dict] | None,
+) -> AsyncIterator[str]:
+    """逐 chunk 产出供大盘复盘使用的 LLM 正文。"""
+    from app.services import dragon_tiger as dragon_tiger_svc
+    from app.services.ai_provider import stream_ai_text
+
+    lhb_ctx = dragon_tiger_svc.build_recap_context(repo.store.data_dir)
+
+    from app.services import auction_benchmark as auction_benchmark_svc
+
+    bench_ctx = auction_benchmark_svc.build_recap_context(repo.store.data_dir)
+    user_prompt = _build_user_prompt(overview, news or [], focus, lhb_ctx, bench_ctx)
+    async for delta in stream_ai_text(
+        [
+            {"role": "system", "content": effective_system_prompt()},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.5,
+        max_tokens=None,
+        prefer_final_answer=True,
+    ):
+        yield delta
+
 
 async def recap_market_stream(
     repo,
@@ -303,64 +347,46 @@ async def recap_market_stream(
         focus: 用户追加的复盘关注点。
         news: 预检索的新闻列表(P1 不传,留 None 走降级说明;P3 由 news_search 注入)。
     """
-    # 1. 装配市场总览
     overview = build_market_overview(repo, quote_service, depth_service, as_of)
     as_of_str = overview.get("as_of")
 
     if not as_of_str:
-        yield json.dumps({
-            "type": "error",
-            "message": "暂无市场数据,请先在「数据」页同步日 K 与指数后再复盘",
-        }, ensure_ascii=False)
+        yield json.dumps(
+            {
+                "type": "error",
+                "message": "暂无市场数据,请先在「数据」页同步日 K 与指数后再复盘",
+            },
+            ensure_ascii=False,
+        )
         return
 
     emo = overview.get("emotion") or {}
+    yield json.dumps(
+        {
+            "type": "meta",
+            "as_of": as_of_str,
+            "emotion_score": emo.get("score", 50),
+            "emotion_label": emo.get("label", "—"),
+            "summary": _recap_summary(overview),
+        },
+        ensure_ascii=False,
+    )
 
-    # 2. meta 事件(前端据此先渲染信号灯/看板)
-    yield json.dumps({
-        "type": "meta",
-        "as_of": as_of_str,
-        "emotion_score": emo.get("score", 50),
-        "emotion_label": emo.get("label", "—"),
-        "summary": _recap_summary(overview),
-    }, ensure_ascii=False)
-
-    # 3+4. 构建 prompt + 流式调用 LLM(整体 try-except,任何异常 yield error,避免前端卡死)
     try:
-        from app.services.ai_provider import stream_ai_text
-
-        # 龙虎榜摘要 (fuyao 专有): 拉取失败/未配置 → 空串, 复盘主流程不受影响
-        from app.services import dragon_tiger as dragon_tiger_svc
-
-        lhb_ctx = dragon_tiger_svc.build_recap_context(repo.store.data_dir)
-
-        # 盘前风向标摘要 (fuyao 专有): 失败/未配置 → 空串
-        from app.services import auction_benchmark as auction_benchmark_svc
-
-        bench_ctx = auction_benchmark_svc.build_recap_context(repo.store.data_dir)
-        user_prompt = _build_user_prompt(overview, news or [], focus, lhb_ctx, bench_ctx)
         got_content = False
-        async for delta in stream_ai_text(
-            [
-                {"role": "system", "content": effective_system_prompt()},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.5,
-            # 不限制输出(推理模型思考 token 计入预算, 见 ai_provider.stream_ai_text)
-            max_tokens=None,
-            prefer_final_answer=True,
-        ):
+        async for delta in _stream_recap_text(repo, overview, focus, news):
             got_content = True
             yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
-
-    except Exception as e:  # noqa: BLE001
-        logger.exception("AI market recap failed for %s: %s", as_of_str, e)
+    except Exception as e:
+        logger.exception("AI market recap failed for %s", as_of_str)
         yield json.dumps({"type": "error", "message": f"AI 复盘失败: {e}"}, ensure_ascii=False)
         return
 
     if not got_content:
         logger.warning("AI market recap ended with empty content for %s", as_of_str)
-        yield json.dumps({"type": "error", "message": "AI 未返回正文(输出被截断), 请重试"}, ensure_ascii=False)
+        yield json.dumps(
+            {"type": "error", "message": "AI 未返回正文(输出被截断), 请重试"}, ensure_ascii=False
+        )
         return
     yield json.dumps({"type": "done"}, ensure_ascii=False)
 

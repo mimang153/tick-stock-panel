@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from types import SimpleNamespace
+from typing import Any, cast
 
 import polars as pl
 import pytest
@@ -53,20 +54,22 @@ def test_runtime_rejects_insufficient_balanced_range_before_loading_panel(
             r"3 outer folds; effective range .* has 690"
         ),
     ):
-        _decode_runtime_request(payload, tmp_path, SimpleNamespace())
+        _decode_runtime_request(payload, tmp_path, cast(Any, SimpleNamespace()))
 
 
 def test_single_forward_label_uses_global_trading_axis_without_jump() -> None:
     first = date(2024, 1, 2)
     missing = first + timedelta(days=1)
     resumed = first + timedelta(days=2)
-    panel = pl.DataFrame({
-        "symbol": ["000001.SZ", "000001.SZ"],
-        "date": [first, resumed],
-        "close": [10.0, 12.0],
-        "turnover_rate": [1.0, 2.0],
-        "unused_factor": [9.0, 10.0],
-    })
+    panel = pl.DataFrame(
+        {
+            "symbol": ["000001.SZ", "000001.SZ"],
+            "date": [first, resumed],
+            "close": [10.0, 12.0],
+            "turnover_rate": [1.0, 2.0],
+            "unused_factor": [9.0, 10.0],
+        }
+    )
 
     result = attach_single_forward_return(
         panel,
@@ -113,17 +116,19 @@ def test_compact_factor_panel_matches_full_symbol_independent_calculation(
     for symbol, offset in (("a", 0.0), ("b", 2.0), ("c", 4.0)):
         for day in range(70):
             close = 10.0 + offset + day * 0.1
-            rows.append({
-                "symbol": symbol,
-                "date": first + timedelta(days=day),
-                "open": close - 0.1,
-                "high": close + 0.2,
-                "low": close - 0.2,
-                "close": close,
-                "volume": 1000.0 + day,
-                "amount": close * (1000.0 + day),
-                "turnover_rate": 1.0 + day / 100.0,
-            })
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "date": first + timedelta(days=day),
+                    "open": close - 0.1,
+                    "high": close + 0.2,
+                    "low": close - 0.2,
+                    "close": close,
+                    "volume": 1000.0 + day,
+                    "amount": close * (1000.0 + day),
+                    "turnover_rate": 1.0 + day / 100.0,
+                }
+            )
     raw = pl.DataFrame(rows).sort(["symbol", "date"])
 
     class Engine:
@@ -133,7 +138,7 @@ def test_compact_factor_panel_matches_full_symbol_independent_calculation(
     engine = Engine()
     from app.backtest.factor import FactorBacktestService
 
-    factor_service = FactorBacktestService(engine)
+    factor_service = FactorBacktestService(cast(Any, engine))
     config = SimpleNamespace(
         symbols=None,
         start=first,
@@ -141,18 +146,21 @@ def test_compact_factor_panel_matches_full_symbol_independent_calculation(
         asset_type="stock",
     )
     names = ("momentum_20d", "rsi_14", "ma20_bias")
-    full = factor_service._compute_missing_factors(
-        raw,
-        set(names),
-        assume_sorted=True,
-    ).select(["symbol", "date", "close", *names]).with_columns([
-        pl.col(name).cast(pl.Float32) for name in names
-    ]).sort(["date", "symbol"])
+    full = (
+        factor_service._compute_missing_factors(
+            raw,
+            set(names),
+            assume_sorted=True,
+        )
+        .select(["symbol", "date", "close", *names])
+        .with_columns([pl.col(name).cast(pl.Float32) for name in names])
+        .sort(["date", "symbol"])
+    )
 
     monkeypatch.setattr("app.backtest.mining_runtime._SYMBOL_BATCH_SIZE", 1)
     compact = _load_compact_factor_panel(
         factor_service,
-        config,
+        cast(Any, config),
         names,
         expected_generation="generation",
         cancel_check=None,
@@ -163,17 +171,19 @@ def test_compact_factor_panel_matches_full_symbol_independent_calculation(
 
 def test_compact_factor_panel_rejects_noncanonical_symbol_date_keys() -> None:
     first = date(2024, 1, 2)
-    canonical = pl.DataFrame({
-        "symbol": ["a", "a", "b"],
-        "date": [first, first + timedelta(days=1), first],
-        "open": [1.0, 1.0, 1.0],
-        "high": [1.0, 1.0, 1.0],
-        "low": [1.0, 1.0, 1.0],
-        "close": [1.0, 1.0, 1.0],
-        "volume": [1.0, 1.0, 1.0],
-        "amount": [1.0, 1.0, 1.0],
-        "turnover_rate": [1.0, 1.0, 1.0],
-    })
+    canonical = pl.DataFrame(
+        {
+            "symbol": ["a", "a", "b"],
+            "date": [first, first + timedelta(days=1), first],
+            "open": [1.0, 1.0, 1.0],
+            "high": [1.0, 1.0, 1.0],
+            "low": [1.0, 1.0, 1.0],
+            "close": [1.0, 1.0, 1.0],
+            "volume": [1.0, 1.0, 1.0],
+            "amount": [1.0, 1.0, 1.0],
+            "turnover_rate": [1.0, 1.0, 1.0],
+        }
+    )
     config = SimpleNamespace(
         symbols=None,
         start=first,
@@ -191,16 +201,18 @@ def test_compact_factor_panel_rejects_noncanonical_symbol_date_keys() -> None:
     from app.backtest.factor import FactorBacktestService
 
     for invalid in (
-        canonical.with_columns(pl.Series(
-            "date",
-            [first + timedelta(days=1), first, first],
-        )),
+        canonical.with_columns(
+            pl.Series(
+                "date",
+                [first + timedelta(days=1), first, first],
+            )
+        ),
         pl.concat([canonical.slice(0, 1), canonical]),
     ):
         with pytest.raises(ValueError, match="unique symbol/date"):
             _load_compact_factor_panel(
-                FactorBacktestService(Engine(invalid)),
-                config,
+                FactorBacktestService(cast(Any, Engine(invalid))),
+                cast(Any, config),
                 ("turnover_rate",),
                 expected_generation="generation",
                 cancel_check=None,
@@ -265,10 +277,10 @@ def test_prepare_base_market_forwards_cancel_event(monkeypatch, tmp_path) -> Non
     service.engine.load_market_data_matrix_for_backtest = load_matrix
 
     result = _prepare_base_market(
-        service,
-        strategy_engine,
+        cast(Any, service),
+        cast(Any, strategy_engine),
         tmp_path,
-        request,
+        cast(Any, request),
         expected_generation="generation",
         cancel_check=cancel_event,
     )
@@ -279,17 +291,16 @@ def test_prepare_base_market_forwards_cancel_event(monkeypatch, tmp_path) -> Non
 
 def test_training_metric_provider_uses_only_supplied_fold() -> None:
     start = date(2024, 1, 2)
-    rows = []
-    for day_offset in range(3):
-        for asset_id in range(4):
-            rows.append({
-                "symbol": f"{asset_id:06d}.SZ",
-                "date": start + timedelta(days=day_offset),
-                "factor": float(asset_id),
-                "_next_return": (
-                    float(asset_id) if day_offset < 2 else float(-asset_id)
-                ),
-            })
+    rows = [
+        {
+            "symbol": f"{asset_id:06d}.SZ",
+            "date": start + timedelta(days=day_offset),
+            "factor": float(asset_id),
+            "_next_return": (float(asset_id) if day_offset < 2 else float(-asset_id)),
+        }
+        for day_offset in range(3)
+        for asset_id in range(4)
+    ]
     panel = pl.DataFrame(rows)
     train = panel.filter(pl.col("date") < start + timedelta(days=2))
 
@@ -305,11 +316,16 @@ def test_training_metric_provider_uses_only_supplied_fold() -> None:
 def test_regime_date_count_uses_t_minus_one_market_labels(tmp_path) -> None:
     labels = [date(2024, 1, 2) + timedelta(days=offset) for offset in range(4)]
     panel = pl.DataFrame({"date": labels})
-    regime_builder.upsert_regime_history(tmp_path, pl.DataFrame({
-        "date": labels[:3],
-        "state": ["weak", "strong", "lean_strong"],
-        "score": [20, 80, 70],
-    }))
+    regime_builder.upsert_regime_history(
+        tmp_path,
+        pl.DataFrame(
+            {
+                "date": labels[:3],
+                "state": ["weak", "strong", "lean_strong"],
+                "score": [20, 80, 70],
+            }
+        ),
+    )
     fold = SimpleNamespace(
         test_start=labels[1].isoformat(),
         test_end=labels[3].isoformat(),
@@ -339,11 +355,16 @@ def _regime_panel(n: int = 20) -> tuple[list[date], pl.DataFrame]:
 
 
 def _upsert_regime(tmp_path, labels, states: list[str]) -> None:
-    regime_builder.upsert_regime_history(tmp_path, pl.DataFrame({
-        "date": labels,
-        "state": states,
-        "score": [50] * len(labels),
-    }))
+    regime_builder.upsert_regime_history(
+        tmp_path,
+        pl.DataFrame(
+            {
+                "date": labels,
+                "state": states,
+                "score": [50] * len(labels),
+            }
+        ),
+    )
 
 
 def test_validate_regime_availability_fails_fast_when_regime_data_missing(
@@ -355,7 +376,7 @@ def test_validate_regime_availability_fails_fast_when_regime_data_missing(
     )
 
     with pytest.raises(ValueError, match="市场环境数据为空"):
-        _validate_regime_availability(panel, request, tmp_path)
+        _validate_regime_availability(panel, cast(Any, request), tmp_path)
 
 
 def test_validate_regime_availability_passes_when_regime_covers_fold_windows(
@@ -371,16 +392,14 @@ def test_validate_regime_availability_passes_when_regime_covers_fold_windows(
         mining_request=SimpleNamespace(validation=_small_validation()),
     )
 
-    _validate_regime_availability(panel, request, tmp_path)
+    _validate_regime_availability(panel, cast(Any, request), tmp_path)
 
 
 def test_validate_regime_availability_reports_coverage_gaps_in_fold_windows(
     tmp_path,
 ) -> None:
     labels, panel = _regime_panel()
-    nested = generate_nested_folds(
-        [value.isoformat() for value in labels], _small_validation()
-    )
+    nested = generate_nested_folds([value.isoformat() for value in labels], _small_validation())
     gap_date = date.fromisoformat(nested[0].outer.test_start) + timedelta(days=1)
     covered = [value for value in labels if value != gap_date]
     _upsert_regime(tmp_path, covered, ["range"] * len(covered))
@@ -389,7 +408,7 @@ def test_validate_regime_availability_reports_coverage_gaps_in_fold_windows(
     )
 
     with pytest.raises(ValueError, match="市场环境数据覆盖不完整"):
-        _validate_regime_availability(panel, request, tmp_path)
+        _validate_regime_availability(panel, cast(Any, request), tmp_path)
 
 
 # ── P2a 稳健选冠 (mining-v3) ──────────────────────────────────────
@@ -415,9 +434,7 @@ def test_rank_prefers_robust_over_mean_champion() -> None:
         {"candidate_signature": "b", "sharpe": 1.5, "skipped": False},
         {"candidate_signature": "b", "sharpe": 1.5, "skipped": False},
     ]
-    ranked = _rank_artifact_candidates(
-        [_candidate("a"), _candidate("b")], rows, limit=2
-    )
+    ranked = _rank_artifact_candidates([_candidate("a"), _candidate("b")], rows, limit=2)
     assert [item.candidate_id for item in ranked] == ["b", "a"]
 
 
@@ -427,9 +444,7 @@ def test_rank_skips_failed_folds_like_before() -> None:
         {"candidate_signature": "a", "sharpe": 1.0, "skipped": False},
         {"candidate_signature": "b", "sharpe": 0.5, "skipped": False},
     ]
-    ranked = _rank_artifact_candidates(
-        [_candidate("a"), _candidate("b")], rows, limit=2
-    )
+    ranked = _rank_artifact_candidates([_candidate("a"), _candidate("b")], rows, limit=2)
     assert ranked[0].candidate_id == "a"
 
 
@@ -484,9 +499,7 @@ class _Fold:
 def _refine_request(profile="balanced"):
     from app.backtest.mining import MiningBudget, MiningRequest
 
-    budget = (
-        MiningBudget.balanced() if profile == "balanced" else MiningBudget.strict()
-    )
+    budget = MiningBudget.balanced() if profile == "balanced" else MiningBudget.strict()
     mining = MiningRequest(factor_names=("f1", "f2"), budget=budget, profile=profile)
     return SimpleNamespace(
         profile=profile,
@@ -507,7 +520,7 @@ def _run_refine(champion, evaluator, folds=3, trials_used=10, profile="balanced"
     )  # 每折两个标签, 与全窗 (8 行) 可区分
     result = SimpleNamespace(trials_used=trials_used)
     return _refine_champion_weights(
-        panel, _refine_request(profile), result, [champion], evaluator, nested, None
+        panel, _refine_request(profile), cast(Any, result), [champion], evaluator, nested, None
     )
 
 
@@ -518,6 +531,8 @@ def _two_factor_champion(weights=(1.0, 1.0)):
         candidate_id = "sig-original"
         kind = "factor_rank"
         factor_names = ("f1", "f2")
+        weights: Any
+        directions: Any
 
         @staticmethod
         def definition():
@@ -555,7 +570,7 @@ def test_refine_produces_refined_row_when_variant_wins():
     assert len(rows) == 1
     row = rows[0]
     assert row["name"].endswith("· 权重精调")
-    assert row["score"] == 2.0            # 稳健分 = 各折一致 2.0
+    assert row["score"] == 2.0  # 稳健分 = 各折一致 2.0
     assert row["oos_worst_sharpe"] == 2.0
     assert row["valid_folds"] == 3
     import json as _json
@@ -598,8 +613,11 @@ def test_refine_no_improvement_returns_nothing():
 
 def test_refine_skips_single_factor_champion():
     original = SimpleNamespace(
-        candidate_id="sig-1f", kind="factor_rank",
-        factor_names=("f1",), weights=(1.0,), directions=(1,),
+        candidate_id="sig-1f",
+        kind="factor_rank",
+        factor_names=("f1",),
+        weights=(1.0,),
+        directions=(1,),
         definition=lambda: {},
     )
     rows, summary = _run_refine(original, _RefineEvaluator({}, {}))
@@ -608,9 +626,11 @@ def test_refine_skips_single_factor_champion():
 
 def test_refine_skips_when_budget_remaining_insufficient():
     original = SimpleNamespace(
-        candidate_id="sig-4f", kind="factor_rank",
+        candidate_id="sig-4f",
+        kind="factor_rank",
         factor_names=("f1", "f2", "f3", "f4"),
-        weights=(1.0, 1.0, 1.0, 1.0), directions=(1, 1, 1, 1),
+        weights=(1.0, 1.0, 1.0, 1.0),
+        directions=(1, 1, 1, 1),
         definition=lambda: {},
     )
     # balanced 剩余额度 96-90=6 < 64 变体×3 折+2 → 跳过

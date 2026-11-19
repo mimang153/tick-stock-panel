@@ -7,6 +7,7 @@ _evaluate_monitors 的节假日与陈旧数据兜底靠「快照日期 = 当日�
 ETF 实时拉取默认关闭 (realtime_pull_etf=False), 工作日休市时实时快照也不落盘,
 这两种情况下 ETF 规则每轮都拿上一交易日的数据当作今天评估并推送告警。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -34,20 +35,36 @@ class _Repo:
         if asset_type != "etf":
             return pl.DataFrame(), None
         return (
-            pl.DataFrame({"symbol": ["510300.SH"], "date": [self.etf_date],
-                          "close": [4.2], "change_pct": [0.012]}),
+            pl.DataFrame(
+                {
+                    "symbol": ["510300.SH"],
+                    "date": [self.etf_date],
+                    "close": [4.2],
+                    "change_pct": [0.012],
+                }
+            ),
             self.etf_date,
         )
 
 
 def _run(etf_date: date) -> list[dict]:
     engine = MonitorRuleEngine()
-    engine.set_rules([{
-        "id": "etf_px", "name": "ETF 价格提醒", "type": "price", "asset_type": "etf",
-        "scope": "symbols", "symbols": ["510300.SH"], "logic": "and",
-        "conditions": [{"field": "close", "op": ">=", "value": 4.0}],
-        "cooldown_seconds": 0, "enabled": True,
-    }])
+    engine.set_rules(
+        [
+            {
+                "id": "etf_px",
+                "name": "ETF 价格提醒",
+                "type": "price",
+                "asset_type": "etf",
+                "scope": "symbols",
+                "symbols": ["510300.SH"],
+                "logic": "and",
+                "conditions": [{"field": "close", "op": ">=", "value": 4.0}],
+                "cooldown_seconds": 0,
+                "enabled": True,
+            }
+        ]
+    )
     svc = QuoteService.__new__(QuoteService)
     svc._repo = _Repo(etf_date)
     svc._app_state = SimpleNamespace(monitor_engine=engine, repo=svc._repo)
@@ -57,7 +74,9 @@ def _run(etf_date: date) -> list[dict]:
         patch.object(QuoteService, "get_enriched_today", return_value=(pl.DataFrame(), None)),
         patch.object(QuoteService, "_inject_intraday_signals", side_effect=lambda df, e, at: df),
         patch.object(QuoteService, "_enrich_alerts_ext", lambda self, alerts: None),
-        patch.object(QuoteService, "_broadcast_alerts", lambda self, alerts: broadcast.extend(alerts)),
+        patch.object(
+            QuoteService, "_broadcast_alerts", lambda self, alerts: broadcast.extend(alerts)
+        ),
         patch.object(QuoteService, "_maybe_send_system_notifications", lambda self, alerts: None),
         patch.object(QuoteService, "_maybe_send_webhook", lambda self, events, engine: None),
         patch("app.services.alert_store.append_many", lambda *a, **k: None),

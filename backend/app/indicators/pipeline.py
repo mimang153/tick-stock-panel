@@ -30,6 +30,7 @@ import polars as pl
 
 from app.config import settings
 from app.enriched_generation import (
+    CKEnrichedPublication,
     EnrichedPublication,
     enriched_publication_incomplete,
 )

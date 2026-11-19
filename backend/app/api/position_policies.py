@@ -7,6 +7,7 @@ POST   /api/backtest/position-policies/validate      → 三关校验 (安全/�
 POST   /api/backtest/position-policies               → 保存 (三关全过才写盘)
 DELETE /api/backtest/position-policies/{id}          → 删除
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -80,8 +81,12 @@ def validate_position_policy(req: PolicySaveRequest, request: Request) -> dict:
     if existing_code is not None and req.code.strip() == "__unchanged__":
         code = existing_code
     else:
-        meta = {"id": policy_id or "up_preview", "label": req.label,
-                "description": req.description, "params": req.params}
+        meta = {
+            "id": policy_id or "up_preview",
+            "label": req.label,
+            "description": req.description,
+            "params": req.params,
+        }
         code = pp.render_policy_file(meta, req.code)
     result = pp.validate_policy_code(code)
     return {"ok": result["ok"], "issues": result["issues"], "smoke": result["smoke"]}
@@ -89,8 +94,12 @@ def validate_position_policy(req: PolicySaveRequest, request: Request) -> dict:
 
 @router.post("")
 def save_position_policy(req: PolicySaveRequest, request: Request) -> dict:
-    meta = {"id": req.id or "", "label": req.label,
-            "description": req.description, "params": req.params}
+    meta = {
+        "id": req.id or "",
+        "label": req.label,
+        "description": req.description,
+        "params": req.params,
+    }
     if req.code.strip() == "__unchanged__" and req.id:
         path = _data_dir(request) / pp.POLICY_DIR / f"{req.id}.py"
         if not path.exists():
@@ -98,7 +107,9 @@ def save_position_policy(req: PolicySaveRequest, request: Request) -> dict:
         return {"ok": True, "id": req.id, "issues": []}
     result = pp.save_policy(_data_dir(request), meta, req.code)
     if not result["ok"]:
-        raise HTTPException(status_code=422, detail={"message": "校验未通过", "issues": result["issues"]})
+        raise HTTPException(
+            status_code=422, detail={"message": "校验未通过", "issues": result["issues"]}
+        )
     return result
 
 

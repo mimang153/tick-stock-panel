@@ -5,6 +5,7 @@
 元数据与分发, 不解析 JS 内容 —— 清单契约(能否 import、apiVersion、路由
 冲突)由前端注册表校验, 校验结果经 manifest 接口回填到 page.json。
 """
+
 from __future__ import annotations
 
 import hashlib

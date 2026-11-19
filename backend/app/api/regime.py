@@ -2,6 +2,7 @@
 
 装配逻辑在 app.services.regime_builder(纯函数), API 层薄壳 + TTL 缓存。
 """
+
 from __future__ import annotations
 
 import threading
@@ -50,8 +51,8 @@ def _df_to_records(df) -> list[dict]:
 @router.get("/history")
 def regime_history(
     request: Request,
-    start: date | None = Query(None),
-    end: date | None = Query(None),
+    start: date | None = Query(None),  # noqa: B008 - FastAPI 查询参数依赖注入惯例
+    end: date | None = Query(None),  # noqa: B008 - FastAPI 查询参数依赖注入惯例
     limit: int = Query(120, ge=1, le=1000),
 ):
     """历史环境时序(含状态/指标)。默认最近 N 天。"""
@@ -330,7 +331,7 @@ def regime_mainline(
         from app.services import preferences
 
         filter_cfg = preferences.get_mainline_filter_config()
-    except Exception:
+    except Exception:  # noqa: BLE001 - 偏好配置异常时降级为默认过滤参数
         filter_cfg = {"min_members": 4, "max_members": 600, "blacklist": []}
     df = load_mainline_history(_data_dir(request), kind)
     if df.is_empty():

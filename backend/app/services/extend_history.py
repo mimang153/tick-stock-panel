@@ -155,8 +155,12 @@ def _extend_enriched(repo, emit):
 
     run_pipeline()
 
-    enriched_dir = repo.store.data_dir / "kline_daily_enriched"
-    enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_dir.exists() else 0
+    storage = getattr(repo, "storage", None)
+    if storage is not None:
+        enriched_days = len(storage.list_daily_dates("kline_daily_enriched"))
+    else:
+        enriched_dir = repo.store.data_dir / "kline_daily_enriched"
+        enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_dir.exists() else 0
     emit("extend_history", 92, f"enriched 完成,覆盖 {enriched_days} 天")
     logger.info("extend_history: enriched done, %d days", enriched_days)
     _invalidate("enriched")

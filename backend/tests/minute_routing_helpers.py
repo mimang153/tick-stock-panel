@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import polars as pl
@@ -99,15 +100,15 @@ def _endpoint_mocks(monkeypatch, local_df: pl.DataFrame, sync_ret: pl.DataFrame 
 
     monkeypatch.setattr(kline_api.kline_sync, "sync_minute_batch", fake_sync)
     writes: list[pl.DataFrame] = []
-    monkeypatch.setattr(
-        kline_api.kline_sync, "_write_minute_partition", lambda df, d: writes.append(df)
-    )
 
     mock_repo = MagicMock()
     mock_repo.get_etf_symbol_set.return_value = set()
     mock_repo.get_minute_batch.return_value = local_df
     mock_repo._write_lock = Lock()
-    # 真实 Path 才会触发落盘分支 (kline.py 的 isinstance 守卫)
+    mock_repo.storage = SimpleNamespace(
+        write_minute=lambda table, df: writes.append(df),
+        latest_minute_datetime=lambda table: None,
+    )
     mock_repo.store.data_dir = Path("data")
 
     mock_capset = MagicMock()

@@ -53,7 +53,7 @@ META = {
 }
 
 EXECUTION_BACKEND = "matrix_native"
-ENTRY_SIGNALS = []
+ENTRY_SIGNALS: list[str] = []
 EXIT_SIGNALS = ["signal_ma20_breakdown"]
 STOP_LOSS = -0.05
 MAX_HOLD_DAYS = 5
@@ -74,10 +74,7 @@ class NearLimitUpMatrixStrategy:
             entry &= change > float(params.get("min_change", 7.0)) / 100.0
         if params.get("use_limit_gap_filter", True):
             limit_pct = matrix_feature(market, "price_limit_pct")
-            entry &= (
-                change
-                >= limit_pct - float(params.get("limit_gap", 3.0)) / 100.0
-            )
+            entry &= change >= limit_pct - float(params.get("limit_gap", 3.0)) / 100.0
         ma20 = matrix_feature(market, "ma20")
         exit_ = (market.close < ma20) & (shift(market.close, 1) >= shift(ma20, 1))
         return make_signal_matrix(

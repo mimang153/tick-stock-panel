@@ -1,6 +1,7 @@
 import math
 from datetime import datetime
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
@@ -34,17 +35,21 @@ def test_minute_request_parameter_names_survive_config_round_trip():
         freq_param="period",
     ).model_dump()
 
-    cleaned = _sanitize_for_yaml({
-        "name": "test_source",
-        "display_name": "Test Source",
-        "datasets": {"minute": dataset},
-    })
+    cleaned = _sanitize_for_yaml(
+        {
+            "name": "test_source",
+            "display_name": "Test Source",
+            "datasets": {"minute": dataset},
+        }
+    )
     parsed = _dataset_from_dict(cleaned["datasets"]["minute"])
-    exposed = _config_to_dict(CustomSourceConfig(
-        name="test_source",
-        display_name="Test Source",
-        datasets={"minute": parsed},
-    ))
+    exposed = _config_to_dict(
+        CustomSourceConfig(
+            name="test_source",
+            display_name="Test Source",
+            datasets={"minute": parsed},
+        )
+    )
 
     assert parsed.asset_type_param == "asset"
     assert parsed.freq_param == "period"
@@ -54,40 +59,51 @@ def test_minute_request_parameter_names_survive_config_round_trip():
 
 def test_timeout_survives_config_round_trip():
     """timeout 必须在 UI 保存往返中保留 (核心修复), 且默认 30 不污染 YAML。"""
+
     dataset = DatasetConfigIn(
         url="https://example.test/daily",
         method="POST",
         timeout=120.0,
     ).model_dump()
 
-    cleaned = _sanitize_for_yaml({
-        "name": "test_source",
-        "display_name": "Test Source",
-        "datasets": {"daily": dataset},
-    })
+    cleaned = _sanitize_for_yaml(
+        {
+            "name": "test_source",
+            "display_name": "Test Source",
+            "datasets": {"daily": dataset},
+        }
+    )
     parsed = _dataset_from_dict(cleaned["datasets"]["daily"])
-    exposed = _config_to_dict(CustomSourceConfig(
-        name="test_source",
-        display_name="Test Source",
-        datasets={"daily": parsed},
-    ))
+    exposed = _config_to_dict(
+        CustomSourceConfig(
+            name="test_source",
+            display_name="Test Source",
+            datasets={"daily": parsed},
+        )
+    )
 
     assert parsed.timeout == 120.0
     assert exposed["datasets"]["daily"]["timeout"] == 120.0
 
     # 默认 30 不 emit, 保持 YAML 干净
-    default_dataset = DatasetConfigIn(url="https://example.test/realtime", method="GET").model_dump()
-    cleaned2 = _sanitize_for_yaml({
-        "name": "test_source",
-        "display_name": "Test Source",
-        "datasets": {"realtime": default_dataset},
-    })
+    default_dataset = DatasetConfigIn(
+        url="https://example.test/realtime", method="GET"
+    ).model_dump()
+    cleaned2 = _sanitize_for_yaml(
+        {
+            "name": "test_source",
+            "display_name": "Test Source",
+            "datasets": {"realtime": default_dataset},
+        }
+    )
     parsed2 = _dataset_from_dict(cleaned2["datasets"]["realtime"])
-    exposed2 = _config_to_dict(CustomSourceConfig(
-        name="test_source",
-        display_name="Test Source",
-        datasets={"realtime": parsed2},
-    ))
+    exposed2 = _config_to_dict(
+        CustomSourceConfig(
+            name="test_source",
+            display_name="Test Source",
+            datasets={"realtime": parsed2},
+        )
+    )
     assert parsed2.timeout == 30.0
     realtime = exposed2["datasets"]["realtime"]
     assert "timeout" not in realtime
@@ -95,15 +111,17 @@ def test_timeout_survives_config_round_trip():
     assert "start_param" not in realtime
     assert "end_param" not in realtime
 
-    explicit_default = _sanitize_for_yaml({
-        "name": "test_source",
-        "datasets": {
-            "daily": {
-                "url": "https://example.test/daily",
-                "timeout": 30.0,
+    explicit_default = _sanitize_for_yaml(
+        {
+            "name": "test_source",
+            "datasets": {
+                "daily": {
+                    "url": "https://example.test/daily",
+                    "timeout": 30.0,
+                },
             },
-        },
-    })
+        }
+    )
     assert "timeout" not in explicit_default["datasets"]["daily"]
 
 
@@ -120,13 +138,15 @@ def test_invalid_yaml_timeout_is_a_load_error(tmp_path: Path):
     for index, timeout in enumerate((0, -1, math.nan, math.inf, -math.inf, "invalid")):
         path = tmp_path / f"invalid_{index}.yaml"
         path.write_text(
-            "\n".join([
-                "name: invalid",
-                "datasets:",
-                "  daily:",
-                "    url: https://example.test/daily",
-                f"    timeout: {timeout}",
-            ]),
+            "\n".join(
+                [
+                    "name: invalid",
+                    "datasets:",
+                    "  daily:",
+                    "    url: https://example.test/daily",
+                    f"    timeout: {timeout}",
+                ]
+            ),
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="timeout must be"):
@@ -136,32 +156,36 @@ def test_invalid_yaml_timeout_is_a_load_error(tmp_path: Path):
 @pytest.mark.parametrize("timeout", [0, -1, math.nan, math.inf, -math.inf, "invalid"])
 def test_sanitizer_rejects_invalid_timeout(timeout):
     with pytest.raises(ValueError, match="timeout must be"):
-        _sanitize_for_yaml({
+        _sanitize_for_yaml(
+            {
+                "name": "test_source",
+                "datasets": {
+                    "realtime": {
+                        "url": "https://example.test/realtime",
+                        "timeout": timeout,
+                        "symbols_param": "codes",
+                        "start_param": "from",
+                        "end_param": "to",
+                    },
+                },
+            }
+        )
+
+
+def test_sanitizer_drops_realtime_request_params():
+    cleaned = _sanitize_for_yaml(
+        {
             "name": "test_source",
             "datasets": {
                 "realtime": {
                     "url": "https://example.test/realtime",
-                    "timeout": timeout,
                     "symbols_param": "codes",
                     "start_param": "from",
                     "end_param": "to",
                 },
             },
-        })
-
-
-def test_sanitizer_drops_realtime_request_params():
-    cleaned = _sanitize_for_yaml({
-        "name": "test_source",
-        "datasets": {
-            "realtime": {
-                "url": "https://example.test/realtime",
-                "symbols_param": "codes",
-                "start_param": "from",
-                "end_param": "to",
-            },
-        },
-    })
+        }
+    )
 
     dataset = cleaned["datasets"]["realtime"]
     assert "symbols_param" not in dataset
@@ -170,17 +194,19 @@ def test_sanitizer_drops_realtime_request_params():
 
 
 def test_empty_request_parameter_names_restore_defaults():
-    cleaned = _sanitize_for_yaml({
-        "name": "test_source",
-        "datasets": {
-            "minute": {
-                "url": "https://example.test/minute",
-                "symbols_param": " ",
-                "start_param": "\t",
-                "end_param": "",
+    cleaned = _sanitize_for_yaml(
+        {
+            "name": "test_source",
+            "datasets": {
+                "minute": {
+                    "url": "https://example.test/minute",
+                    "symbols_param": " ",
+                    "start_param": "\t",
+                    "end_param": "",
+                },
             },
-        },
-    })
+        }
+    )
     parsed = _dataset_from_dict(cleaned["datasets"]["minute"])
 
     assert parsed.symbols_param == "symbols"
@@ -204,18 +230,20 @@ def _dataset_config(dataset: str = "minute", **overrides) -> DatasetConfig:
 
 
 def _capture_test_request(dataset: str, **overrides):
-    provider = GenericHTTPProvider(CustomSourceConfig(
-        name="test_source",
-        display_name="Test Source",
-        datasets={dataset: _dataset_config(dataset, **overrides)},
-    ))
+    provider = GenericHTTPProvider(
+        CustomSourceConfig(
+            name="test_source",
+            display_name="Test Source",
+            datasets={dataset: _dataset_config(dataset, **overrides)},
+        )
+    )
     captured = {}
 
     def request_rows(cfg, **kwargs):
         captured.update(kwargs)
         return []
 
-    provider._request_rows = request_rows
+    cast(Any, provider)._request_rows = request_rows
     provider.test_dataset(dataset, ["600000.SH"])
     provider.close()
     return captured
@@ -250,30 +278,32 @@ def test_test_dataset_minute_injects_production_overrides():
 @pytest.mark.parametrize("dataset", ["daily", "minute"])
 def test_duplicate_dynamic_parameter_names_are_rejected(dataset):
     config = _dataset_config(dataset, symbols_param="range", start_param="range")
-    provider = GenericHTTPProvider(CustomSourceConfig(
-        name="test_source",
-        display_name="Test Source",
-        datasets={dataset: config},
-    ))
+    provider = GenericHTTPProvider(
+        CustomSourceConfig(
+            name="test_source",
+            display_name="Test Source",
+            datasets={dataset: config},
+        )
+    )
 
     try:
-        assert provider.validate() == [
-            f"{dataset}: duplicate request parameter names: range"
-        ]
+        assert provider.validate() == [f"{dataset}: duplicate request parameter names: range"]
     finally:
         provider.close()
 
     with pytest.raises(ValueError, match="duplicate request parameter names: range"):
-        _sanitize_for_yaml({
-            "name": "test_source",
-            "datasets": {
-                dataset: {
-                    "url": config.url,
-                    "symbols_param": "range",
-                    "start_param": "range",
+        _sanitize_for_yaml(
+            {
+                "name": "test_source",
+                "datasets": {
+                    dataset: {
+                        "url": config.url,
+                        "symbols_param": "range",
+                        "start_param": "range",
+                    },
                 },
-            },
-        })
+            }
+        )
 
 
 def test_data_source_trial_uses_unsaved_config_and_closes_provider(monkeypatch):
@@ -297,11 +327,13 @@ def test_data_source_trial_uses_unsaved_config_and_closes_provider(monkeypatch):
         },
     )
 
-    result = run_data_source_test(CustomSourceTestIn(
-        provider="draft",
-        dataset="realtime",
-        config=config,
-    ))
+    result = run_data_source_test(
+        CustomSourceTestIn(
+            provider="draft",
+            dataset="realtime",
+            config=config,
+        )
+    )
 
     assert result["provider"] == "draft"
     tested = create_provider.call_args.args[0]
@@ -335,7 +367,14 @@ def test_full_minute_dataset_survives_config_and_registration(tmp_path: Path, mo
     from app.data_providers.custom import loader as custom_loader
 
     full_minute_fields = (
-        "symbol", "datetime", "open", "high", "low", "close", "volume", "amount",
+        "symbol",
+        "datetime",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
     )
     raw = {
         "name": "test_source",
@@ -361,8 +400,7 @@ def test_full_minute_dataset_survives_config_and_registration(tmp_path: Path, mo
         "  full_minute:\n"
         "    url: https://example.test/full_minute\n"
         "    method: POST\n"
-        "    field_map:\n"
-        + "".join(f"      {n}: {n}\n" for n in full_minute_fields),
+        "    field_map:\n" + "".join(f"      {n}: {n}\n" for n in full_minute_fields),
         encoding="utf-8",
     )
     cfg = load_config(path)
@@ -386,11 +424,17 @@ def test_full_minute_dataset_survives_config_and_registration(tmp_path: Path, mo
 # amount 可空契约 + 保存先验后存 (用户反馈: 自定义源配全量分钟"保存不好使")
 # ================================================================
 
+
 def _minute_dataset(*, drop_targets: tuple[str, ...] = ()) -> dict:
     """minute/full_minute 形态的数据集配置; drop_targets 指定不映射的内部字段。"""
     field_map = {
-        "code": "symbol", "ts": "datetime",
-        "o": "open", "h": "high", "lo": "low", "c": "close", "v": "volume",
+        "code": "symbol",
+        "ts": "datetime",
+        "o": "open",
+        "h": "high",
+        "lo": "low",
+        "c": "close",
+        "v": "volume",
     }
     field_map = {k: v for k, v in field_map.items() if v not in drop_targets}
     return {
@@ -410,10 +454,13 @@ def test_full_minute_without_amount_is_valid():
     """
     from app.data_providers.custom import loader
 
-    provider = loader.create_provider({
-        "name": "fm_no_amount", "display_name": "fm",
-        "datasets": {"full_minute": _minute_dataset(drop_targets=("amount",))},
-    })
+    provider = loader.create_provider(
+        {
+            "name": "fm_no_amount",
+            "display_name": "fm",
+            "datasets": {"full_minute": _minute_dataset(drop_targets=("amount",))},
+        }
+    )
     try:
         assert not provider.validate(), provider.validate()
         assert "full_minute" in provider.config.datasets
@@ -425,10 +472,13 @@ def test_minute_without_amount_is_valid():
     """minute 数据集同契约: amount 不映射也合法。"""
     from app.data_providers.custom import loader
 
-    provider = loader.create_provider({
-        "name": "m_no_amount", "display_name": "m",
-        "datasets": {"minute": _minute_dataset(drop_targets=("amount",))},
-    })
+    provider = loader.create_provider(
+        {
+            "name": "m_no_amount",
+            "display_name": "m",
+            "datasets": {"minute": _minute_dataset(drop_targets=("amount",))},
+        }
+    )
     try:
         assert not provider.validate(), provider.validate()
     finally:
@@ -440,10 +490,13 @@ def test_minute_missing_core_field_still_rejected():
     from app.data_providers.custom import loader
 
     with pytest.raises(ValueError, match="volume"):
-        loader.create_provider({
-            "name": "m_no_volume", "display_name": "m",
-            "datasets": {"minute": _minute_dataset(drop_targets=("volume",))},
-        })
+        loader.create_provider(
+            {
+                "name": "m_no_volume",
+                "display_name": "m",
+                "datasets": {"minute": _minute_dataset(drop_targets=("volume",))},
+            }
+        )
 
 
 def test_save_data_source_validates_before_write(monkeypatch, tmp_path):

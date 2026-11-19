@@ -15,6 +15,7 @@
 契约视图 (params/inputs/expression 归一化渲染) 的消费方 — 统一选择器、
 AI 提示词、扩展包分发 — 在 P4 才存在, 届时再加。
 """
+
 from __future__ import annotations
 
 import json
@@ -64,7 +65,10 @@ class JsonDefinitionStore:
         """目录内匹配文件的 (文件名, mtime) 签名 — 创建/删除/编辑都会变化。"""
         try:
             return tuple(
-                sorted((f.name, f.stat().st_mtime_ns) for f in self.dir(data_dir).glob(self.glob_pattern))
+                sorted(
+                    (f.name, f.stat().st_mtime_ns)
+                    for f in self.dir(data_dir).glob(self.glob_pattern)
+                )
             )
         except OSError:
             return ()
@@ -219,8 +223,12 @@ def smoke_definition(kind: str, definition: dict) -> dict:
     try:
         validate_definition(kind, definition)
     except ValueError as e:
-        return {"ok": False, "issues": [{"code": "V001", "message": str(e)}],
-                "dependencies": [], "warmup_bars": None}
+        return {
+            "ok": False,
+            "issues": [{"code": "V001", "message": str(e)}],
+            "dependencies": [],
+            "warmup_bars": None,
+        }
 
     dependencies: frozenset[str] = frozenset()
     warmup_bars: int | None = None
@@ -240,10 +248,12 @@ def smoke_definition(kind: str, definition: dict) -> dict:
         finally:
             signal_logger.removeHandler(capture)
         if column not in exprs:
-            issues.append({
-                "code": "C001",
-                "message": capture.messages[0] if capture.messages else "信号编译失败",
-            })
+            issues.append(
+                {
+                    "code": "C001",
+                    "message": capture.messages[0] if capture.messages else "信号编译失败",
+                }
+            )
         dependencies = definition_dependencies("signal", definition)
     else:
         from app.factors import store as factor_store
@@ -251,8 +261,12 @@ def smoke_definition(kind: str, definition: dict) -> dict:
         try:
             spec = factor_store.to_spec(definition)
         except ValueError as e:  # validate 已过, 这里只剩环境性失败
-            return {"ok": False, "issues": [{"code": "V002", "message": str(e)}],
-                    "dependencies": [], "warmup_bars": None}
+            return {
+                "ok": False,
+                "issues": [{"code": "V002", "message": str(e)}],
+                "dependencies": [],
+                "warmup_bars": None,
+            }
         dependencies = spec.dependencies
         warmup_bars = spec.warmup_bars
 
@@ -296,9 +310,8 @@ def catalog(data_dir: Path) -> list[dict]:
     from app.factors import store as factor_store
     from app.strategy import custom_signals
 
-    items: list[dict] = []
-    for sig in custom_signals.load_all(data_dir):
-        items.append({
+    items: list[dict] = [
+        {
             "kind": "signal",
             "id": sig.get("id"),
             "label": sig.get("name") or sig.get("id"),
@@ -307,7 +320,9 @@ def catalog(data_dir: Path) -> list[dict]:
             "timeframe": sig.get("timeframe") or "daily",
             "lang": "conditions",
             "dependencies": sorted(definition_dependencies("signal", sig)),
-        })
+        }
+        for sig in custom_signals.load_all(data_dir)
+    ]
     for definition in factor_store.load_all(data_dir):
         item = {
             "kind": "factor",
@@ -319,11 +334,13 @@ def catalog(data_dir: Path) -> list[dict]:
         }
         try:
             spec = factor_store.to_spec(definition)
-            item.update({
-                "dependencies": sorted(spec.dependencies),
-                "warmup_bars": spec.warmup_bars,
-                "group": spec.group,
-            })
+            item.update(
+                {
+                    "dependencies": sorted(spec.dependencies),
+                    "warmup_bars": spec.warmup_bars,
+                    "group": spec.group,
+                }
+            )
         except ValueError as e:
             item["error"] = str(e)  # 目录不因单个坏定义失败 (隔离要求)
         items.append(item)

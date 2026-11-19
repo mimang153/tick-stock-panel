@@ -5,33 +5,28 @@
 冷却: 同规则同 symbol 最近一次自动下单后 N 个交易日内不再触发 (按订单
 created_at 日期判断, 无独立状态文件 — 可由订单列表重放推导)。
 
-规则按账户存放 (accounts/{account_id}/auto_rules/), 账户间隔离;
+规则存于 PostgreSQL (paper_auto_rule 表, DES-005), 按 account_id 隔离;
 on_rule_events 由钩子对每个账户各调一次。
 
 触发链路: quote_service._evaluate_monitors 产出的 rule_events →
 paper_auto.on_rule_events → paper.create_order(source=f"auto:{rule_id}")。
 所有下单走 paper 域的同一把锁与校验, 账户冻结/资金/涨跌停等约束自动生效。
 """
+
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from datetime import date as _date
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 
 from app.market_time import cn_now
-from app.services.fs_utils import atomic_write_text
+from app.storage import paper_pg as store
 from app.strategy import paper
 
 logger = logging.getLogger(__name__)
-
-
-def _dir(data_dir: Path, account_id: str) -> Path:
-    d = paper._root(data_dir, account_id) / "auto_rules"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
 
 
 def _now_iso() -> str:
@@ -57,7 +52,7 @@ def validate_rule(rule: dict) -> None:
     if rule.get("size_mode") not in ("fixed_amount", "pct_equity"):
         raise ValueError(f"size_mode 非法: {rule.get('size_mode')!r}")
     value = rule.get("size_value")
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
         raise ValueError("size_value 必须是正数")
     if rule.get("size_mode") == "pct_equity" and value > 100:
         raise ValueError("pct_equity 的 size_value 不能超过 100 (%)")
@@ -84,50 +79,46 @@ def normalize_rule(rule: dict) -> dict:
     d.setdefault("size_mode", "fixed_amount")
     d.setdefault("order_type", "next_open")
     d.setdefault("cooldown_days", 5)
-    d.setdefault("max_positions", 0)   # 0 = 不限制 (对齐回测 max_positions 语义)
+    d.setdefault("max_positions", 0)  # 0 = 不限制 (对齐回测 max_positions 语义)
     d.setdefault("enabled", True)
     d.setdefault("created_at", _now_iso())
     return d
 
 
-def load_auto_rules(data_dir: Path, account_id: str = paper.DEFAULT_ACCOUNT_ID, enabled_only: bool = False) -> list[dict]:
-    out: list[dict] = []
-    for f in sorted(_dir(data_dir, account_id).glob("arule_*.json")):
-        try:
-            r = normalize_rule(json.loads(f.read_text(encoding="utf-8")))
-            if enabled_only and not r.get("enabled"):
-                continue
-            out.append(r)
-        except Exception as e:
-            logger.warning("paper auto rule load failed %s: %s", f.name, e)
-    return out
+def load_auto_rules(
+    data_dir: Path, account_id: str = paper.DEFAULT_ACCOUNT_ID, enabled_only: bool = False
+) -> list[dict]:
+    rows = store.load_auto_rules(account_id, enabled_only=enabled_only)
+    return [normalize_rule(r) for r in rows.values()]
 
 
 def save_auto_rule(data_dir: Path, rule: dict, account_id: str = paper.DEFAULT_ACCOUNT_ID) -> dict:
     validate_rule(rule)
-    atomic_write_text(_dir(data_dir, account_id) / f"{rule['id']}.json", json.dumps(rule, ensure_ascii=False, indent=2))
+    store.save_auto_rule(account_id, rule)
     return rule
 
 
-def create_auto_rule(data_dir: Path, rule: dict, account_id: str = paper.DEFAULT_ACCOUNT_ID) -> dict:
+def create_auto_rule(
+    data_dir: Path, rule: dict, account_id: str = paper.DEFAULT_ACCOUNT_ID
+) -> dict:
     rule = normalize_rule({**rule, "id": _new_id()})
     validate_rule(rule)
     return save_auto_rule(data_dir, rule, account_id)
 
 
-def delete_auto_rule(data_dir: Path, rule_id: str, account_id: str = paper.DEFAULT_ACCOUNT_ID) -> bool:
-    p = _dir(data_dir, account_id) / f"{rule_id}.json"
-    if p.exists():
-        p.unlink()
-        return True
-    return False
+def delete_auto_rule(
+    data_dir: Path, rule_id: str, account_id: str = paper.DEFAULT_ACCOUNT_ID
+) -> bool:
+    return store.delete_auto_rule(account_id, rule_id)
 
 
-def set_enabled(data_dir: Path, rule_id: str, enabled: bool, account_id: str = paper.DEFAULT_ACCOUNT_ID) -> dict | None:
-    p = _dir(data_dir, account_id) / f"{rule_id}.json"
-    if not p.exists():
+def set_enabled(
+    data_dir: Path, rule_id: str, enabled: bool, account_id: str = paper.DEFAULT_ACCOUNT_ID
+) -> dict | None:
+    rule = store.load_auto_rules(account_id).get(rule_id)
+    if rule is None:
         return None
-    rule = normalize_rule(json.loads(p.read_text(encoding="utf-8")))
+    rule = normalize_rule(rule)
     rule["enabled"] = enabled
     return save_auto_rule(data_dir, rule, account_id)
 
@@ -138,7 +129,9 @@ def _matches(rule: dict, ev: dict) -> bool:
     return ev.get("rule_id") == rule["match_id"]
 
 
-def _in_cooldown(data_dir: Path, rule: dict, symbol: str, cooldown_days: int, account_id: str) -> bool:
+def _in_cooldown(
+    data_dir: Path, rule: dict, symbol: str, cooldown_days: int, account_id: str
+) -> bool:
     """同规则同 symbol 最近一次自动下单是否仍在冷却期 (按日历日, 含当日)。"""
     if cooldown_days <= 0:
         return False
@@ -207,7 +200,50 @@ def _held_qty(data_dir: Path, symbol: str, account_id: str) -> int:
     return int(p["qty"]) if p else 0
 
 
-def on_rule_events(data_dir: Path, events: list[dict], account_id: str = paper.DEFAULT_ACCOUNT_ID) -> list[dict]:
+def _auto_order_qty(
+    data_dir: Path,
+    rule: dict,
+    side: str,
+    symbol: str,
+    price: float,
+    account_id: str,
+) -> int | None:
+    """计算自动下单数量；返回 None 表示当前规则/事件跳过下单。"""
+    if side == "buy":
+        max_positions = int(rule.get("max_positions", 0))
+        if max_positions > 0:
+            used = _position_slots_used(data_dir, account_id)
+            if len(used) >= max_positions and symbol not in used:
+                logger.info(
+                    "paper auto %s: %s 跳过开仓 — 已达最大持仓 %d (%s)",
+                    rule["name"],
+                    symbol,
+                    max_positions,
+                    ", ".join(sorted(used)) or "空",
+                )
+                return None
+        qty = _sizing_qty(data_dir, rule, float(price), account_id)
+    else:
+        if rule.get("side") == "auto":
+            qty = _held_qty(data_dir, symbol, account_id)
+            if qty <= 0:
+                return None
+        else:
+            qty = _sizing_qty(data_dir, rule, float(price), account_id)
+            held = paper.sell_capacity(data_dir, symbol, account_id)
+            if held is None:
+                return None
+            available, pending_sell = held
+            qty = min(qty, paper.normalize_qty(available - pending_sell))
+    if qty <= 0:
+        logger.info("paper auto %s: %s 金额不足以一手 (价 %s)", rule["name"], symbol, price)
+        return None
+    return qty
+
+
+def on_rule_events(
+    data_dir: Path, events: list[dict], account_id: str = paper.DEFAULT_ACCOUNT_ID
+) -> list[dict]:
     """监控事件 → 自动下单。返回本次创建的订单列表 (被拒订单只记日志)。
 
     触发条件: 事件带 symbol 与价格、有规则匹配、未冷却; 下单复用 paper.create_order
@@ -234,38 +270,17 @@ def on_rule_events(data_dir: Path, events: list[dict], account_id: str = paper.D
                 side = _resolve_side(rule, ev)
                 if side is None:
                     continue
-                if _in_cooldown(data_dir, rule, symbol, int(rule.get("cooldown_days", 0)), account_id):
+                if _in_cooldown(
+                    data_dir, rule, symbol, int(rule.get("cooldown_days", 0)), account_id
+                ):
                     continue
-                if side == "buy":
-                    max_positions = int(rule.get("max_positions", 0))
-                    if max_positions > 0:
-                        used = _position_slots_used(data_dir, account_id)
-                        if len(used) >= max_positions and symbol not in used:
-                            logger.info(
-                                "paper auto %s: %s 跳过开仓 — 已达最大持仓 %d (%s)",
-                                rule["name"], symbol, max_positions, ", ".join(sorted(used)) or "空",
-                            )
-                            continue
-                    qty = _sizing_qty(data_dir, rule, float(price), account_id)
-                else:
-                    # auto 的出场卖出 = 全平该标的 (策略出场语义); 固定 sell 规则仍按 sizing。
-                    if rule.get("side") == "auto":
-                        qty = _held_qty(data_dir, symbol, account_id)
-                        if qty <= 0:
-                            continue  # 未持仓, 出场信号无意义
-                    else:
-                        qty = _sizing_qty(data_dir, rule, float(price), account_id)
-                        # 金额换算的股数与实际持仓对不上: 以可卖余量封顶, 金额设足够大即清仓
-                        held = paper.sell_capacity(data_dir, symbol, account_id)
-                        if held is None:
-                            continue
-                        available, pending_sell = held
-                        qty = min(qty, paper.normalize_qty(available - pending_sell))
-                if qty <= 0:
-                    logger.info("paper auto %s: %s 金额不足以一手 (价 %s)", rule["name"], symbol, price)
+                qty = _auto_order_qty(data_dir, rule, side, symbol, price, account_id)
+                if qty is None:
                     continue
                 order, err = paper.create_order(
-                    data_dir, symbol, side,
+                    data_dir,
+                    symbol,
+                    side,
                     account_id=account_id,
                     qty=qty,
                     order_type=rule["order_type"],
@@ -275,15 +290,24 @@ def on_rule_events(data_dir: Path, events: list[dict], account_id: str = paper.D
                 if err:
                     logger.info("paper auto %s: %s 下单被拒: %s", rule["name"], symbol, err)
                     continue
-                created.append(order)
-                logger.info("paper auto %s: %s 触发 %s %d 股 (%s)", rule["name"], symbol, side, qty, order["id"])
+                created.append(cast(dict, order))
+                logger.info(
+                    "paper auto %s: %s 触发 %s %d 股 (%s)",
+                    rule["name"],
+                    symbol,
+                    side,
+                    qty,
+                    cast(dict, order)["id"],
+                )
     return created
 
 
 _ORDER_TYPE_LABEL = {"market": "即时", "next_open": "次日开盘", "close": "当日收盘"}
 
 
-def auto_order_events(created: list[dict], account_id: str = paper.DEFAULT_ACCOUNT_ID) -> list[dict]:
+def auto_order_events(
+    created: list[dict], account_id: str = paper.DEFAULT_ACCOUNT_ID
+) -> list[dict]:
     """自动跟单创建的订单 → 推送事件。与成交事件同构 (source=paper 对齐
     AlertEvent), 走同一推送通道; rule_id 从 order.source (auto:{rule_id}) 还原。
     """
@@ -293,16 +317,18 @@ def auto_order_events(created: list[dict], account_id: str = paper.DEFAULT_ACCOU
         rule_id = source.removeprefix("auto:") if source.startswith("auto:") else ""
         side_label = "买入" if o["side"] == "buy" else "卖出"
         type_label = _ORDER_TYPE_LABEL.get(o["order_type"], o["order_type"])
-        events.append({
-            "source": "paper",
-            "type": "auto_order",
-            "severity": "info",
-            "ts": int(cn_now().timestamp() * 1000),
-            "symbol": o["symbol"],
-            "rule_id": rule_id,
-            "side": o["side"],
-            "qty": o["qty"],
-            "account_id": account_id,
-            "message": f"自动跟单触发{side_label}下单 ({type_label}) {o['qty']}股",
-        })
+        events.append(
+            {
+                "source": "paper",
+                "type": "auto_order",
+                "severity": "info",
+                "ts": int(cn_now().timestamp() * 1000),
+                "symbol": o["symbol"],
+                "rule_id": rule_id,
+                "side": o["side"],
+                "qty": o["qty"],
+                "account_id": account_id,
+                "message": f"自动跟单触发{side_label}下单 ({type_label}) {o['qty']}股",
+            }
+        )
     return events

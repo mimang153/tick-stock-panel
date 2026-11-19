@@ -1,7 +1,9 @@
 """#225/#226 回归: 自定义源分钟K字符串日期解析 + 日K分批失败隔离。"""
+
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Any, cast
 
 import polars as pl
 
@@ -10,25 +12,34 @@ from app.data_providers.custom.loader import GenericHTTPProvider
 
 
 def _provider(datasets: dict[str, DatasetConfig]) -> GenericHTTPProvider:
-    return GenericHTTPProvider(CustomSourceConfig(
-        name="test_source",
-        display_name="Test Source",
-        datasets=datasets,
-    ))
+    return GenericHTTPProvider(
+        CustomSourceConfig(
+            name="test_source",
+            display_name="Test Source",
+            datasets=datasets,
+        )
+    )
 
 
 def _daily_config(batch: int = 2) -> DatasetConfig:
     return DatasetConfig(
         url="https://example.test/daily",
         field_map={
-            "symbol": "symbol", "date": "date", "open": "open", "high": "high",
-            "low": "low", "close": "close", "volume": "volume", "amount": "amount",
+            "symbol": "symbol",
+            "date": "date",
+            "open": "open",
+            "high": "high",
+            "low": "low",
+            "close": "close",
+            "volume": "volume",
+            "amount": "amount",
         },
         batch=batch,
     )
 
 
 # ── #225: 分钟K字符串 datetime 不得被 cast 成 null ────────────────
+
 
 def test_normalize_minute_parses_string_datetime() -> None:
     df = pl.DataFrame(
@@ -45,9 +56,7 @@ def test_normalize_minute_parses_string_datetime() -> None:
     assert out["datetime"][0] == datetime(2026, 9, 1, 9, 35)
 
     # 非法字符串维持 strict=False 宽松行为 (null, 不抛异常)
-    bad = pl.DataFrame(
-        {"symbol": ["600000.SH"], "datetime": ["not-a-date"], "close": [1.0]}
-    )
+    bad = pl.DataFrame({"symbol": ["600000.SH"], "datetime": ["not-a-date"], "close": [1.0]})
     out_bad = GenericHTTPProvider._normalize_minute(bad)
     assert out_bad["datetime"].null_count() == 1
 
@@ -65,6 +74,7 @@ def test_normalize_minute_datetime_already_typed_unchanged() -> None:
 
 
 # ── #226: get_daily 单批失败只隔离该批 ────────────────────────
+
 
 def _canonical_frame(symbols: list[str], day: str) -> pl.DataFrame:
     return pl.DataFrame(
@@ -91,14 +101,15 @@ def test_get_daily_isolates_failed_batch() -> None:
             raise RuntimeError("502 Bad Gateway")
         return [{"_rows": list(symbols)}]
 
-    provider._request_rows = request_rows
-    provider._mapped_frame = lambda cfg, rows: _canonical_frame(
+    cast(Any, provider)._request_rows = request_rows
+    cast(Any, provider)._mapped_frame = lambda cfg, rows: _canonical_frame(
         rows[0]["_rows"], "2026-09-01"
     )
 
     df = provider.get_daily(
         ["s1", "s2", "s3", "s4", "s5", "s6"],
-        datetime(2026, 8, 1), datetime(2026, 9, 1),
+        datetime(2026, 8, 1),
+        datetime(2026, 9, 1),
     )
 
     # 3 批都请求过 (失败批重试 1 次后跳过、流程继续), 返回第 1、3 批共 4 行
@@ -116,13 +127,15 @@ def test_get_daily_progress_callback_fires_for_failed_batch() -> None:
         return [{"_rows": list(symbols)}]
 
     progress: list[tuple[int, int]] = []
-    provider._request_rows = request_rows
-    provider._mapped_frame = lambda cfg, rows: _canonical_frame(
+    cast(Any, provider)._request_rows = request_rows
+    cast(Any, provider)._mapped_frame = lambda cfg, rows: _canonical_frame(
         rows[0]["_rows"], "2026-09-01"
     )
 
     provider.get_daily(
-        ["s1", "s2", "s3", "s4"], datetime(2026, 8, 1), datetime(2026, 9, 1),
+        ["s1", "s2", "s3", "s4"],
+        datetime(2026, 8, 1),
+        datetime(2026, 9, 1),
         on_chunk_done=lambda cur, tot: progress.append((cur, tot)),
     )
     # 失败批也推进进度, 前端进度条不会卡死
@@ -135,6 +148,6 @@ def test_get_daily_all_batches_fail_returns_empty() -> None:
     def request_rows(cfg, symbols=None, **kwargs):
         raise RuntimeError("down")
 
-    provider._request_rows = request_rows
+    cast(Any, provider)._request_rows = request_rows
     df = provider.get_daily(["s1", "s2"], datetime(2026, 8, 1), datetime(2026, 9, 1))
     assert df.is_empty()

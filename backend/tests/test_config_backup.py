@@ -3,6 +3,7 @@
 覆盖: 导出打包与脱敏、inspect 预览与冲突统计、恶意 ZIP 拒绝、
 apply 的冲突/merge/逐条容错语义、策略安全校验 fail-closed。
 """
+
 from __future__ import annotations
 
 import io
@@ -15,34 +16,34 @@ import pytest
 
 from app.services import config_backup
 
-SAFE_STRATEGY = '''\
+SAFE_STRATEGY = """\
 META = {"id": "custom_demo", "name": "demo", "description": "", "tags": []}
 
 import polars as pl
 
 def compute(df: pl.DataFrame) -> pl.DataFrame:
     return df
-'''
+"""
 
 DEP_STRATEGY_HELPER = "def helper(x):\n    return x\n"
 
-STRATEGY_WITH_DEP = '''\
+STRATEGY_WITH_DEP = """\
 META = {"id": "custom_withdep", "name": "wd", "description": "", "tags": []}
 
 import _helper
 
 def compute(df):
     return _helper.helper(df)
-'''
+"""
 
-UNSAFE_STRATEGY = '''\
+UNSAFE_STRATEGY = """\
 META = {"id": "custom_evil", "name": "evil", "description": "", "tags": []}
 
 import os
 
 def compute(df):
     return os.system("rm -rf /")
-'''
+"""
 
 
 def _write(path: Path, content: str | bytes) -> Path:
@@ -66,24 +67,45 @@ def src_env(tmp_path, monkeypatch):
     _write(root / "strategies" / "custom" / "custom_withdep.py", STRATEGY_WITH_DEP)
     _write(root / "user_data" / "strategy_overrides" / "custom_demo.json", '{"params": {"n": 5}}')
     _write(root / "user_data" / "custom_signals" / "cs_demo.json", '{"id": "cs_demo", "name": "s"}')
-    _write(root / "user_data" / "custom_factors" / "uf_demo.json", '{"id": "uf_demo", "formula": "close"}')
-    _write(root / "user_data" / "monitor_rules" / "mr_demo.json",
-           json.dumps({"id": "mr_demo", "name": "r", "webhook_url": "https://hook/secret",
-                       "webhook_channels": ["feishu"]}))
-    _write(root / "user_data" / "watchlist_groups.json", '[{"name": "g1", "symbols": ["000001.SZ"]}]')
+    _write(
+        root / "user_data" / "custom_factors" / "uf_demo.json",
+        '{"id": "uf_demo", "formula": "close"}',
+    )
+    _write(
+        root / "user_data" / "monitor_rules" / "mr_demo.json",
+        json.dumps(
+            {
+                "id": "mr_demo",
+                "name": "r",
+                "webhook_url": "https://hook/secret",
+                "webhook_channels": ["feishu"],
+            }
+        ),
+    )
+    _write(
+        root / "user_data" / "watchlist_groups.json", '[{"name": "g1", "symbols": ["000001.SZ"]}]'
+    )
     pl.DataFrame({"symbol": ["000001.SZ"], "name": ["平安银行"]}).write_parquet(
         root / "user_data" / "watchlist.parquet"
     )
     _write(root / "data_sources" / "my_src.yaml", "name: my_src\nbase_url: https://x\n")
     _write(root / "analysis_menus" / "am_demo.json", '{"id": "am_demo", "title": "m"}')
     _write(root / "ext_data" / "ext1" / "config.json", '{"id": "ext1", "url": "https://y"}')
-    _write(root / "user_data" / "preferences.json", json.dumps({
-        "quote_interval": 5,
-        "feishu_webhook_url": "https://open.feishu.cn/hook/tok",
-        "feishu_webhook_secret": "s3cret",
-        "wecom_bot_secret": "bot-s3cret",
-    }))
-    _write(root / "user_data" / "secrets.json", json.dumps({"ai_api_key": "sk-1", "tickflow_api_key": "tf-1"}))
+    _write(
+        root / "user_data" / "preferences.json",
+        json.dumps(
+            {
+                "quote_interval": 5,
+                "feishu_webhook_url": "https://open.feishu.cn/hook/tok",
+                "feishu_webhook_secret": "s3cret",
+                "wecom_bot_secret": "bot-s3cret",
+            }
+        ),
+    )
+    _write(
+        root / "user_data" / "secrets.json",
+        json.dumps({"ai_api_key": "sk-1", "tickflow_api_key": "tf-1"}),
+    )
     # 彻底迁移范围内的其余类别
     _write(root / "user_data" / "lots" / "lot_a.json", '{"id": "lot_a", "symbol": "000001.SZ"}')
     _write(root / "paper" / "accounts" / "acc1" / "account.json", '{"id": "acc1", "cash": 100000}')
@@ -91,7 +113,9 @@ def src_env(tmp_path, monkeypatch):
     _write(root / "paper" / "accounts" / "acc1" / "nav" / "daily.jsonl", '{"nav": 100000}\n')
     _write(root / "user_data" / "research_candidates.json", '[{"id": "rc1"}]')
     _write(root / "ext_pages" / "mypage" / "page.json", '{"id": "mypage", "title": "p"}')
-    _write(root / "ext_pages" / "mypage" / "bundle.js", "export default function P() { return null }")
+    _write(
+        root / "ext_pages" / "mypage" / "bundle.js", "export default function P() { return null }"
+    )
     _write(root / "sound_packs" / "ding.mp3", b"ID3fakeaudio")
     _write(root / "user_data" / "alerts.jsonl", '{"msg": "m"}\n')
     _write(root / "user_data" / "assistant_sessions.json", '{"sessions": []}')
@@ -162,11 +186,14 @@ def test_strategy_library_backup_roundtrip_and_conflict_policy(src_env, tmp_path
     assert strategy_pool.load_snapshot()["pool"] == original["pool"]
 
 
-@pytest.mark.parametrize("payload", [
-    {"version": 99, "groups": [], "pool": [], "meta": {}},
-    {"version": 2, "groups": [], "pool": "invalid", "meta": {}},
-    {"version": 2, "groups": [], "pool": [], "meta": []},
-])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"version": 99, "groups": [], "pool": [], "meta": {}},
+        {"version": 2, "groups": [], "pool": "invalid", "meta": {}},
+        {"version": 2, "groups": [], "pool": [], "meta": []},
+    ],
+)
 def test_invalid_strategy_library_restore_preserves_existing(src_env, payload):
     from app.services import strategy_pool
 
@@ -175,7 +202,9 @@ def test_invalid_strategy_library_restore_preserves_existing(src_env, payload):
     before = path.read_bytes()
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
-        zf.writestr("manifest.json", json.dumps({"format": config_backup.BACKUP_FORMAT, "version": 1}))
+        zf.writestr(
+            "manifest.json", json.dumps({"format": config_backup.BACKUP_FORMAT, "version": 1})
+        )
         zf.writestr("user_data/strategy_pool.json", json.dumps(payload))
     result = config_backup.apply_archive(buf.getvalue(), allow_overwrite=True)
     assert result["categories"][0]["failed"]
@@ -205,13 +234,23 @@ def test_old_backups_preserve_library_and_v1_library_restore_is_supported(src_en
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
-        zf.writestr("manifest.json", json.dumps({"format": config_backup.BACKUP_FORMAT, "version": 1}))
-        zf.writestr("user_data/strategy_pool.json", json.dumps({
-            "version": 1, "groups": [{"id": "g", "name": "旧分组"}],
-            "entries": [{"id": "a", "group": "g", "added_at": "2025-01-01"}],
-            "archived": [{"id": "b", "group": "g", "archived_at": "2025-02-01"}],
-        }))
-        zf.writestr("user_data/preferences.json", json.dumps({"ui_prefs": {"strategy_pool": '["stale"]'}}))
+        zf.writestr(
+            "manifest.json", json.dumps({"format": config_backup.BACKUP_FORMAT, "version": 1})
+        )
+        zf.writestr(
+            "user_data/strategy_pool.json",
+            json.dumps(
+                {
+                    "version": 1,
+                    "groups": [{"id": "g", "name": "旧分组"}],
+                    "entries": [{"id": "a", "group": "g", "added_at": "2025-01-01"}],
+                    "archived": [{"id": "b", "group": "g", "archived_at": "2025-02-01"}],
+                }
+            ),
+        )
+        zf.writestr(
+            "user_data/preferences.json", json.dumps({"ui_prefs": {"strategy_pool": '["stale"]'}})
+        )
     result = config_backup.apply_archive(buf.getvalue(), allow_overwrite=True)
     assert not any(category["failed"] for category in result["categories"])
     state = strategy_pool.load_snapshot()
@@ -233,10 +272,17 @@ def test_legacy_pool_import_requires_overwrite_and_keeps_group_and_archive_metad
     before_meta = strategy_pool.load_snapshot()["meta"]
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
-        zf.writestr("manifest.json", json.dumps({"format": config_backup.BACKUP_FORMAT, "version": 1}))
-        zf.writestr("user_data/preferences.json", json.dumps({
-            "ui_prefs": {"strategy_pool": '["legacy", "archived"]'},
-        }))
+        zf.writestr(
+            "manifest.json", json.dumps({"format": config_backup.BACKUP_FORMAT, "version": 1})
+        )
+        zf.writestr(
+            "user_data/preferences.json",
+            json.dumps(
+                {
+                    "ui_prefs": {"strategy_pool": '["legacy", "archived"]'},
+                }
+            ),
+        )
     config_backup.apply_archive(buf.getvalue())
     assert strategy_pool.load_snapshot()["pool"] == ["local"]
     config_backup.apply_archive(buf.getvalue(), allow_overwrite=True)
@@ -350,23 +396,32 @@ def test_export_resolves_plugin_and_ext_keys_with_store_priority(src_env, monkey
     from app.data_providers.custom import loader
 
     path = src_env / "user_data" / "secrets.json"
-    path.write_text(json.dumps({
-        "ai_api_key": stored_key,
-        "tickflow_api_key": stored_key,
-        "sample_api_key": stored_key,
-        "ext_ext1_api_key": stored_key,
-        "ai_base_url": "https://local.test/v1",
-        "ai_round_checkpoint": 0,
-        "local_only": "keep",
-    }), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            {
+                "ai_api_key": stored_key,
+                "tickflow_api_key": stored_key,
+                "sample_api_key": stored_key,
+                "ext_ext1_api_key": stored_key,
+                "ai_base_url": "https://local.test/v1",
+                "ai_round_checkpoint": 0,
+                "local_only": "keep",
+            }
+        ),
+        encoding="utf-8",
+    )
     original = path.read_bytes()
     monkeypatch.setattr(settings, "ai_api_key", "test-fallback-key")
     monkeypatch.setattr(settings, "tickflow_api_key", "test-fallback-key")
     monkeypatch.setattr(settings, "ai_base_url", "https://fallback.test/v1")
-    monkeypatch.setattr(loader, "list_plugins", lambda: [
-        {"name": "sample", "api_key_env": "SAMPLE_BACKUP_API_KEY", "available": False},
-        {"name": "no_key"},
-    ])
+    monkeypatch.setattr(
+        loader,
+        "list_plugins",
+        lambda: [
+            {"name": "sample", "api_key_env": "SAMPLE_BACKUP_API_KEY", "available": False},
+            {"name": "no_key"},
+        ],
+    )
     monkeypatch.setenv("SAMPLE_BACKUP_API_KEY", "test-fallback-key")
     monkeypatch.setenv("EXT_EXT1_API_KEY", "test-fallback-key")
 
@@ -395,9 +450,13 @@ def test_api_env_key_backup_restores_on_new_device(src_env, tmp_path_factory, mo
     monkeypatch.setattr(settings, "tickflow_api_key", "test-env-tickflow")
     monkeypatch.setattr(settings, "ai_base_url", "https://backup.test/v1")
     monkeypatch.setattr(settings, "ai_model", "backup-test-model")
-    monkeypatch.setattr(loader, "list_plugins", lambda: [
-        {"name": "sample", "api_key_env": "SAMPLE_BACKUP_API_KEY"},
-    ])
+    monkeypatch.setattr(
+        loader,
+        "list_plugins",
+        lambda: [
+            {"name": "sample", "api_key_env": "SAMPLE_BACKUP_API_KEY"},
+        ],
+    )
     monkeypatch.setenv("SAMPLE_BACKUP_API_KEY", "test-env-plugin")
     monkeypatch.setenv("EXT_EXT1_API_KEY", "test-env-ext")
     app = FastAPI()
@@ -422,7 +481,9 @@ def test_api_env_key_backup_restores_on_new_device(src_env, tmp_path_factory, mo
         preview = client.post("/api/config-backup/inspect", files=files)
         assert preview.status_code == 200
         assert preview.json()["has_secrets"] is True
-        restored = client.post("/api/config-backup/apply", files=files, data={"categories": "secrets"})
+        restored = client.post(
+            "/api/config-backup/apply", files=files, data={"categories": "secrets"}
+        )
         assert restored.status_code == 200
         assert restored.json()["secrets_merged"] is True
 
@@ -430,7 +491,10 @@ def test_api_env_key_backup_restores_on_new_device(src_env, tmp_path_factory, mo
     assert secrets_store.get_tickflow_key() == "test-env-tickflow"
     assert secrets_store.get_ai_config("ai_base_url") == "https://backup.test/v1"
     assert secrets_store.get_ai_config("ai_model") == "backup-test-model"
-    assert secrets_store.get_env_backed_secret("sample_api_key", "SAMPLE_BACKUP_API_KEY") == "test-env-plugin"
+    assert (
+        secrets_store.get_env_backed_secret("sample_api_key", "SAMPLE_BACKUP_API_KEY")
+        == "test-env-plugin"
+    )
     assert get_ext_api_key("ext1") == "test-env-ext"
     assert (root / "user_data" / "secrets.json").is_file()
 
@@ -473,36 +537,50 @@ def test_reject_invalid_archives(src_env):
         "version": config_backup.BACKUP_VERSION,
     }
     with pytest.raises(config_backup.ConfigBackupError, match="路径"):
-        config_backup.inspect_archive(_zip_with_manifest("../evil.py", "x", good_manifest))
+        config_backup.inspect_archive(_zip_with_manifest("../evil.py", b"x", good_manifest))
     with pytest.raises(config_backup.ConfigBackupError, match="路径"):
-        config_backup.inspect_archive(_zip_with_manifest("..\\evil.py", "x", good_manifest))
+        config_backup.inspect_archive(_zip_with_manifest("..\\evil.py", b"x", good_manifest))
     with pytest.raises(config_backup.ConfigBackupError, match="路径"):
-        config_backup.inspect_archive(_zip_with_manifest("/etc/passwd", "x", good_manifest))
+        config_backup.inspect_archive(_zip_with_manifest("/etc/passwd", b"x", good_manifest))
     with pytest.raises(config_backup.ConfigBackupError, match="版本"):
-        config_backup.inspect_archive(_zip_with_manifest(
-            "user_data/monitor_rules/x.json", "{}",
-            {"format": config_backup.BACKUP_FORMAT, "version": 99},
-        ))
+        config_backup.inspect_archive(
+            _zip_with_manifest(
+                "user_data/monitor_rules/x.json",
+                b"{}",
+                {"format": config_backup.BACKUP_FORMAT, "version": 99},
+            )
+        )
     with pytest.raises(config_backup.ConfigBackupError, match="不是本应用"):
-        config_backup.inspect_archive(_zip_with_manifest(
-            "user_data/monitor_rules/x.json", "{}", {"format": "other", "version": 1},
-        ))
+        config_backup.inspect_archive(
+            _zip_with_manifest(
+                "user_data/monitor_rules/x.json",
+                b"{}",
+                {"format": "other", "version": 1},
+            )
+        )
     # 防炸弹: 声明尺寸超单文件上限直接拒绝 (重复字节压缩后很小, 测试开销低)
     with pytest.raises(config_backup.ConfigBackupError, match="单文件"):
-        config_backup.inspect_archive(_zip_with_manifest(
-            "user_data/monitor_rules/big.json",
-            b"x" * (config_backup.MAX_FILE_BYTES + 1),
-            good_manifest,
-        ))
+        config_backup.inspect_archive(
+            _zip_with_manifest(
+                "user_data/monitor_rules/big.json",
+                b"x" * (config_backup.MAX_FILE_BYTES + 1),
+                good_manifest,
+            )
+        )
 
 
 def test_inspect_counts_out_of_scope_entries(src_env):
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as zf:
-        zf.writestr("manifest.json", json.dumps({
-            "format": config_backup.BACKUP_FORMAT,
-            "version": config_backup.BACKUP_VERSION,
-        }))
+        zf.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "format": config_backup.BACKUP_FORMAT,
+                    "version": config_backup.BACKUP_VERSION,
+                }
+            ),
+        )
         zf.writestr("user_data/unknown_store/x.json", "{}")
         zf.writestr("strategies/builtin/x.py", "y = 1\n")
     summary = config_backup.inspect_archive(out.getvalue())
@@ -539,10 +617,15 @@ def test_apply_into_fresh_env_roundtrip(src_env, tmp_path_factory, monkeypatch):
     assert imported["history"] == 2
     assert all(not c["failed"] for c in result["categories"])
     assert result["reload_hints"] == {
-        "strategies": True, "monitor_rules": True, "data_sources": True, "watchlist": True,
+        "strategies": True,
+        "monitor_rules": True,
+        "data_sources": True,
+        "watchlist": True,
     }
 
-    assert (root / "strategies" / "custom" / "custom_demo.py").read_text(encoding="utf-8") == SAFE_STRATEGY
+    assert (root / "strategies" / "custom" / "custom_demo.py").read_text(
+        encoding="utf-8"
+    ) == SAFE_STRATEGY
     assert (root / "user_data" / "watchlist.parquet").is_file()
     # 嵌套路径与二进制类别按原样落盘
     assert (root / "paper" / "accounts" / "acc1" / "nav" / "daily.jsonl").is_file()
@@ -581,7 +664,7 @@ def test_apply_preferences_merges_not_replaces(src_env):
     assert result["preferences_merged"] is True
 
     after = preferences.load()
-    assert after["quote_interval"] == 5       # 备份键覆盖
+    assert after["quote_interval"] == 5  # 备份键覆盖
     assert after["local_only_key"] == "keep"  # 本地新增键保留 (merge 而非整替)
     # 备份导出时已脱敏 → 导入不清掉本地已有敏感键, 也不写入新的
     assert after["feishu_webhook_secret"] == "s3cret"
@@ -609,10 +692,15 @@ def test_apply_secrets_via_store(src_env, tmp_path_factory, monkeypatch):
 def test_apply_skips_unsafe_strategy(src_env):
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as zf:
-        zf.writestr("manifest.json", json.dumps({
-            "format": config_backup.BACKUP_FORMAT,
-            "version": config_backup.BACKUP_VERSION,
-        }))
+        zf.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "format": config_backup.BACKUP_FORMAT,
+                    "version": config_backup.BACKUP_VERSION,
+                }
+            ),
+        )
         zf.writestr("strategies/custom/custom_evil.py", UNSAFE_STRATEGY)
         zf.writestr("user_data/custom_signals/cs_ok.json", '{"id": "cs_ok"}')
     result = config_backup.apply_archive(out.getvalue())
@@ -639,10 +727,15 @@ def test_apply_strategy_with_dependency_passes_safety(src_env):
 def test_apply_invalid_payload_reports_and_continues(src_env):
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as zf:
-        zf.writestr("manifest.json", json.dumps({
-            "format": config_backup.BACKUP_FORMAT,
-            "version": config_backup.BACKUP_VERSION,
-        }))
+        zf.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "format": config_backup.BACKUP_FORMAT,
+                    "version": config_backup.BACKUP_VERSION,
+                }
+            ),
+        )
         zf.writestr("user_data/monitor_rules/broken.json", "{not json")
         zf.writestr("data_sources/bad.yaml", "name: [unclosed")
         zf.writestr("analysis_menus/ok.json", '{"id": "am_ok"}')
@@ -681,7 +774,10 @@ def test_apply_category_selection(src_env, tmp_path_factory, monkeypatch):
     assert set(by_key) == {"monitor_rules", "preferences"}
     assert by_key["monitor_rules"]["imported"] == 1
     assert result["reload_hints"] == {
-        "strategies": False, "monitor_rules": True, "data_sources": False, "watchlist": False,
+        "strategies": False,
+        "monitor_rules": True,
+        "data_sources": False,
+        "watchlist": False,
     }
     # 未勾选的类别确实没有落盘
     assert (root / "user_data" / "monitor_rules" / "mr_demo.json").is_file()
@@ -708,20 +804,103 @@ def test_sensitive_categories_require_explicit_selection(src_env):
     # 导入端: 嵌套白名单外的伪造条目仍被拒绝
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as zf:
-        zf.writestr("manifest.json", json.dumps({
-            "format": config_backup.BACKUP_FORMAT,
-            "version": config_backup.BACKUP_VERSION,
-        }))
+        zf.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "format": config_backup.BACKUP_FORMAT,
+                    "version": config_backup.BACKUP_VERSION,
+                }
+            ),
+        )
         zf.writestr("paper/accounts/acc1/evil.sh", "x")
         zf.writestr("paper/accounts/../escape.json", "{}")
     with pytest.raises(config_backup.ConfigBackupError, match="路径"):
         config_backup.inspect_archive(out.getvalue())
     out2 = io.BytesIO()
     with zipfile.ZipFile(out2, "w") as zf:
-        zf.writestr("manifest.json", json.dumps({
-            "format": config_backup.BACKUP_FORMAT,
-            "version": config_backup.BACKUP_VERSION,
-        }))
+        zf.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "format": config_backup.BACKUP_FORMAT,
+                    "version": config_backup.BACKUP_VERSION,
+                }
+            ),
+        )
         zf.writestr("paper/accounts/acc1/evil.sh", "x")
     summary = config_backup.inspect_archive(out2.getvalue())
     assert summary["out_of_scope_files"] == 1
+
+
+# ── PG 模拟盘账户（DES-005）纳入配置备份 ──────────────────
+def test_pg_paper_account_export_conflict_and_restore(
+    tmp_path, monkeypatch, paper_pg, paper_account_id
+):
+    """PG 账户以虚拟快照条目纳入 paper 类别：默认冲突跳过，清空后整体恢复。"""
+    from app.config import settings as app_settings
+    from app.storage import paper_pg as pg
+    from app.strategy import paper, paper_auto
+
+    monkeypatch.setattr(app_settings, "data_dir", tmp_path)
+    aid = paper_account_id
+    paper.create_account(tmp_path, 100_000, account_id=aid)
+    pg.append_fill(
+        aid,
+        {
+            "ts": "2026-11-19T10:00:00+08:00",
+            "date": "2026-11-19",
+            "order_id": "ord1",
+            "symbol": "000001.SZ",
+            "asset_type": "stock",
+            "side": "buy",
+            "qty": 100,
+            "price": 10.0,
+            "fee": 5.0,
+            "kind": "fill",
+        },
+    )
+    pg.append_nav(aid, "2026-11-19", {"date": "2026-11-19", "nav": 100_000.0})
+    paper_auto.create_auto_rule(
+        tmp_path,
+        {
+            "name": "规则",
+            "match_kind": "strategy",
+            "match_id": "s1",
+            "side": "buy",
+            "size_mode": "fixed_amount",
+            "size_value": 1000,
+        },
+        account_id=aid,
+    )
+
+    data, _ = config_backup.build_backup(categories=["paper"])
+    snap_name = f"paper/accounts/{aid}/snapshot.json"
+    assert snap_name in _zip_entries(data)
+
+    # 本地账户已存在：inspect 报冲突，默认 apply 整体跳过（不改库）
+    preview = config_backup.inspect_archive(data)
+    paper_cat = next(c for c in preview["categories"] if c["key"] == "paper")
+    assert paper_cat["conflicts"] == 1
+    result = config_backup.apply_archive(data)
+    paper_res = next(c for c in result["categories"] if c["key"] == "paper")
+    assert paper_res["skipped_conflict"] == 1
+    assert pg.get_account(aid) is not None
+
+    # 清空后 apply 恢复账户 + 台账 + 净值 + 规则
+    assert pg.delete_account(aid)
+    result = config_backup.apply_archive(data)
+    paper_res = next(c for c in result["categories"] if c["key"] == "paper")
+    assert paper_res["imported"] == 1
+    account = pg.get_account(aid)
+    assert account is not None
+    assert account["cash"] == pytest.approx(100_000.0)
+    assert len(pg.load_fills(aid)) == 1
+    assert len(pg.load_nav(aid)) == 1
+    assert len(pg.load_auto_rules(aid)) == 1
+
+    # 显式覆盖重复导入幂等：台账不重复追加
+    result = config_backup.apply_archive(data, allow_overwrite=True)
+    paper_res = next(c for c in result["categories"] if c["key"] == "paper")
+    assert paper_res["imported"] == 1
+    assert len(pg.load_fills(aid)) == 1

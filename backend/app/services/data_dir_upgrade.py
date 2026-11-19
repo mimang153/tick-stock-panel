@@ -1,4 +1,5 @@
 """Desktop data recovery. Existing values win; source configurations remain recoverable."""
+
 from __future__ import annotations
 
 import copy
@@ -63,7 +64,11 @@ def _backup(path: Path, folder: Path, label: str) -> None:
     dest = folder / f"{label}-{path.name}-{digest}.backup"
     if _copy_missing(path, dest, private=True):
         return
-    if dest.is_symlink() or not dest.is_file() or hashlib.sha256(dest.read_bytes()).hexdigest() != digest:
+    if (
+        dest.is_symlink()
+        or not dest.is_file()
+        or hashlib.sha256(dest.read_bytes()).hexdigest() != digest
+    ):
         raise RuntimeError(f"现有升级备份与原文件不一致，停止恢复：{dest}")
 
 
@@ -104,6 +109,32 @@ def _recover_json(source: Path, dest: Path, backup: Path, *, merge_fields: bool)
     atomic_write_text(dest, json.dumps(current, ensure_ascii=False, indent=2), mode=0o600)
 
 
+def _publish_merged_item(item: Path, target: Path, relative: Path) -> None:
+    """发布单个旧文件: 不可变分区用硬链接迁移, 其余按需复制并保留配置原件。"""
+    move_partition = (
+        relative.parts[0].casefold() != "user_data" and item.suffix.casefold() == ".parquet"
+    )
+    published = False
+    if move_partition:
+        try:
+            os.link(item, target)
+            published = True
+        except FileExistsError:
+            return
+        except OSError as exc:
+            if exc.errno not in {errno.EXDEV, errno.EPERM, errno.EACCES, errno.ENOTSUP}:
+                raise
+    if not published:
+        published = _copy_missing(item, target, private=relative.parts[0].casefold() == "user_data")
+    if published and move_partition:
+        try:
+            item.unlink()
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:
+                raise
+            logger.info("旧分区只读，已复制并保留原文件：%s", item)
+
+
 def _merge_tree(source: Path, dest: Path, data_dir: Path, backup: Path, depth: int = 0) -> None:
     if depth > 32:
         raise RuntimeError(f"旧数据目录层级过深，停止恢复：{source}")
@@ -118,7 +149,11 @@ def _merge_tree(source: Path, dest: Path, data_dir: Path, backup: Path, depth: i
         if item.name.casefold() in _LOCK_FILES or item.is_symlink():
             continue
         # Older releases could repeatedly nest user_data in itself.
-        target = dest if source.name.casefold() == item.name.casefold() == "user_data" and item.is_dir() else dest / item.name
+        target = (
+            dest
+            if source.name.casefold() == item.name.casefold() == "user_data" and item.is_dir()
+            else dest / item.name
+        )
         if target.is_symlink() or not target.resolve().is_relative_to(data_dir):
             logger.warning("升级恢复跳过符号链接，未写入：%s", target)
             continue
@@ -129,32 +164,15 @@ def _merge_tree(source: Path, dest: Path, data_dir: Path, backup: Path, depth: i
             continue
         relative = target.relative_to(data_dir)
         if relative in _MERGE_FILES:
-            _recover_json(item, target, backup, merge_fields=relative.name.casefold() == "preferences.json")
+            _recover_json(
+                item, target, backup, merge_fields=relative.name.casefold() == "preferences.json"
+            )
             continue
         if target.exists():
             continue
         # Configurations remain in the old directory for rollback. Immutable
         # market partitions may move without duplicating gigabytes on one disk.
-        move_partition = relative.parts[0].casefold() != "user_data" and item.suffix.casefold() == ".parquet"
-        published = False
-        if move_partition:
-            try:
-                os.link(item, target)
-                published = True
-            except FileExistsError:
-                continue
-            except OSError as exc:
-                if exc.errno not in {errno.EXDEV, errno.EPERM, errno.EACCES, errno.ENOTSUP}:
-                    raise
-        if not published:
-            published = _copy_missing(item, target, private=relative.parts[0].casefold() == "user_data")
-        if published and move_partition:
-            try:
-                item.unlink()
-            except OSError as exc:
-                if exc.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:
-                    raise
-                logger.info("旧分区只读，已复制并保留原文件：%s", item)
+        _publish_merged_item(item, target, relative)
 
 
 def _restore_source(source: Path, dest: Path, data_dir: Path) -> None:
@@ -179,7 +197,11 @@ def _restore_source(source: Path, dest: Path, data_dir: Path) -> None:
         try:
             record = json.loads(marker.read_bytes())
             recorded_source = record.get("source")
-            if record.get("version") == 1 and isinstance(recorded_source, str) and os.path.normcase(recorded_source) == source_identity:
+            if (
+                record.get("version") == 1
+                and isinstance(recorded_source, str)
+                and os.path.normcase(recorded_source) == source_identity
+            ):
                 return
         except (ValueError, AttributeError):
             pass
@@ -198,8 +220,10 @@ def recover_desktop_data(data_dir: Path) -> None:
     with _LOCK:
         data_dir = Path(data_dir).resolve()
         executable_dir = Path(sys.executable).resolve().parent
-        candidates = [data_dir.parent / "TickFlowStockPanel_Data",
-                      executable_dir.parent / "TickFlowStockPanel_Data"]
+        candidates = [
+            data_dir.parent / "TickFlowStockPanel_Data",
+            executable_dir.parent / "TickFlowStockPanel_Data",
+        ]
         if sys.platform == "darwin":
             candidates.append(executable_dir / "data")
         seen: set[Path] = set()

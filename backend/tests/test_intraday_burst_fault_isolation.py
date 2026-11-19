@@ -3,10 +3,9 @@
 一个块失败不得拖垮整轮: 成功块必须照常返回供落盘; 失败块单独重试一次;
 失败块过多 (系统性故障) 时跳过重试。全部用假 client, 不发真实网络请求。
 """
+
 from types import SimpleNamespace
 from unittest.mock import patch
-
-import polars as pl
 
 from app.services import kline_sync
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
@@ -21,12 +20,17 @@ def _frame() -> dict:
     # 时间必须落在交易时段 (时区契约守卫会拒绝非交易小时的脏数据)
     from datetime import datetime
     from zoneinfo import ZoneInfo
+
     ts = int(datetime(2026, 8, 28, 9, 31, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp() * 1000)
     # as_dataframe=False 的最小 CompactKlineData (字段 → 列数组)
     return {
         "timestamp": [ts],
-        "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0],
-        "volume": [100.0], "amount": [100.0],
+        "open": [1.0],
+        "high": [1.0],
+        "low": [1.0],
+        "close": [1.0],
+        "volume": [100.0],
+        "amount": [100.0],
     }
 
 

@@ -1,11 +1,11 @@
 # ClickHouse 存储层：开发内容分解（WBS）
 
-> 文档类型：需求 | 编号：REQ-002 | 状态：草案 | 文档版本：v1.0 | 最后更新：2026-11-18
-> 负责人：— | 关联：REQ-001
-> 归档来源：base_v1.0 基线文档，按 DOC-STANDARD v1.0 归类命名；内容未改。
+> 文档类型：需求 | 编号：REQ-002 | 状态：主体已实现，B4/B5 尾巴与 B6 验收未闭环 | 文档版本：v1.2 | 最后更新：2026-11-19
+> 负责人：— | 关联：REQ-001、ISS-002、DES-002、ISS-005（未闭环项汇总）
+> 归档来源：base_v1.0 基线文档，按 DOC-STANDARD v1.0 归类命名；批次历史与实测数字保留原样。
 
 > 配套：[设计文档](../design/DES-001-clickhouse-storage-design.md) · [验收文档](../deploy/DEP-001-clickhouse-acceptance.md)
-> 状态：**草案**。本文把两份文档落成可执行的任务清单，含依赖、产出、验收映射与工作量估算。
+> 状态（2026-11-19）：B1/B2/B3 已交付；B4 主路径与 B5 在线读写主体已 CK-only（§13.16）；**B4 归零、B5 剩余本地路径、B6 人工/环境验收仍未完成，需求不改判为完成**。历史 §13.1~§13.15 的失败数递减过程是阶段实测证据，不覆盖为现值；当前基线与未闭环清单见 §13.16 与 ISS-005。
 > 估算口径：单人开发、熟悉本代码库的前提下，单位为人天（含自测），不含评审等待。
 
 ## 1. 前置约定
@@ -825,3 +825,15 @@ docker exec -w /app/backend tsp-dev .venv/bin/python -m pytest tests -q --tb=lin
 - `watchlist/enriched`、`sector-rotation` 的空结果是数据状态（自选为空 / 当日无分钟数据），非迁移回归。
 
 **后续**：T6.1 场景 S1~S9、T6.2 性能冒烟标定、T6.3 真实数据源抽样、T6.4 回滚演练、T6.5 连续 3 天观察、T6.6 验收记录、T6.7 页面级双栈对照尚未开始。
+
+### 13.16 2026-11-18 后续进展
+
+本节只记录最新状态；历史过程仍保留在上面的交接记录中，详细问题清单见 ISS-002。
+
+- 全量测试基线已恢复：`4817 passed / 13 skipped / 1 xfailed`，0 failed / 0 errors。此前 `MEMORY_LIMIT_EXCEEDED` 的根因是测试把带 `t_` 前缀的表写进正式库 `tsp`；已强制测试写入 `tsp_test` 并清理残留表（详见 ISS-002 CH-01）。
+- 开发 compose 新增 `deploy/clickhouse/config.d/41-tsp-dev-memory.xml`，容器上限 5g、CK 上限 4.5 GB；生产 compose 配置不变。
+- 仓储日 K / 分钟 K 读路径已改为 CK 优先，查不到时保留本地兼容路径；`KlineRepository.get_minute*` 不再只走本地 Parquet（详见 ISS-002 CH-02/CH-03）。
+- `/api/health` 与 `/health` 同时返回 CK 健康状态，WBS T1.6 的路径口径已对齐（详见 ISS-002 CH-11）。
+- B5 已把分钟补拉/刷新、盘口、复权因子、财务表、维表 instruments 的在线读写收敛为 CK-only；daily/enriched 在显式 storage 下的在线读写（含修补、校验、universe、常规写入、live merge/flush、状态统计与缓存 generation）已收敛为 CK-only，本地 parquet 仅保留离线兼容。2026-11-18 评估的 daily 修补 CK 分支原型失败后，已按 DES-002 完成 P0~P4 主体落地。`pipeline_recompute` 常规 enriched 编排、派生缓存和离线迁移工具仍保留本地 Parquet 路径（详见 ISS-002、DES-002）。
+- B4 的 `read_parquet/scan_parquet` 归零、B5 剩余本地路径清理、B6 的三天观察 / 回滚演练 / 页面级双栈对照 / 满量性能标定仍未完成；需求暂不改判为完成。
+- **2026-11-19 当前状态**：全量回归 `4898 passed / 13 skipped / 1 xfailed / 0 failed`（四后端 conftest 锁 memory）；模拟盘账户已迁 PG 事务层（DES-005），S4 多 worker 已解锁（ISS-004 DIST-05）。本需求相关的剩余未闭环项（含 CH-04~CH-09、MN-02/03、B4/B5 尾巴）统一登记在 [ISS-005](ISS-005-outstanding-items-summary.md)。

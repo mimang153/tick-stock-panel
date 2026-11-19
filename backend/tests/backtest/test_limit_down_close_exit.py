@@ -9,6 +9,7 @@
   (blocked_exit_days>0 保留"曾受阻"痕迹);
 - open_t+1 按次日开盘卖出, 保持既有行为。
 """
+
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -21,12 +22,17 @@ from app.backtest.engine import BacktestEngine, MatcherConfig
 START = date(2024, 1, 1)
 
 
-def _day(i: int, o: float, h: float, l: float, c: float, *, ld: bool = False) -> dict:
+def _day(i: int, o: float, h: float, low: float, c: float, *, ld: bool = False) -> dict:
     return {
-        "symbol": "A", "date": START + timedelta(days=i),
-        "open": o, "high": h, "low": l, "close": c,
+        "symbol": "A",
+        "date": START + timedelta(days=i),
+        "open": o,
+        "high": h,
+        "low": low,
+        "close": c,
         "volume": 100_000,
-        "signal_limit_up": False, "signal_limit_down": ld,
+        "signal_limit_up": False,
+        "signal_limit_down": ld,
     }
 
 
@@ -48,7 +54,10 @@ def _run(panel: pl.DataFrame, entry_days: list[int], exit_days: list[int], **mat
     kw.update(matcher)
     cfg = MatcherConfig(**kw)
     return BacktestEngine(repo=None).simulate_independent_candidates(  # type: ignore[arg-type]
-        panel, entry_mask, exit_mask, cfg,
+        panel,
+        entry_mask,
+        exit_mask,
+        cfg,
     )
 
 
@@ -135,7 +144,10 @@ def test_close_t_exit_deferred_past_sealed_limit_down_portfolio_mode():
     exit_mask = pl.Series([(dt - START).days in {3} for dt in dates], dtype=pl.Boolean)
     cfg = MatcherConfig(matching="close_t", fees_pct=0, slippage_bps=0)
     result = BacktestEngine(repo=None).simulate_portfolio(  # type: ignore[arg-type]
-        panel, entry_mask, exit_mask, cfg,
+        panel,
+        entry_mask,
+        exit_mask,
+        cfg,
     )
     assert result.stats.get("n_trades") == 1
     trade = result.trades[0]
@@ -152,7 +164,10 @@ def test_intraday_stop_loss_not_blocked_by_sealed_close_portfolio_mode():
     exit_mask = pl.Series([False for _ in dates], dtype=pl.Boolean)
     cfg = MatcherConfig(matching="close_t", fees_pct=0, slippage_bps=0, stop_loss_pct=0.05)
     result = BacktestEngine(repo=None).simulate_portfolio(  # type: ignore[arg-type]
-        panel, entry_mask, exit_mask, cfg,
+        panel,
+        entry_mask,
+        exit_mask,
+        cfg,
     )
     assert result.stats.get("n_trades") == 1
     trade = result.trades[0]
@@ -177,7 +192,7 @@ def test_stuck_position_at_window_end_is_recorded_portfolio_mode():
     assert matrix_result.stats.get("n_trades") == 1
     trade = matrix_result.trades[0]
     assert trade.exit_date == "2024-01-08"  # 末日强制落账
-    assert trade.exit_reason == "signal"    # 递延原因保留
+    assert trade.exit_reason == "signal"  # 递延原因保留
     assert trade.blocked_exit_days >= 1
     assert trade.exit_price == 9.27
     assert matrix_result.stats.get("pending_exit_positions") == 1  # 观测信号保留

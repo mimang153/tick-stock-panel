@@ -8,6 +8,7 @@
   预计算轮动信号 → 拼装 prompt → stream_ai_text 流式调用 → NDJSON 协议输出
   协议事件: meta(摘要) / delta(文本片段) / error / done
 """
+
 from __future__ import annotations
 
 import json
@@ -26,6 +27,7 @@ def _dim_label(kind: str) -> str:
 # ================================================================
 # System Prompt — 客观轮动分析 + 固定章节模板
 # ================================================================
+
 
 def _build_system_prompt(kind: str = "concept") -> str:
     """构建 system prompt(按维度动态替换"概念/行业"措辞)。"""
@@ -100,6 +102,74 @@ def _build_system_prompt(kind: str = "concept") -> str:
 _TOP_N = 8
 
 
+def _collect_concept_rank_data(
+    dates_asc: list[str], columns: dict
+) -> dict[str, dict[str, tuple[int, float]]]:
+    concept_data: dict[str, dict[str, tuple[int, float]]] = {}
+    for d in dates_asc:
+        col = columns.get(d) or []
+        for idx, (name, pct) in enumerate(col):
+            concept_data.setdefault(name, {})[d] = (idx + 1, pct)
+    return concept_data
+
+
+def _rotation_rank_stats(ranks_pcts: list[tuple[int, float]]) -> dict:
+    ranks = [r for r, _ in ranks_pcts]
+    pcts = [p for _, p in ranks_pcts]
+    avg = sum(ranks) / len(ranks) if ranks else 0
+    var = sum((r - avg) ** 2 for r in ranks) / len(ranks) if ranks else 0
+    return {
+        "ranks": ranks,
+        "pcts": [round(p, 4) for p in pcts],
+        "avg_rank": round(avg, 1),
+        "rank_std": round(math.sqrt(var), 1),
+    }
+
+
+def _classify_concept_signals(
+    concept_data: dict[str, dict[str, tuple[int, float]]],
+    dates_asc: list[str],
+) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict]]:
+    persistent: list[dict] = []
+    rising: list[dict] = []
+    fading: list[dict] = []
+    institutional: list[dict] = []
+    hot_money: list[dict] = []
+
+    for concept, by_date in concept_data.items():
+        # 缺失日按日期归位补 (大排名, 0 涨幅) —— 补位必须落在缺席的那一天,
+        # 一律追加到末尾会把"只在最近几日上榜"的新晋概念读成退潮。
+        s = _rotation_rank_stats([by_date.get(d, (999, 0.0)) for d in dates_asc])
+        s["concept"] = concept
+
+        ranks = s["ranks"]
+        latest_rank = ranks[-1]
+        earliest_rank = ranks[0]
+        recent = ranks[-min(3, len(ranks)) :]
+        recent_avg = sum(recent) / len(recent)
+
+        if recent_avg <= 10 and latest_rank <= 10:
+            persistent.append(s)
+        jump = earliest_rank - latest_rank
+        if earliest_rank > 30 and latest_rank <= 20 and jump >= 20:
+            rising.append(s)
+        drop = latest_rank - earliest_rank
+        if earliest_rank <= 10 and latest_rank > 30 and drop >= 20:
+            fading.append(s)
+        if s["rank_std"] <= 5 and s["avg_rank"] <= 20:
+            institutional.append(s)
+        if s["rank_std"] >= 20:
+            hot_money.append(s)
+
+    # 排序: 主线按近期排名升序; 新晋按跃升幅度降序; 退潮按跌幅降序
+    persistent.sort(key=lambda x: x["avg_rank"])
+    rising.sort(key=lambda x: x["ranks"][0] - x["ranks"][-1], reverse=True)
+    fading.sort(key=lambda x: x["ranks"][-1] - x["ranks"][0], reverse=True)
+    institutional.sort(key=lambda x: (x["rank_std"], x["avg_rank"]))
+    hot_money.sort(key=lambda x: x["rank_std"], reverse=True)
+    return persistent, rising, fading, institutional, hot_money
+
+
 def _compute_rotation_signals(dates: list[str], columns: dict) -> dict:
     """从概念涨幅排名矩阵计算轮动信号。
 
@@ -121,77 +191,11 @@ def _compute_rotation_signals(dates: list[str], columns: dict) -> dict:
     if not dates or not columns:
         return {}
 
-    # 按时间正序 (左老右新) 处理
     dates_asc = list(reversed(dates))
-
-    # 收集每个概念在各日期的 (排名, 涨幅)。排名 = 该日在列中的索引 + 1。
-    concept_data: dict[str, dict[str, tuple[int, float]]] = {}
-    for d in dates_asc:
-        col = columns.get(d) or []
-        for idx, (name, pct) in enumerate(col):
-            concept_data.setdefault(name, {})[d] = (idx + 1, pct)
-
-    def _stats(ranks_pcts: list[tuple[int, float]]) -> dict:
-        ranks = [r for r, _ in ranks_pcts]
-        pcts = [p for _, p in ranks_pcts]
-        avg = sum(ranks) / len(ranks) if ranks else 0
-        var = sum((r - avg) ** 2 for r in ranks) / len(ranks) if ranks else 0
-        return {
-            "ranks": ranks,
-            "pcts": [round(p, 4) for p in pcts],
-            "avg_rank": round(avg, 1),
-            "rank_std": round(math.sqrt(var), 1),
-        }
-
-    persistent: list[dict] = []
-    rising: list[dict] = []
-    fading: list[dict] = []
-    institutional: list[dict] = []
-    hot_money: list[dict] = []
-
-    for concept, by_date in concept_data.items():
-        # 缺失日按日期归位补 (大排名, 0 涨幅) —— 补位必须落在缺席的那一天,
-        # 一律追加到末尾会把"只在最近几日上榜"的新晋概念读成退潮。
-        rp = [by_date.get(d, (999, 0.0)) for d in dates_asc]
-        s = _stats(rp)
-        s["concept"] = concept
-
-        ranks = s["ranks"]
-        latest_rank = ranks[-1]
-        earliest_rank = ranks[0]
-        # 最近 3 日 (不足则全部) 均排名, 判断近期强度
-        recent = ranks[-min(3, len(ranks)):]
-        recent_avg = sum(recent) / len(recent)
-
-        # 主线: 近期稳居前 10
-        if recent_avg <= 10 and latest_rank <= 10:
-            persistent.append(s)
-
-        # 新晋: 早期排名靠后(>30), 最新冲进前 20, 跃升幅度大
-        jump = earliest_rank - latest_rank
-        if earliest_rank > 30 and latest_rank <= 20 and jump >= 20:
-            rising.append(s)
-
-        # 退潮: 早期排名靠前(<=10), 最新滑落到 30 外
-        drop = latest_rank - earliest_rank
-        if earliest_rank <= 10 and latest_rank > 30 and drop >= 20:
-            fading.append(s)
-
-        # 机构: 排名标准差小且平均排名靠前 (稳定强势)
-        if s["rank_std"] <= 5 and s["avg_rank"] <= 20:
-            institutional.append(s)
-
-        # 游资: 排名标准差大 (波动剧烈)
-        if s["rank_std"] >= 20:
-            hot_money.append(s)
-
-    # 排序: 主线按近期排名升序; 新晋按跃升幅度降序; 退潮按跌幅降序
-    persistent.sort(key=lambda x: x["avg_rank"])
-    rising.sort(key=lambda x: x["ranks"][0] - x["ranks"][-1], reverse=True)
-    fading.sort(key=lambda x: x["ranks"][-1] - x["ranks"][0], reverse=True)
-    institutional.sort(key=lambda x: (x["rank_std"], x["avg_rank"]))
-    hot_money.sort(key=lambda x: x["rank_std"], reverse=True)
-
+    concept_data = _collect_concept_rank_data(dates_asc, columns)
+    persistent, rising, fading, institutional, hot_money = _classify_concept_signals(
+        concept_data, dates_asc
+    )
     return {
         "persistent_leaders": persistent[:_TOP_N],
         "rising": rising[:_TOP_N],
@@ -205,11 +209,12 @@ def _compute_rotation_signals(dates: list[str], columns: dict) -> dict:
 # Prompt 构建
 # ================================================================
 
+
 def _fmt_pct(v) -> str:
     """概念/行业涨幅: 小数口径 (0.0522 = +5.22%), 展示前乘 100。"""
     if v is None:
         return "—"
-    return f"{v*100:+.2f}%"
+    return f"{v * 100:+.2f}%"
 
 
 def _fmt_index_pct(v) -> str:
@@ -264,7 +269,9 @@ def _build_signal_block(title: str, items: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _build_user_prompt(signals: dict, overview: dict, days: int, dates: list[str], focus: str, kind: str = "concept") -> str:
+def _build_user_prompt(
+    signals: dict, overview: dict, days: int, dates: list[str], focus: str, kind: str = "concept"
+) -> str:
     """组装 user 消息: 大盘背景 + 轮动信号 + focus。"""
     dim = _dim_label(kind)
     dates_asc = list(reversed(dates))
@@ -290,6 +297,7 @@ def _build_user_prompt(signals: dict, overview: dict, days: int, dates: list[str
     ]
 
     from app.services.ai_provider import build_focus_instruction
+
     focus_instruction = build_focus_instruction(focus, report_name=f"{dim}轮动分析报告")
     if focus_instruction:
         parts.extend(["", focus_instruction])
@@ -309,6 +317,67 @@ def _build_summary(signals: dict) -> str:
 # ================================================================
 # 流式主入口
 # ================================================================
+
+
+def _rotation_meta_event(signals: dict, overview: dict, days: int) -> str:
+    return json.dumps(
+        {
+            "type": "meta",
+            "days": days,
+            "summary": _build_summary(signals),
+        },
+        ensure_ascii=False,
+    )
+
+
+async def _stream_rotation_ai(
+    kind: str,
+    signals: dict,
+    overview: dict,
+    days: int,
+    dates: list[str],
+    focus: str,
+) -> AsyncIterator[str]:
+    try:
+        from app.services.ai_provider import ai_configured, stream_ai_text
+
+        if not ai_configured():
+            yield json.dumps(
+                {
+                    "type": "error",
+                    "message": "AI 未配置,请在「设置」页填写 API Key 与接口地址",
+                },
+                ensure_ascii=False,
+            )
+            return
+
+        user_prompt = _build_user_prompt(signals, overview, days, dates, focus, kind)
+        got_content = False
+        async for delta in stream_ai_text(
+            [
+                {"role": "system", "content": _build_system_prompt(kind)},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.5,
+            # 不限制输出(推理模型思考 token 计入预算, 见 ai_provider.stream_ai_text)
+            max_tokens=None,
+            prefer_final_answer=True,
+        ):
+            got_content = True
+            yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
+    except Exception as e:
+        logger.exception("AI %s rotation analyze failed", kind)
+        yield json.dumps({"type": "error", "message": f"AI 轮动分析失败: {e}"}, ensure_ascii=False)
+        return
+
+    if not got_content:
+        logger.warning("AI %s rotation analyze ended with empty content", kind)
+        yield json.dumps(
+            {"type": "error", "message": "AI 未返回正文(输出被截断), 请重试"}, ensure_ascii=False
+        )
+        return
+    yield json.dumps({"type": "done"}, ensure_ascii=False)
+
 
 async def analyze_rotation_stream(
     repo,
@@ -330,73 +399,32 @@ async def analyze_rotation_stream(
         level: 行业层级(1/2/3), 仅 kind=industry 有效。
     """
     from app.services.rps_rotation import build_rps_rotation
-    from app.services.market_overview_builder import build_market_overview
 
     dim = _dim_label(kind)
     page = "行业分析" if kind == "industry" else "概念分析"
-
-    # 1. 取轮动矩阵
     rotation = build_rps_rotation(repo, days, kind, level)
     dates = rotation.get("dates") or []
     columns = rotation.get("columns") or {}
-
     if not dates or not columns:
-        yield json.dumps({
-            "type": "error",
-            "message": f"暂无{dim}轮动数据,请先在「{page}」页获取{dim}数据源",
-        }, ensure_ascii=False)
+        yield json.dumps(
+            {
+                "type": "error",
+                "message": f"暂无{dim}轮动数据,请先在「{page}」页获取{dim}数据源",
+            },
+            ensure_ascii=False,
+        )
         return
 
-    # 2. 预计算轮动信号
     signals = _compute_rotation_signals(dates, columns)
 
-    # 3. 大盘背景 (失败不阻断, 降级为空)
+    from app.services.market_overview_builder import build_market_overview
+
     try:
         overview = build_market_overview(repo, quote_service, depth_service)
     except Exception as e:  # noqa: BLE001
         logger.warning("rotation analyze: 大盘背景获取失败, 降级为空: %s", e)
         overview = {}
 
-    # 4. meta 事件
-    yield json.dumps({
-        "type": "meta",
-        "days": days,
-        "summary": _build_summary(signals),
-    }, ensure_ascii=False)
-
-    # 5. 构建 prompt + 流式调用 LLM
-    try:
-        from app.services.ai_provider import stream_ai_text, ai_configured
-
-        if not ai_configured():
-            yield json.dumps({
-                "type": "error",
-                "message": "AI 未配置,请在「设置」页填写 API Key 与接口地址",
-            }, ensure_ascii=False)
-            return
-
-        user_prompt = _build_user_prompt(signals, overview, days, dates, focus, kind)
-        got_content = False
-        async for delta in stream_ai_text(
-            [
-                {"role": "system", "content": _build_system_prompt(kind)},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.5,
-            # 不限制输出(推理模型思考 token 计入预算, 见 ai_provider.stream_ai_text)
-            max_tokens=None,
-            prefer_final_answer=True,
-        ):
-            got_content = True
-            yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
-
-    except Exception as e:  # noqa: BLE001
-        logger.exception("AI %s rotation analyze failed: %s", kind, e)
-        yield json.dumps({"type": "error", "message": f"AI 轮动分析失败: {e}"}, ensure_ascii=False)
-        return
-
-    if not got_content:
-        logger.warning("AI %s rotation analyze ended with empty content", kind)
-        yield json.dumps({"type": "error", "message": "AI 未返回正文(输出被截断), 请重试"}, ensure_ascii=False)
-        return
-    yield json.dumps({"type": "done"}, ensure_ascii=False)
+    yield _rotation_meta_event(signals, overview, days)
+    async for event in _stream_rotation_ai(kind, signals, overview, days, dates, focus):
+        yield event

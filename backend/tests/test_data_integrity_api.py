@@ -60,6 +60,21 @@ def app_env(tmp_path, monkeypatch, ck_runtime):
     return app, store, tmp_path, paused
 
 
+def bad_daily_frame(day: date) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "symbol": ["600001.SH"],
+            "date": [day],
+            "open": [10.0],
+            "high": [11.0],
+            "low": [9.0],
+            "close": [-1.0],
+            "volume": [100.0],
+            "amount": [100000.0],
+        }
+    )
+
+
 def finished(store, jid):
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
@@ -73,10 +88,8 @@ def finished(store, jid):
 def test_api_scan_and_repair_publish_rechecked_report(app_env, monkeypatch):
     from app.services import kline_sync
 
-    app, store, root, paused = app_env
-    part = root / "kline_daily/date=2026-10-29"
-    part.mkdir(parents=True)
-    (part / "part.parquet").write_bytes(b"bad parquet")
+    app, store, _root, paused = app_env
+    app.state.repo.storage.write_daily("kline_daily", bad_daily_frame(date(2026, 10, 29)))
 
     def fetch(*args, **kwargs):
         assert kwargs["asset_type"] == "stock"
@@ -214,9 +227,7 @@ def test_api_empty_scan_does_not_require_data_source(app_env):
 
 def test_api_repair_reports_unavailable_source_without_starting_job(app_env):
     app, store, root, _ = app_env
-    part = root / "kline_daily/date=2026-10-29"
-    part.mkdir(parents=True)
-    (part / "part.parquet").write_bytes(b"bad parquet")
+    app.state.repo.storage.write_daily("kline_daily", bad_daily_frame(date(2026, 10, 29)))
     report = integrity_check.run_check(root, asset_types=["stock"])
     app.state.capabilities = SimpleNamespace(has=lambda cap: False)
     with TestClient(app) as client:

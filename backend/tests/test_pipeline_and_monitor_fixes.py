@@ -2,6 +2,7 @@
 
 均为纯逻辑, 不触网, 不依赖真实数据源。
 """
+
 from __future__ import annotations
 
 import polars as pl
@@ -14,7 +15,15 @@ from app.services.quote_service import QuoteService
 from app.strategy import monitor_rules
 from app.strategy.monitor import MonitorRuleEngine
 
+
+def _record(result, log, *items):
+    """记录本次调用参数后返回既定结果(替代 append(x) or result 惯用法)。"""
+    log.extend(items)
+    return result
+
+
 # ── JobStore 单飞 ────────────────────────────────────────────────────────
+
 
 def test_create_singleflight_dedupes_pending_window(monkeypatch, tmp_path):
     """两次快速 create() 在 pending 窗口内应复用同一 job(is_new=False)。"""
@@ -23,7 +32,9 @@ def test_create_singleflight_dedupes_pending_window(monkeypatch, tmp_path):
 
     jid1, new1 = store.create()
     assert new1 is True
-    assert store.get(jid1)["timeout_s"] == 3600
+    job = store.get(jid1)
+    assert job is not None
+    assert job["timeout_s"] == 3600
 
     # 尚未 start(), job 仍是 pending —— 旧实现会在此另起新 job(并发双跑根因)
     jid2, new2 = store.create()
@@ -42,7 +53,9 @@ def test_create_new_after_terminal(monkeypatch, tmp_path):
     monkeypatch.setattr(preferences, "load", lambda: {"data_source_long_job_timeout_s": 5400})
     store = JobStore(store_dir=tmp_path / "jobs")
     jid1, _ = store.create(long_running=True)
-    assert store.get(jid1)["timeout_s"] == 5400
+    job = store.get(jid1)
+    assert job is not None
+    assert job["timeout_s"] == 5400
     store.start(jid1)
     store.succeed(jid1, {"ok": True})
 
@@ -67,6 +80,7 @@ def test_run_slot_is_exclusive():
 
 
 # ── 监控 sector fail-closed ──────────────────────────────────────────────
+
 
 def _base_price_rule(scope: str) -> dict:
     return {
@@ -98,21 +112,22 @@ def test_apply_scope_sector_fails_closed():
 
     # 对照: scope=all 返回全量, symbols 过滤子集
     assert MonitorRuleEngine._apply_scope(df, {"scope": "all"}).height == 2
-    picked = MonitorRuleEngine._apply_scope(
-        df, {"scope": "symbols", "symbols": ["600000.SH"]}
-    )
+    picked = MonitorRuleEngine._apply_scope(df, {"scope": "symbols", "symbols": ["600000.SH"]})
     assert picked.height == 1
 
 
 def test_ladder_webhook_uses_chinese_title_without_brand(monkeypatch):
-    calls = []
+    calls: list = []
 
     class CaptureExecutor:
         def submit(self, fn, *args):
             calls.append((fn, args))
 
     monkeypatch.setattr(quote_service, "_WEBHOOK_EXECUTOR", CaptureExecutor())
-    monkeypatch.setattr("app.services.preferences.get_feishu_webhook_url", lambda: "https://open.feishu.cn/open-apis/bot/v2/hook/test")
+    monkeypatch.setattr(
+        "app.services.preferences.get_feishu_webhook_url",
+        lambda: "https://open.feishu.cn/open-apis/bot/v2/hook/test",
+    )
     monkeypatch.setattr("app.services.preferences.get_feishu_webhook_secret", lambda: "secret")
     monkeypatch.setattr("app.services.preferences.get_wecom_webhook_url", lambda: "wecom-key")
     monkeypatch.setattr("app.services.preferences.get_custom_webhook_url", lambda: "")
@@ -120,18 +135,24 @@ def test_ladder_webhook_uses_chinese_title_without_brand(monkeypatch):
     monkeypatch.setattr("app.secrets_store.get_custom_webhook_secret", lambda: "")
     monkeypatch.setattr("app.secrets_store.get_email_smtp_password", lambda: "")
 
-    engine = type("Engine", (), {
-        "rules": {"r_ladder": {"webhook_channels": ["feishu", "wecom"]}},
-    })()
+    engine = type(
+        "Engine",
+        (),
+        {
+            "rules": {"r_ladder": {"webhook_channels": ["feishu", "wecom"]}},
+        },
+    )()
     QuoteService._maybe_send_webhook(
         object.__new__(QuoteService),
-        [{
-            "rule_id": "r_ladder",
-            "source": "ladder",
-            "symbol": "600000.SH",
-            "name": "浦发银行",
-            "message": "炸板预警",
-        }],
+        [
+            {
+                "rule_id": "r_ladder",
+                "source": "ladder",
+                "symbol": "600000.SH",
+                "name": "浦发银行",
+                "message": "炸板预警",
+            }
+        ],
         engine,
     )
 
@@ -140,7 +161,7 @@ def test_ladder_webhook_uses_chinese_title_without_brand(monkeypatch):
 
 
 def test_ladder_dispatches_custom_webhook_and_email(monkeypatch):
-    calls = []
+    calls: list = []
 
     class CaptureExecutor:
         def submit(self, fn, *args):
@@ -156,14 +177,20 @@ def test_ladder_dispatches_custom_webhook_and_email(monkeypatch):
     monkeypatch.setattr("app.services.preferences.get_feishu_webhook_url", lambda: "")
     monkeypatch.setattr("app.services.preferences.get_feishu_webhook_secret", lambda: "")
     monkeypatch.setattr("app.services.preferences.get_wecom_webhook_url", lambda: "")
-    monkeypatch.setattr("app.services.preferences.get_custom_webhook_url", lambda: "https://example.com/hook")
+    monkeypatch.setattr(
+        "app.services.preferences.get_custom_webhook_url", lambda: "https://example.com/hook"
+    )
     monkeypatch.setattr("app.services.preferences.get_email_smtp_config", lambda: email_config)
     monkeypatch.setattr("app.secrets_store.get_custom_webhook_secret", lambda: "hook-secret")
     monkeypatch.setattr("app.secrets_store.get_email_smtp_password", lambda: "smtp-password")
 
-    engine = type("Engine", (), {
-        "rules": {"r_ladder": {"webhook_channels": ["custom", "email"]}},
-    })()
+    engine = type(
+        "Engine",
+        (),
+        {
+            "rules": {"r_ladder": {"webhook_channels": ["custom", "email"]}},
+        },
+    )()
     event = {
         "rule_id": "r_ladder",
         "source": "ladder",
@@ -179,18 +206,20 @@ def test_ladder_dispatches_custom_webhook_and_email(monkeypatch):
 
 
 def test_review_webhooks_use_title_without_brand(monkeypatch):
-    calls = []
-    monkeypatch.setattr("app.services.preferences.get_review_push_channels", lambda: ["feishu", "wecom"])
+    calls: list = []
+    monkeypatch.setattr(
+        "app.services.preferences.get_review_push_channels", lambda: ["feishu", "wecom"]
+    )
     monkeypatch.setattr("app.services.preferences.get_feishu_webhook_url", lambda: "feishu-url")
     monkeypatch.setattr("app.services.preferences.get_feishu_webhook_secret", lambda: "secret")
     monkeypatch.setattr("app.services.preferences.get_wecom_webhook_url", lambda: "wecom-url")
     monkeypatch.setattr(
         "app.services.webhook_adapter.send_feishu_card",
-        lambda *args: calls.append(("feishu", args)) or True,
+        lambda *args: _record(True, calls, ("feishu", args)),
     )
     monkeypatch.setattr(
         "app.services.webhook_adapter.send_wecom_markdown",
-        lambda *args: calls.append(("wecom", args)) or True,
+        lambda *args: _record(True, calls, ("wecom", args)),
     )
 
     daily_pipeline._maybe_push_review("复盘正文", {"as_of": "2026-07-18"})
@@ -200,25 +229,29 @@ def test_review_webhooks_use_title_without_brand(monkeypatch):
 
 
 def test_review_pushes_custom_webhook_and_email(monkeypatch):
-    calls = []
+    calls: list = []
     email_config = {
         "host": "smtp.example.com",
         "username": "bot@example.com",
         "from_address": "bot@example.com",
         "to_addresses": ["alerts@example.com"],
     }
-    monkeypatch.setattr("app.services.preferences.get_review_push_channels", lambda: ["custom", "email"])
-    monkeypatch.setattr("app.services.preferences.get_custom_webhook_url", lambda: "https://example.com/hook")
+    monkeypatch.setattr(
+        "app.services.preferences.get_review_push_channels", lambda: ["custom", "email"]
+    )
+    monkeypatch.setattr(
+        "app.services.preferences.get_custom_webhook_url", lambda: "https://example.com/hook"
+    )
     monkeypatch.setattr("app.services.preferences.get_email_smtp_config", lambda: email_config)
     monkeypatch.setattr("app.secrets_store.get_custom_webhook_secret", lambda: "hook-secret")
     monkeypatch.setattr("app.secrets_store.get_email_smtp_password", lambda: "smtp-password")
     monkeypatch.setattr(
         "app.services.webhook_adapter.send_custom",
-        lambda *args: calls.append(("custom", args)) or True,
+        lambda *args: _record(True, calls, ("custom", args)),
     )
     monkeypatch.setattr(
         "app.services.email_adapter.send_email",
-        lambda *args: calls.append(("email", args)) or True,
+        lambda *args: _record(True, calls, ("email", args)),
     )
 
     daily_pipeline._maybe_push_review("复盘正文", {"as_of": "2026-07-18"})

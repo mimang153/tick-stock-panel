@@ -11,40 +11,40 @@ You are an expert in **Python, FastAPI, scalable API development, TypeScript, Re
 - Use **functional and declarative programming patterns**; avoid classes unless absolutely necessary.
 - Prefer **iteration and modularization** over code duplication.
 - Use descriptive variable names with auxiliary verbs (e.g., `is_active`, `has_permission`, `isLoading`, `hasError`).
-- Follow proper **naming conventions**:  
-  - For Python: use lowercase with underscores (e.g., `routers/user_routes.py`).  
+- Follow proper **naming conventions**:
+  - For Python: use lowercase with underscores (e.g., `routers/user_routes.py`).
   - For TypeScript: use lowercase with dashes for directories (e.g., `components/auth-wizard`).
 
 ### Project Structure
 
-- **Frontend**:  
-  - **Language**: TypeScript  
-  - **Framework**: React  
-  - **UI Library**: Tailwind CSS, Shadcn UI  
-  - **Build Tool**: Vite  
-  - **Directory Structure**:  
-    - `frontend/src/`: Main source code  
-    - `frontend/src/index.html`: Main HTML file  
-    - Configuration Files:  
-      - `vite.config.ts`  
-      - `tsconfig.json`  
-      - `tailwind.config.js`  
-      - `postcss.config.js`  
-    - **Docker Files**:  
-      - `Dockerfile`  
+- **Frontend**:
+  - **Language**: TypeScript
+  - **Framework**: React
+  - **UI Library**: Tailwind CSS, Shadcn UI
+  - **Build Tool**: Vite
+  - **Directory Structure**:
+    - `frontend/src/`: Main source code
+    - `frontend/src/index.html`: Main HTML file
+    - Configuration Files:
+      - `vite.config.ts`
+      - `tsconfig.json`
+      - `tailwind.config.js`
+      - `postcss.config.js`
+    - **Docker Files**:
+      - `Dockerfile`
       - `Dockerfile.dev`
 
-- **Backend**:  
-  - **Language**: Python  
-  - **Framework**: FastAPI  
-  - **Storage**: ClickHouse（存储门面）+ Polars + Redis 缓存（CacheBackend 可切换）  
-  - **Directory Structure**:  
-    - `backend/app/`: Main source code  
-    - `backend/tests/`: Tests  
-    - Environment Configuration:  
-      - `.env` / `.env.example`: Environment variables  
-    - **Docker Files**:  
-      - `Dockerfile`  
+- **Backend**:
+  - **Language**: Python
+  - **Framework**: FastAPI
+  - **Storage**: ClickHouse（存储门面）+ Polars + Redis 缓存（CacheBackend 可切换）
+  - **Directory Structure**:
+    - `backend/app/`: Main source code
+    - `backend/tests/`: Tests
+    - Environment Configuration:
+      - `.env` / `.env.example`: Environment variables
+    - **Docker Files**:
+      - `Dockerfile`
       - `Dockerfile.dev`
 
 ### Code Style and Structure
@@ -55,9 +55,9 @@ You are an expert in **Python, FastAPI, scalable API development, TypeScript, Re
 - **Type Hints**: Use Python type hints for all function signatures. Prefer Pydantic models for input validation.
 - **File Structure**: Follow clear separation with directories for routes, utilities, static content, and models/schemas.
 - **RORO Pattern**: Use the "Receive an Object, Return an Object" pattern.
-- **Error Handling**:  
-  - Handle errors at the beginning of functions with early returns.  
-  - Use guard clauses and avoid deeply nested if statements.  
+- **Error Handling**:
+  - Handle errors at the beginning of functions with early returns.
+  - Use guard clauses and avoid deeply nested if statements.
   - Implement proper logging and custom error types.
 
 **Frontend (TypeScript/React)**:
@@ -65,8 +65,8 @@ You are an expert in **Python, FastAPI, scalable API development, TypeScript, Re
 - **TypeScript Usage**: Use TypeScript for all code. Prefer interfaces over types. Avoid enums; use maps instead.
 - **Functional Components**: Write all components as functional components with proper TypeScript interfaces.
 - **UI and Styling**: Implement responsive design using Tailwind CSS, adopting a mobile-first approach.
-- **Performance**:  
-  - Minimize over-use of `useEffect` and re-renders; favor TanStack Query for server state.  
+- **Performance**:
+  - Minimize over-use of `useEffect` and re-renders; favor TanStack Query for server state.
   - Wrap lazy components in `Suspense` with fallback for improved performance.
 
 ### Performance Optimization

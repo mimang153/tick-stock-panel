@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
+
 from app.tickflow._repo_mixin_base import _RepoMixinBase
 from app.tickflow.repository import (
     CN_TZ,
@@ -25,6 +28,68 @@ from app.tickflow.repository import (
 
 
 class _WriteMixin(_RepoMixinBase):
+    @staticmethod
+    def _repair_diff_frame(
+        before: pl.DataFrame,
+        after: pl.DataFrame,
+        symbols: list[str] | None,
+        removals: set[str] | None = None,
+    ) -> pl.DataFrame:
+        targets = set(symbols or [])
+        targets.update(removals or [])
+
+        def _payload(frame: pl.DataFrame, symbol: str) -> str | None:
+            if frame.is_empty() or "symbol" not in frame.columns:
+                return None
+            rows = frame.filter(pl.col("symbol") == symbol)
+            if rows.is_empty():
+                return None
+            return json.dumps(
+                rows.row(0, named=True), ensure_ascii=False, sort_keys=True, default=str
+            )
+
+        records = []
+        for symbol in sorted(targets):
+            old, new = _payload(before, symbol), _payload(after, symbol)
+            change = "delete" if new is None else "insert" if old is None else "update"
+            records.append(
+                {"symbol": symbol, "change_type": change, "before_json": old, "after_json": new}
+            )
+        return pl.DataFrame(
+            records,
+            schema={
+                "symbol": pl.String,
+                "change_type": pl.String,
+                "before_json": pl.String,
+                "after_json": pl.String,
+            },
+        )
+
+    def _nontrading_symbols_from_rows(
+        self, rows: pl.DataFrame, asset_type: str, day: date
+    ) -> set[str]:
+        # 指数的零成交量可能是源缺字段，不能套用股票/ETF 的清理规则。
+        if asset_type not in {"stock", "etf"} or rows.is_empty() or "symbol" not in rows.columns:
+            return set()
+        eligible = pl.lit(False)
+        if {"volume", "amount"}.issubset(rows.columns):
+            eligible = eligible | (
+                (pl.col("volume").cast(pl.Float64, strict=False) == 0)
+                & (pl.col("amount").cast(pl.Float64, strict=False) == 0)
+            )
+        if "quote_ts" in rows.columns:
+            start_ms = int(datetime.combine(day, dt_time.min, tzinfo=CN_TZ).timestamp() * 1000)
+            ts = pl.col("quote_ts").cast(pl.Int64, strict=False)
+            eligible = eligible | ((ts > 0) & (ts < start_ms))
+        instruments = self.get_instruments_asset(asset_type)
+        if {"symbol", "listing_date"}.issubset(instruments.columns):
+            prelisting = instruments.filter(
+                pl.col("listing_date").cast(pl.Date, strict=False) > day,
+            )["symbol"].to_list()
+            eligible = eligible | pl.col("symbol").is_in(prelisting)
+        confirmed = rows.group_by("symbol").agg(eligible.fill_null(False).all().alias("nontrading"))
+        return set(confirmed.filter(pl.col("nontrading"))["symbol"].to_list())
+
     def append_daily(self, df: pl.DataFrame) -> None:
         """按日分区写入日K数据 (merge-upsert)。"""
         if df.is_empty():
@@ -82,6 +147,65 @@ class _WriteMixin(_RepoMixinBase):
         elif asset_type == "etf":
             self.append_etf_daily(df)
 
+    def _replace_daily_rows_ck(
+        self,
+        store,
+        asset_type: str,
+        day: date,
+        incoming: pl.DataFrame,
+        symbols: list[str] | None,
+        removals: set[str],
+        actor: str,
+    ) -> None:
+        table = daily_dirname(asset_type)
+        self._validate_daily_repair_payload(day, incoming, symbols, removals)
+        if removals:
+            columns = [
+                c
+                for c in ("symbol", "volume", "amount", "quote_ts")
+                if c in store.table_columns(table)
+            ]
+            rows = store.read_daily(
+                table,
+                symbols=sorted(removals),
+                start=day,
+                end=day,
+                columns=columns,
+            )
+            if removals - self._nontrading_symbols_from_rows(rows, asset_type, day):
+                raise ValueError("无法确认待清理记录为非交易记录, 原数据保持不变")
+        day_rows = store.read_daily(table, start=day, end=day)
+        if symbols is None:
+            before, base = day_rows, pl.DataFrame()
+        else:
+            before = day_rows.filter(pl.col("symbol").is_in(symbols))
+            base = day_rows.filter(~pl.col("symbol").is_in(symbols))
+        merged = (
+            pl.concat([base, incoming], how="diagonal_relaxed")
+            .unique(subset=["symbol", "date"], keep="last")
+            .sort(["symbol", "date"])
+        )
+        if merged.is_empty():
+            raise ValueError("清理后整日日K为空, 需要完整日K数据, 原数据保持不变")
+        # CK 没有文件指纹，用写入前重读确认目标行未被并发改写。
+        current = store.read_daily(table, start=day, end=day)
+        if not current.equals(day_rows):
+            raise ValueError("修补期间发生变化, 请重新自检")
+        repair_id = store.begin_repair(table, day, "precise", actor)
+        try:
+            store.append_repair_snapshot(repair_id, table, day, before, actor)
+            diffs = self._repair_diff_frame(before, incoming, symbols, removals)
+            store.append_repair_audit(repair_id, table, day, diffs, actor)
+            if symbols is None:
+                store.delete_daily_date(table, day=day)
+            else:
+                store.delete_daily(table, day=day, symbols=list(symbols))
+            store.write_daily(table, merged)
+            store.set_repair_status(repair_id, "committed", actor)
+        except BaseException:
+            store.set_repair_status(repair_id, "failed", actor)
+            raise
+
     def replace_daily_rows(
         self,
         asset_type: str,
@@ -91,11 +215,19 @@ class _WriteMixin(_RepoMixinBase):
         symbols: list[str] | None,
         backup_dir: Path,
         remove_symbols: list[str] | None = None,
+        actor: str = "system",
     ) -> None:
         """修正一个日期的指定股票; symbols=None 仅用于无法读取的整日分区。
 
-        备份与写入在同一仓库写锁内, 失败保留备份。其他日期不参与改写。
+        在线路径写 CK 审计/快照；离线路径保留本地备份。其他日期不参与改写。
         """
+        store = getattr(self, "storage", None)
+        if store is not None:
+            self._replace_daily_rows_ck(
+                store, asset_type, day, incoming, symbols, set(remove_symbols or []), actor
+            )
+            return
+
         import shutil
 
         part = self.store.data_dir / daily_dirname(asset_type) / f"date={day}"
@@ -187,6 +319,10 @@ class _WriteMixin(_RepoMixinBase):
         store.write_daily(table, merged)
 
     def validate_daily_repair_target(self, asset_type: str, day: date) -> None:
+        store = getattr(self, "storage", None)
+        if store is not None:
+            store.table_columns(daily_dirname(asset_type))
+            return
         self._validate_repair_path(self.store.data_dir / daily_dirname(asset_type) / f"date={day}")
 
     def daily_repair_nontrading_symbols(
@@ -199,19 +335,29 @@ class _WriteMixin(_RepoMixinBase):
         """
         if not symbols or asset_type not in {"stock", "etf"}:
             return set()
+        store = getattr(self, "storage", None)
+        if store is not None:
+            table = daily_dirname(asset_type)
+            columns = [
+                c
+                for c in ("symbol", "volume", "amount", "quote_ts")
+                if c in store.table_columns(table)
+            ]
+            rows = store.read_daily(table, symbols=symbols, start=day, end=day, columns=columns)
+            return self._nontrading_symbols_from_rows(rows, asset_type, day)
         part = self.store.data_dir / daily_dirname(asset_type) / f"date={day}"
         self._validate_repair_path(part)
         frames = []
         for path in sorted(part.glob("*.parquet")):
             self._validate_repair_path(path)
             scan = scan_parquet_compat(path)
-            columns = set(scan.collect_schema().names())
-            if "symbol" not in columns:
+            schema_columns = set(scan.collect_schema().names())
+            if "symbol" not in schema_columns:
                 return set()
             frames.append(
                 scan.filter(pl.col("symbol").is_in(symbols))
                 .select(
-                    [c for c in ("symbol", "volume", "amount", "quote_ts") if c in columns],
+                    [c for c in ("symbol", "volume", "amount", "quote_ts") if c in schema_columns],
                 )
                 .pipe(guarded_collect, priority="interactive")
             )
@@ -246,11 +392,47 @@ class _WriteMixin(_RepoMixinBase):
             self._validate_repair_path(path)
         return paths
 
+    def _daily_repair_universe_ck(
+        self, store, asset_type: str, day: date
+    ) -> tuple[list[str], set[str]]:
+        table = daily_dirname(asset_type)
+        known_rows = store.read_daily(table, start=day, end=day, columns=["symbol"])
+        known = (
+            set(known_rows["symbol"].drop_nulls().to_list()) if not known_rows.is_empty() else set()
+        )
+        instruments = self.get_instruments_asset(asset_type)
+        pool = (
+            set(instruments["symbol"].drop_nulls().to_list())
+            if not instruments.is_empty() and "symbol" in instruments.columns
+            else set()
+        )
+        dates = [d for d in store.list_daily_dates(table) if d != day]
+        for before in (True, False):
+            ordered = sorted(
+                (d for d in dates if (d < day) == before),
+                key=lambda value: abs((value - day).days),
+            )
+            for value in ordered:
+                values = set(
+                    store.read_daily(table, start=value, end=value, columns=["symbol"])["symbol"]
+                    .drop_nulls()
+                    .to_list()
+                )
+                if values:
+                    pool.update(values)
+                    break
+        if not (pool | known) or (not pool and known_rows.is_empty()):
+            raise ValueError("无法确定整日回补的标的清单, 请先同步对应资产的维表")
+        return sorted(pool | known), known
+
     def daily_repair_universe(self, asset_type: str, day: date) -> tuple[list[str], set[str]]:
         """整日回补清单含当前维表和最近前/后完整分区, 保留历史退市标的。
 
         另返回当日尚可读取的标的: 上游若遗漏这些行, 不能因替换损坏分片把它们丢掉。
         """
+        store = getattr(self, "storage", None)
+        if store is not None:
+            return self._daily_repair_universe_ck(store, asset_type, day)
         base = self.store.data_dir / daily_dirname(asset_type)
 
         def read_symbols(part: Path) -> tuple[set[str], bool]:
@@ -307,6 +489,21 @@ class _WriteMixin(_RepoMixinBase):
         if not path.resolve().is_relative_to(root):
             raise ValueError("修补目标位于数据目录以外")
 
+    def _replace_enriched_rows_ck(
+        self, store, table: str, frame: pl.DataFrame, start: date, symbols: list[str]
+    ) -> int:
+        dates = set(store.list_daily_dates(table, start=start))
+        if not frame.is_empty():
+            dates.update(frame["date"].to_list())
+        written = 0
+        for day in sorted(d for d in dates if d >= start):
+            incoming = frame.filter(pl.col("date") == day) if not frame.is_empty() else frame
+            store.delete_daily(table, day=day, symbols=symbols)
+            if not incoming.is_empty():
+                store.write_daily(table, incoming)
+            written += incoming.height
+        return written
+
     def replace_enriched_rows(
         self,
         asset_type: str,
@@ -321,7 +518,11 @@ class _WriteMixin(_RepoMixinBase):
         同时处理停牌过滤后消失的旧行, 避免仅 upsert 留下旧的错误状态。
         调用方负责一次逻辑重算的 publication.commit()。
         """
-        base = self.store.data_dir / enriched_dirname(asset_type)
+        table = enriched_dirname(asset_type)
+        store = getattr(self, "storage", None)
+        if store is not None:
+            return self._replace_enriched_rows_ck(store, table, frame, start, symbols)
+        base = self.store.data_dir / table
         dates = {date.fromisoformat(p.name[5:]) for p in base.glob("date=*") if p.is_dir()}
         if not frame.is_empty():
             dates.update(frame["date"].to_list())
@@ -345,18 +546,20 @@ class _WriteMixin(_RepoMixinBase):
             )
             incoming = frame.filter(pl.col("date") == day) if not frame.is_empty() else frame
             merged = pl.concat([keep, incoming], how="diagonal_relaxed").sort(["symbol", "date"])
-            if merged.equals(existing) and len(paths) <= 1:
+            unchanged = merged.equals(existing) and len(paths) <= 1
+            if not unchanged:
+                with self._write_lock:
+                    if {
+                        p: self._partition_fingerprint(p) for p in part.glob("*.parquet")
+                    } != fingerprints:
+                        raise ValueError("指标数据在修补期间发生变化, 请重新执行修补")
+                    publication.write_parquet(merged, part / "part.parquet")
+                    for path in paths:
+                        if path.name != "part.parquet":
+                            path.unlink()
+                written += incoming.height
+            if unchanged:
                 continue
-            with self._write_lock:
-                if {
-                    p: self._partition_fingerprint(p) for p in part.glob("*.parquet")
-                } != fingerprints:
-                    raise ValueError("指标数据在修补期间发生变化, 请重新执行修补")
-                publication.write_parquet(merged, part / "part.parquet")
-                for path in paths:
-                    if path.name != "part.parquet":
-                        path.unlink()
-            written += incoming.height
         return written
 
     def invalidate_enriched_asset(self, asset_type: str) -> None:
@@ -392,41 +595,48 @@ class _WriteMixin(_RepoMixinBase):
         elif asset_type == "etf":
             self.append_etf_enriched(df)
 
+    def _persist_instruments(self, asset_type: str, df: pl.DataFrame, local_path: Path) -> None:
+        """在线只写 CK；无门面时（离线/兼容性测试）才写本地 parquet。"""
+        clean = df.unique(subset=["symbol"], keep="last").sort("symbol")
+        store = getattr(self, "storage", None)
+        if store is not None:
+            store.write_instruments(asset_type, clean)
+            return
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        self._atomic_write_parquet(clean, local_path)
+
     def save_instruments(self, df: pl.DataFrame) -> None:
-        """保存个股维表（本地 parquet + CK instruments 双写）。"""
+        """保存个股维表（在线 CK-only）。"""
         if df.is_empty() or "symbol" not in df.columns:
             return
-        out = self.store.data_dir / "instruments" / "instruments.parquet"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        self._atomic_write_parquet(df.unique(subset=["symbol"], keep="last").sort("symbol"), out)
-        store = self._ck_store()
-        if store is not None:
-            store.write_instruments("stock", df)
+        self._persist_instruments(
+            "stock", df, self.store.data_dir / "instruments" / "instruments.parquet"
+        )
         self._instruments_cache = None
         self._name_map_cache = None
         self._refresh_instruments()
 
     def save_index_instruments(self, df: pl.DataFrame) -> None:
-        """保存指数标的维表。"""
+        """保存指数标的维表（在线 CK-only）。"""
         if df.is_empty() or "symbol" not in df.columns:
             return
-        out = self.store.data_dir / "instruments_index" / "instruments_index.parquet"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        self._atomic_write_parquet(df.unique(subset=["symbol"], keep="last").sort("symbol"), out)
+        self._persist_instruments(
+            "index", df, self.store.data_dir / "instruments_index" / "instruments_index.parquet"
+        )
         self._index_instruments_cache = None
         self._etf_instruments_cache = None
         self._name_map_cache = None
         self._refresh_index_instruments()
 
     def save_etf_instruments(self, df: pl.DataFrame) -> None:
-        """保存 ETF 标的维表到独立目录。"""
+        """保存 ETF 标的维表到独立目录（在线 CK-only）。"""
         if df.is_empty() or "symbol" not in df.columns:
             return
         if "asset_type" not in df.columns:
             df = df.with_columns(pl.lit("etf").alias("asset_type"))
-        out = self.store.data_dir / "instruments_etf" / "instruments_etf.parquet"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        self._atomic_write_parquet(df.unique(subset=["symbol"], keep="last").sort("symbol"), out)
+        self._persist_instruments(
+            "etf", df, self.store.data_dir / "instruments_etf" / "instruments_etf.parquet"
+        )
         self._etf_instruments_cache = None
         self._name_map_cache = None
         self._refresh_etf_instruments()
@@ -444,13 +654,45 @@ class _WriteMixin(_RepoMixinBase):
         df.write_parquet(tmp)
         replace_with_retry(tmp, out)
 
+    def _run_ck_enriched_generation(
+        self, store, asset_type: str, day, action: Callable[[], object]
+    ):
+        if asset_type not in {"stock", "etf", "index"}:
+            return action()
+        generation_id = store.begin_generation(asset_type, "system", day)
+        try:
+            result = action()
+        except BaseException:
+            store.fail_generation(asset_type, generation_id, "system")
+            raise
+        store.commit_generation(asset_type, generation_id, "system")
+        return result
+
+    def _write_daily_partition_ck(
+        self, store, df: pl.DataFrame, table: str, generation_asset: str | None
+    ) -> None:
+        def write() -> None:
+            for date_df in df.partition_by("date"):
+                store.write_daily(table, date_df)
+
+        if generation_asset is None:
+            write()
+            return
+        self._run_ck_enriched_generation(store, generation_asset, df["date"].min(), write)
+
     def _write_daily_partition(self, df: pl.DataFrame, table: str) -> None:
         """按 date 分区写入 parquet，每个日期一个文件，支持 merge-upsert。"""
         base = self.store.data_dir / table
         generation_asset = {
             "kline_daily_enriched": "stock",
             "kline_etf_enriched": "etf",
+            "kline_index_enriched": "index",
         }.get(table)
+        explicit_store = getattr(self, "storage", None)
+        if explicit_store is not None:
+            if not df.is_empty():
+                self._write_daily_partition_ck(explicit_store, df, table, generation_asset)
+            return
         # recover=True: 外部进程残留的僵死 publishing 标记不应阻塞实时/管道
         # enriched 落盘, 首次写入即接管自愈; 活进程的发布仍会抛错保护竞态。
         publication = (
@@ -559,6 +801,10 @@ class _WriteMixin(_RepoMixinBase):
         }.get(asset_type)
         if not table:
             return
+        explicit_store = getattr(self, "storage", None)
+        if explicit_store is not None:
+            explicit_store.write_daily(table, df)
+            return
         base = self.store.data_dir / table
         dt = df["date"][0]
         ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
@@ -623,16 +869,25 @@ class _WriteMixin(_RepoMixinBase):
 
         storage_cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
         df_storage = df.select(storage_cols).sort(["symbol"])
-        base = self.store.data_dir / table
-        ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
-        out = base / f"date={ds}" / "part.parquet"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        publication = (
-            EnrichedPublication(self.store.data_dir, asset_type, recover=True)
-            if asset_type in {"stock", "etf"}
-            else None
-        )
-        self._optimistic_upsert_partition(out, df_storage, publication)
+        explicit_store = getattr(self, "storage", None)
+        if explicit_store is not None:
+            self._run_ck_enriched_generation(
+                explicit_store,
+                asset_type,
+                dt,
+                lambda: explicit_store.write_daily(table, df_storage),
+            )
+        else:
+            base = self.store.data_dir / table
+            ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
+            out = base / f"date={ds}" / "part.parquet"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            publication = (
+                EnrichedPublication(self.store.data_dir, asset_type, recover=True)
+                if asset_type in {"stock", "etf"}
+                else None
+            )
+            self._optimistic_upsert_partition(out, df_storage, publication)
 
         if asset_type == "stock":
             self._enriched_cache = merged_cache
@@ -660,6 +915,11 @@ class _WriteMixin(_RepoMixinBase):
             "etf": "kline_etf_daily",
         }.get(asset_type)
         if not table:
+            return
+        explicit_store = getattr(self, "storage", None)
+        if explicit_store is not None:
+            explicit_store.delete_daily_date(table, day=df["date"][0])
+            explicit_store.write_daily(table, df.sort(["symbol", "date"]))
             return
         base = self.store.data_dir / table
         dt = df["date"][0]
@@ -705,20 +965,29 @@ class _WriteMixin(_RepoMixinBase):
 
         storage_cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
         df_storage = df.select(storage_cols).sort(["symbol"])
-        base = self.store.data_dir / table
-        ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
-        out = base / f"date={ds}" / "part.parquet"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        publication = (
-            EnrichedPublication(self.store.data_dir, asset_type, recover=True)
-            if asset_type in {"stock", "etf"}
-            else None
-        )
-        # 覆写语义: 读旧内容只为跳过无变化的写, 读在锁外 (误判最多造成一次
-        # 冗余覆写, 不影响正确性); 锁内只做替换 + commit。
-        existing = pl.read_parquet(out) if out.exists() else pl.DataFrame()
-        with self._write_lock:
-            self._write_partition_locked(out, df_storage, existing, publication)
+        explicit_store = getattr(self, "storage", None)
+        if explicit_store is not None:
+
+            def overwrite() -> None:
+                explicit_store.delete_daily_date(table, day=dt)
+                explicit_store.write_daily(table, df_storage)
+
+            self._run_ck_enriched_generation(explicit_store, asset_type, dt, overwrite)
+        else:
+            base = self.store.data_dir / table
+            ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
+            out = base / f"date={ds}" / "part.parquet"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            publication = (
+                EnrichedPublication(self.store.data_dir, asset_type, recover=True)
+                if asset_type in {"stock", "etf"}
+                else None
+            )
+            # 覆写语义: 读旧内容只为跳过无变化的写, 读在锁外 (误判最多造成一次
+            # 冗余覆写, 不影响正确性); 锁内只做替换 + commit。
+            existing = pl.read_parquet(out) if out.exists() else pl.DataFrame()
+            with self._write_lock:
+                self._write_partition_locked(out, df_storage, existing, publication)
 
         if asset_type == "stock":
             self._enriched_cache = cache_df

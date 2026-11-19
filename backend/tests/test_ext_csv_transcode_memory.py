@@ -9,6 +9,7 @@
 这里用 tracemalloc 量峰值，判据是「与文件大小无关」而不是某个绝对值：转换
 按块进行时峰值只跟块大小有关，文件翻倍不会让峰值翻倍。
 """
+
 from __future__ import annotations
 
 import tracemalloc

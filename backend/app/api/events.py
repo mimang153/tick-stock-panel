@@ -7,6 +7,7 @@ EventSource 规范不能携带 Authorization 头, Token 调用方走两步:
 GET /api/events 在访问中间件白名单内 (票据即凭证, 不走密码会话);
 票据校验失败立即 401, 成功则流式推送: hello 帧 → 事件 + 15s 心跳。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -31,7 +32,7 @@ def issue_ticket(request: Request):
     # 认证与限流已在网关中间件完成 (scope 规则 "*"); 端点内再验一次
     # 明文是为了拿到 Token 记录、让票据继承 scope (不放大权限)。
     authz = request.headers.get("authorization", "")
-    plaintext = authz[len("Bearer "):].strip() if authz.startswith("Bearer ") else ""
+    plaintext = authz[len("Bearer ") :].strip() if authz.startswith("Bearer ") else ""
 
     from app.services import api_tokens
 
@@ -57,7 +58,9 @@ async def event_stream(ticket: str = ""):
     async def gen():
         allowed = ("*", *scopes)
         try:
-            yield sse_format({"type": "hello", "scope": "*", "data": {"scopes": scopes}, "ts": time.time()})
+            yield sse_format(
+                {"type": "hello", "scope": "*", "data": {"scopes": scopes}, "ts": time.time()}
+            )
             last_send = time.monotonic()
             while True:
                 try:

@@ -23,24 +23,37 @@ def _request(tmp_path, monitor_results=None, live=None, live_date=None):
     return SimpleNamespace(app=SimpleNamespace(state=state))
 
 
-def test_cached_summary_cannot_complete_task_with_snapshot_read_before_publication(monkeypatch, tmp_path):
+def test_cached_summary_cannot_complete_task_with_snapshot_read_before_publication(
+    monkeypatch, tmp_path
+):
     state = {"complete": False, "total": 1}
 
     def task_status(task_id):
-        return {"id": task_id, "complete": state["complete"],
-                "pending": [] if state["complete"] else ["strategy_a"]}
+        return {
+            "id": task_id,
+            "complete": state["complete"],
+            "pending": [] if state["complete"] else ["strategy_a"],
+        }
 
     def read_cache(_request):
-        cached = {"as_of": "2026-07-20", "results": {
-            "strategy_a": {"as_of": "2026-07-20", "total": state["total"]},
-        }}
+        cached = {
+            "as_of": "2026-07-20",
+            "results": {
+                "strategy_a": {"as_of": "2026-07-20", "total": state["total"]},
+            },
+        }
         # The writer commits just after this request captures the old cache.
         state.update(complete=True, total=2)
         return cached
 
-    monkeypatch.setattr(screener_api.strategy_run_queue, "MANAGER", SimpleNamespace(
-        task_status=task_status, minute_summaries=lambda **_kwargs: [],
-    ))
+    monkeypatch.setattr(
+        screener_api.strategy_run_queue,
+        "MANAGER",
+        SimpleNamespace(
+            task_status=task_status,
+            minute_summaries=lambda **_kwargs: [],
+        ),
+    )
     monkeypatch.setattr(screener_api, "_cached_with_realtime", read_cache)
     monkeypatch.setattr(screener_api.screener_work, "hard_identity", lambda *_args: ())
 
@@ -88,7 +101,9 @@ def test_cached_summary_omits_rows_and_counts_realtime_expirations(monkeypatch, 
     assert "rows" not in payload["results"]["strategy_a"]
 
 
-def test_cached_result_returns_only_requested_rows_with_ext_and_strategy_membership(monkeypatch, tmp_path):
+def test_cached_result_returns_only_requested_rows_with_ext_and_strategy_membership(
+    monkeypatch, tmp_path
+):
     cached = {
         "as_of": "2026-07-20",
         "results": {
@@ -134,25 +149,28 @@ def test_cached_result_returns_only_requested_rows_with_ext_and_strategy_members
 # 列表价格与实时行情对齐: 缓存只记录策略计算时刻的价格
 # ---------------------------------------------------------------------------
 
+
 def _live_frame() -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": ["002543.SZ", "600000.SH"],
-        "date": ["2026-10-20", "2026-10-20"],
-        "open": [7.8, 10.0],
-        "high": [8.44, 10.5],
-        "low": [7.77, 9.9],
-        "close": [8.39, 10.2],
-        "prev_close": [8.03, 10.0],
-        "volume": [449688.0, 1000.0],
-        "amount": [3.63e8, 1.0e7],
-        "change_pct": [0.04483, 0.02],
-        "change_amount": [0.36, 0.2],
-        "turnover_rate": [6.8, 1.0],
-        "raw_close": [8.39, 10.2],
-        "raw_high": [8.44, 10.5],
-        "raw_low": [7.77, 9.9],
-        "quote_ts": [1792479600000, 1792479600000],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["002543.SZ", "600000.SH"],
+            "date": ["2026-10-20", "2026-10-20"],
+            "open": [7.8, 10.0],
+            "high": [8.44, 10.5],
+            "low": [7.77, 9.9],
+            "close": [8.39, 10.2],
+            "prev_close": [8.03, 10.0],
+            "volume": [449688.0, 1000.0],
+            "amount": [3.63e8, 1.0e7],
+            "change_pct": [0.04483, 0.02],
+            "change_amount": [0.36, 0.2],
+            "turnover_rate": [6.8, 1.0],
+            "raw_close": [8.39, 10.2],
+            "raw_high": [8.44, 10.5],
+            "raw_low": [7.77, 9.9],
+            "quote_ts": [1792479600000, 1792479600000],
+        }
+    )
 
 
 def _cached_row() -> dict:
@@ -194,9 +212,7 @@ def test_cached_rows_take_live_quote_fields_but_keep_indicator_values(monkeypatc
     实测现场: 13:27 扫描时涨幅 2.49%, 收盘 4.48%, 详情弹窗读实时行情,
     同一只票在两处显示不同涨幅。
     """
-    monkeypatch.setattr(
-        screener_api.strategy_cache, "read_cache", lambda *_a: _cached_payload()
-    )
+    monkeypatch.setattr(screener_api.strategy_cache, "read_cache", lambda *_a: _cached_payload())
 
     payload = screener_api.get_cached(
         _request(tmp_path, live=_live_frame(), live_date="2026-10-20"),
@@ -238,9 +254,7 @@ def test_cached_rows_keep_historical_prices_for_other_dates(monkeypatch, tmp_pat
 
 def test_cached_rows_unchanged_when_live_cache_is_empty(monkeypatch, tmp_path):
     """实时缓存为空 (启动预热中) 时保持原样, 不能伪造价格。"""
-    monkeypatch.setattr(
-        screener_api.strategy_cache, "read_cache", lambda *_a: _cached_payload()
-    )
+    monkeypatch.setattr(screener_api.strategy_cache, "read_cache", lambda *_a: _cached_payload())
 
     payload = screener_api.get_cached(
         _request(tmp_path, live=pl.DataFrame(), live_date=None),
@@ -252,9 +266,7 @@ def test_cached_rows_unchanged_when_live_cache_is_empty(monkeypatch, tmp_path):
 
 def test_cached_result_overlays_live_quotes(monkeypatch, tmp_path):
     """/cached-result (详情接口) 与列表使用同一套实时覆盖。"""
-    monkeypatch.setattr(
-        screener_api.strategy_cache, "read_cache", lambda *_a: _cached_payload()
-    )
+    monkeypatch.setattr(screener_api.strategy_cache, "read_cache", lambda *_a: _cached_payload())
     monkeypatch.setattr(screener_api, "_load_ext_value_maps", lambda *_a, **_k: {})
 
     payload = screener_api.get_cached_result(

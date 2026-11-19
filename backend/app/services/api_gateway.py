@@ -10,6 +10,7 @@ Token 通道有两道闸, 认证中间件按序调用:
 刻意不放进规则表的: SSE 流端点 (EventSource 无法带 Authorization 头,
 V2 用短期票据解决)、watchlist/监控规则管理、数据同步、设置 —— 保持最小开放面。
 """
+
 from __future__ import annotations
 
 import os
@@ -87,6 +88,7 @@ def rate_limit_per_min() -> int:
 
 # ── 网络门禁: Token 通道默认仅本机/内网 (auth.setup 端点的同源判据) ──
 
+
 def is_local_network(host: str | None) -> bool:
     """是否本机或内网地址: 127.0.0.1 / ::1 / localhost、10.x、172.16-31.x、192.168.x。
 
@@ -115,8 +117,12 @@ def token_channel_local_only() -> bool:
     设 0/false/off/no 显式放开 — 供公网 VPS 部署的远程脚本/门户等场景自主选择,
     开放后的数据再分发合规责任由部署者承担(见 docs/configuration.md)。
     """
-    return (os.environ.get("API_TOKEN_LOCAL_ONLY", "1").strip().lower()
-            not in ("0", "false", "off", "no"))
+    return os.environ.get("API_TOKEN_LOCAL_ONLY", "1").strip().lower() not in (
+        "0",
+        "false",
+        "off",
+        "no",
+    )
 
 
 def token_network_verdict(client_ip: str | None) -> dict | None:
@@ -144,7 +150,9 @@ def required_scope(method: str, path: str) -> str | None:
     返回 "*" 表示仅需有效 Token (不做特定 scope 校验)。
     """
     for m, prefix, scope in _RULES:
-        if (m == "*" or m == method) and (path == prefix or path.startswith(prefix.rstrip("/") + "/")):
+        if (m == "*" or m == method) and (
+            path == prefix or path.startswith(prefix.rstrip("/") + "/")
+        ):
             # read:ext 域内的拉取 Key 状态子路径属管理面 (脱敏也不外露)
             if scope == "read:ext" and path.endswith(("/api-key", "/config/export")):
                 return None

@@ -129,4 +129,7 @@ ENV UV_DEFAULT_INDEX=${PYPI_INDEX} \
 # 此处让日志时间戳等其余 naive 时间也对齐北京时间。
 ENV TZ=Asia/Shanghai
 EXPOSE 3018
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "3018"]
+# S4 起支持多 worker（API_WORKERS，默认 2）：账户走 PG 事务层、协调/SSE/cache/mining
+# 走 redis、启动钩子经 coordination.once() 单飞。--reload 的开发脚本仍单 worker。
+ENV API_WORKERS=2
+CMD ["sh", "-c", "exec uv run uvicorn app.main:app --host 0.0.0.0 --port 3018 --workers ${API_WORKERS:-2}"]

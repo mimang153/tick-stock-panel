@@ -3,6 +3,7 @@
 只做"低相关健康冠军 → composite 策略文件 + 守护入护"这一件事;
 候选对的发现由守护运行时的组合扫描产出 (guardian_runtime._run_combination_scan)。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -39,8 +40,7 @@ def render_composite_source(
                 "options": ["union", "intersect"],
                 "default": "union",
             },
-            {"id": "min_confirm", "label": "交集最少确认数", "type": "int",
-             "default": 1, "min": 0},
+            {"id": "min_confirm", "label": "交集最少确认数", "type": "int", "default": 1, "min": 0},
         ],
         "scoring": {},
         "order_by": "score",
@@ -70,15 +70,14 @@ def create_guardian_composite(
     suggestions = read_combinations(data_dir) or {}
     pair = next(
         (
-            item for item in suggestions.get("suggestions") or []
+            item
+            for item in suggestions.get("suggestions") or []
             if {item.get("a"), item.get("b")} == {left, right}
         ),
         None,
     )
     if pair is None:
-        raise ValueError(
-            "该策略对不在最新组合建议中 — 请先运行组合扫描, 且双方需为健康守护策略"
-        )
+        raise ValueError("该策略对不在最新组合建议中 — 请先运行组合扫描, 且双方需为健康守护策略")
     if latest_enriched is None:
         raise ValueError("enriched 数据不可用, 无法建立守护基线")
     # 与 _custom_strategy_path 同口径: 先 resolve 再比较,
@@ -100,9 +99,7 @@ def create_guardian_composite(
         raise ValueError("composite directory escapes data_dir")
     existing = sorted(root.glob("guardian_combo_*.py"))
     if len(existing) >= _GUARDIAN_COMBO_MAX:
-        raise ValueError(
-            f"守护组合数量已达上限 ({_GUARDIAN_COMBO_MAX}); 请删除不再使用的组合"
-        )
+        raise ValueError(f"守护组合数量已达上限 ({_GUARDIAN_COMBO_MAX}); 请删除不再使用的组合")
     path = (root / f"{strategy_id}.py").resolve(strict=False)
     if path.parent != root:
         raise ValueError("composite path escapes its directory")
@@ -155,7 +152,7 @@ def _invalidate_caches(data_dir: Path) -> None:
         from app.services.strategy_cache import clear_cache
 
         clear_cache(data_dir)
-    except Exception:  # noqa: BLE001 — 缓存失效失败不阻断创建
+    except Exception:  # noqa: BLE001 - 缓存失效失败不阻断组合归档, 保持静默降级
         logger.warning("strategy cache invalidation failed", exc_info=True)
 
 

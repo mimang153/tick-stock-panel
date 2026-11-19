@@ -13,6 +13,7 @@
   - login 限流: 同一来源 IP 连续失败 5 次, 锁 5 分钟(内存计数)。
   - 会话 token 通过 HttpOnly cookie 下发, 前端无需手动管理。
 """
+
 from __future__ import annotations
 
 import logging
@@ -96,6 +97,7 @@ def _clear_login_fails(ip: str) -> None:
 # ================================================================
 # 端点
 # ================================================================
+
 
 class PasswordIn(BaseModel):
     password: str = Field(min_length=6, max_length=128)

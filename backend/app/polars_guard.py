@@ -1,18 +1,10 @@
 """polars collect 并发闸。
 
-polars 的共享执行器 (rayon 工作池 + 流式引擎异步运行时) 在多线程并发 collect
-时存在死锁问题: 上游 issue #24448 / #23053 / #25754 等同族案例均为「在飞的
-collect 超过池内工作位 → 持有工作位的任务等待排不上队的任务 → 0 CPU 永久
-挂起」。本模块用进程级信号量限制同时在飞的 collect 数量 —— 这是上游 issue
-区被反复验证有效的缓解手段。
-
-车道设计: 总闸位 polars_collect_permits 个, 其中 background (预热 / 增量 /
-维表加载等后台计算) 最多占 polars_collect_background_permits 个, 其余闸位
-保留给 interactive (页面读接口), 保证后台大计算不会把页面请求饿死。获取顺序
-恒为 background 车道 → 总闸, 不存在环。
-
-worker 子进程 (回测/优化/挖掘) 单任务串行执行, 不经过本闸。
+共享执行器并发 collect 存在死锁风险 (#24448 等), 用进程级信号量限制在飞数量。
+车道: background 最多占 background_permits 个, 其余留给 interactive; 顺序恒为
+background → 总闸, 无环。worker 子进程单任务串行执行, 不经过本闸。
 """
+
 from __future__ import annotations
 
 import threading

@@ -5,6 +5,7 @@
 
 不启动服务, 直接调用内部函数(与单测同款 SimpleNamespace 请求桩), 全程落在临时目录。
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -42,21 +43,30 @@ def filter(df: pl.DataFrame, params: dict) -> pl.Expr:
 
 def _request(data_dir: Path, engine: StrategyEngine):
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=data_dir))
-    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo, strategy_engine=engine)))
+    return SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(repo=repo, strategy_engine=engine))
+    )
 
 
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         data_dir = Path(tmp)
-        engine = StrategyEngine(strategy_dirs=[data_dir / "strategies" / "custom",
-                                               data_dir / "strategies" / "ai"])
+        engine = StrategyEngine(
+            strategy_dirs=[data_dir / "strategies" / "custom", data_dir / "strategies" / "ai"]
+        )
         request = _request(data_dir, engine)
 
         print("== 1. 保存 AI 策略(默认草稿) ==")
-        result = _save_strategy_code(StrategyCodeSaveRequest(
-            strategy_id="ai_demo", target_source="ai", mode="create",
-            code=_CODE, name="demo",
-        ), request)
+        result = _save_strategy_code(
+            StrategyCodeSaveRequest(
+                strategy_id="ai_demo",
+                target_source="ai",
+                mode="create",
+                code=_CODE,
+                name="demo",
+            ),
+            request,
+        )
         public = [m["id"] for m in engine.list_strategies() if not m.get("research_only")]
         print(f"   research_only={result['research_only']} (期望 True)")
         print(f"   公开列表={public} (期望不含 ai_demo)")
@@ -72,10 +82,16 @@ def main() -> None:
             print(f"   被拒: {exc}")
 
         print("== 4. 自定义策略 publish 应被拒 ==")
-        _save_strategy_code(StrategyCodeSaveRequest(
-            strategy_id="custom_demo", target_source="custom", mode="create",
-            code=_CODE.replace("ai_demo", "custom_demo"), name="custom",
-        ), request)
+        _save_strategy_code(
+            StrategyCodeSaveRequest(
+                strategy_id="custom_demo",
+                target_source="custom",
+                mode="create",
+                code=_CODE.replace("ai_demo", "custom_demo"),
+                name="custom",
+            ),
+            request,
+        )
         try:
             publish_ai_strategy("custom_demo", request)
         except Exception as exc:  # noqa: BLE001

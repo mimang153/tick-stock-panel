@@ -7,9 +7,11 @@
 两条路径都去股票分钟分区找 ETF 的分钟K, 找不到就静默退回日K价成交,
 「高精度」对 ETF 不生效且无任何提示。
 """
+
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from typing import Any, cast
 
 import polars as pl
 import pytest
@@ -45,36 +47,55 @@ class _MinuteRepo:
         if asset_type != "etf":
             return pl.DataFrame()
         day = START + timedelta(days=1)
-        return pl.DataFrame({
-            "symbol": [symbols[0], symbols[0]],
-            "datetime": [datetime.combine(day, datetime.min.time()).replace(hour=9, minute=31),
-                         datetime.combine(day, datetime.min.time()).replace(hour=9, minute=32)],
-            "open": [10.4, 10.6],
-            "high": [10.5, 10.7],
-            "low": [10.3, 10.5],
-            "close": [10.4, 10.6],
-            "volume": [100.0, 100.0],
-            # 契约口径: amount(元) = 价 x volume(手) x 100 股 (#387)
-            "amount": [10.4 * 100.0 * 100, 10.6 * 100.0 * 100],
-        })
+        return pl.DataFrame(
+            {
+                "symbol": [symbols[0], symbols[0]],
+                "datetime": [
+                    datetime.combine(day, datetime.min.time()).replace(hour=9, minute=31),
+                    datetime.combine(day, datetime.min.time()).replace(hour=9, minute=32),
+                ],
+                "open": [10.4, 10.6],
+                "high": [10.5, 10.7],
+                "low": [10.3, 10.5],
+                "close": [10.4, 10.6],
+                "volume": [100.0, 100.0],
+                # 契约口径: amount(元) = 价 x volume(手) x 100 股 (#387)
+                "amount": [10.4 * 100.0 * 100, 10.6 * 100.0 * 100],
+            }
+        )
 
 
 def _panel(symbol: str) -> pl.DataFrame:
     rows = []
     for i, price in enumerate([10.0, DAILY_OPEN, 12.0]):
-        rows.append({
-            "symbol": symbol, "name": symbol, "date": START + timedelta(days=i),
-            "open": price, "high": price, "low": price, "close": price,
-            "volume": 1_000, "amount": 1e6,
-            "signal_limit_up": False, "signal_limit_down": False,
-        })
+        rows.append(
+            {
+                "symbol": symbol,
+                "name": symbol,
+                "date": START + timedelta(days=i),
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": 1_000,
+                "amount": 1e6,
+                "signal_limit_up": False,
+                "signal_limit_down": False,
+            }
+        )
     return pl.DataFrame(rows).sort(["symbol", "date"])
 
 
 def _strategy() -> StrategyDef:
     return StrategyDef(
-        meta={"id": "etf_test", "name": "etf_test", "scoring": {}, "params": [], "limit": 100,
-              "asset_types": ["stock", "etf"]},
+        meta={
+            "id": "etf_test",
+            "name": "etf_test",
+            "scoring": {},
+            "params": [],
+            "limit": 100,
+            "asset_types": ["stock", "etf"],
+        },
         basic_filter={},
         entry_signals=[],
         exit_signals=[],
@@ -109,25 +130,35 @@ def test_etf_minute_fill_reads_etf_minute_partition(mode, symbol):
     repo = _MinuteRepo()
     engine = BacktestEngine(repo=repo)  # type: ignore[arg-type]
     panel = _panel(symbol)
-    engine.load_panel_for_backtest = lambda symbols, s, e, plan, asset_type="stock": panel  # type: ignore[method-assign]
-    service = StrategyBacktestService(engine=engine, strategy_engine=_StrategyEngineStub())
 
-    result = service.run(StrategyBacktestConfig(
-        strategy_id="etf_test",
-        symbols=[symbol],
-        start=START,
-        end=START + timedelta(days=2),
-        mode=mode,
-        matching="open_t+1",
-        fees_pct=0,
-        slippage_bps=0,
-        holding_days=1,
-        max_positions=1,
-        asset_type="etf",
-        minute_fill=True,
-    ))
+    def _load_panel(symbols, s, e, plan, asset_type="stock"):
+        return panel
+
+    object.__setattr__(engine, "load_panel_for_backtest", _load_panel)
+    service = StrategyBacktestService(
+        engine=engine, strategy_engine=cast(Any, _StrategyEngineStub())
+    )
+
+    result = service.run(
+        StrategyBacktestConfig(
+            strategy_id="etf_test",
+            symbols=[symbol],
+            start=START,
+            end=START + timedelta(days=2),
+            mode=mode,
+            matching="open_t+1",
+            fees_pct=0,
+            slippage_bps=0,
+            holding_days=1,
+            max_positions=1,
+            asset_type="etf",
+            minute_fill=True,
+        )
+    )
 
     assert result.error is None
     assert repo.asset_types and set(repo.asset_types) == {"etf"}
     assert len(result.trades) == 1
-    assert result.trades[0]["entry_price"] == pytest.approx(MINUTE_VWAP)  # 分钟 VWAP, 不是日K开盘 11.0
+    assert result.trades[0]["entry_price"] == pytest.approx(
+        MINUTE_VWAP
+    )  # 分钟 VWAP, 不是日K开盘 11.0

@@ -5,6 +5,7 @@ chat_service 给助手消息的 tool_calls[].id 补了随机 id, 但 role:tool �
 tool_call_id 仍取原始空串 —— 两者对不上, 下一轮请求会被上游按协议拒绝
 (tool 消息找不到对应的 tool_call), 对话在第一次取数后直接失败。
 """
+
 from __future__ import annotations
 
 import json
@@ -22,7 +23,11 @@ def _script_round(script: list[dict[str, Any]], capture: list[list[dict[str, Any
         step = script.pop(0)
         for piece in step.get("text_pieces", []):
             yield {"type": "text", "delta": piece}
-        yield {"type": "round_end", "tool_calls": step.get("tool_calls", []), "finish_reason": "stop"}
+        yield {
+            "type": "round_end",
+            "tool_calls": step.get("tool_calls", []),
+            "finish_reason": "stop",
+        }
 
     return fake_round
 
@@ -31,27 +36,37 @@ async def _fake_execute(name: str, args: dict[str, Any], ctx: Any) -> dict[str, 
     return {"ok": True, "result": {"rows": [], "count": 0}}
 
 
-async def _run(monkeypatch: pytest.MonkeyPatch, tool_calls: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+async def _run(
+    monkeypatch: pytest.MonkeyPatch, tool_calls: list[dict[str, Any]]
+) -> list[list[dict[str, Any]]]:
     captured: list[list[dict[str, Any]]] = []
-    script = [{"tool_calls": tool_calls}, {"text_pieces": ["好的"]}]
+    script: list[Any] = [{"tool_calls": tool_calls}, {"text_pieces": ["好的"]}]
     monkeypatch.setattr(chat_service, "ai_configured", lambda: True)
     monkeypatch.setattr(chat_service, "is_codex_cli_provider", lambda provider=None: False)
     monkeypatch.setattr(chat_service, "stream_openai_round", _script_round(script, captured))
     monkeypatch.setattr(assistant_tools, "execute_assistant_tool", _fake_execute)
 
-    lines = [line async for line in chat_service.chat_stream(
-        history=[{"role": "user", "content": "看看贵州茅台"}],
-    )]
+    lines = [
+        line
+        async for line in chat_service.chat_stream(
+            history=[{"role": "user", "content": "看看贵州茅台"}],
+        )
+    ]
     events = [json.loads(line) for line in lines]
     assert [e["type"] for e in events if e["type"] == "error"] == []
     assert len(captured) == 2
     return captured
 
 
-async def test_missing_tool_call_id_backfill_matches_assistant_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured = await _run(monkeypatch, [
-        {"id": "", "name": "get_stock_quote", "arguments": '{"symbols": ["600519.SH"]}'},
-    ])
+async def test_missing_tool_call_id_backfill_matches_assistant_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = await _run(
+        monkeypatch,
+        [
+            {"id": "", "name": "get_stock_quote", "arguments": '{"symbols": ["600519.SH"]}'},
+        ],
+    )
 
     second_round = captured[1]
     assistant_msg, tool_msg = second_round[-2], second_round[-1]
@@ -61,11 +76,16 @@ async def test_missing_tool_call_id_backfill_matches_assistant_message(monkeypat
     assert tool_msg["tool_call_id"] == call_id
 
 
-async def test_parallel_calls_without_ids_get_distinct_matching_ids(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured = await _run(monkeypatch, [
-        {"id": "", "name": "get_stock_quote", "arguments": '{"symbols": ["600519.SH"]}'},
-        {"id": "", "name": "get_stock_daily", "arguments": '{"symbol": "600519.SH"}'},
-    ])
+async def test_parallel_calls_without_ids_get_distinct_matching_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = await _run(
+        monkeypatch,
+        [
+            {"id": "", "name": "get_stock_quote", "arguments": '{"symbols": ["600519.SH"]}'},
+            {"id": "", "name": "get_stock_daily", "arguments": '{"symbol": "600519.SH"}'},
+        ],
+    )
 
     second_round = captured[1]
     assistant_msg = second_round[-3]
@@ -77,9 +97,16 @@ async def test_parallel_calls_without_ids_get_distinct_matching_ids(monkeypatch:
 
 
 async def test_provider_supplied_tool_call_id_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured = await _run(monkeypatch, [
-        {"id": "call_abc", "name": "get_stock_quote", "arguments": '{"symbols": ["600519.SH"]}'},
-    ])
+    captured = await _run(
+        monkeypatch,
+        [
+            {
+                "id": "call_abc",
+                "name": "get_stock_quote",
+                "arguments": '{"symbols": ["600519.SH"]}',
+            },
+        ],
+    )
 
     second_round = captured[1]
     assert second_round[-2]["tool_calls"][0]["id"] == "call_abc"

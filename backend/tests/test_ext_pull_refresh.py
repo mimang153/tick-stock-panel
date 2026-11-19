@@ -4,6 +4,7 @@ refresh 可能从 FastAPI worker 线程调用; 旧实现先在调用方线程读
 做 diff 再提交闭包, 两步之间主循环可能已改动字典 (TOCTOU)。
 本测试验证行为正确性 (增/删/幂等); 竞态本身无法确定性复现。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -18,11 +19,17 @@ from app.services.ext_pull import PullScheduler
 
 def _cfg(cid: str, enabled: bool = True) -> ExtConfig:
     return ExtConfig(
-        id=cid, label=cid, mode="snapshot", fields=[],
+        id=cid,
+        label=cid,
+        mode="snapshot",
+        fields=[],
         pull=PullConfig(
-            enabled=enabled, url=f"https://example.test/{cid}",
+            enabled=enabled,
+            url=f"https://example.test/{cid}",
             schedule_minutes=60,
-        ) if enabled else None,
+        )
+        if enabled
+        else None,
     )
 
 

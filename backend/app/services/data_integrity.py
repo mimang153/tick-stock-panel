@@ -16,6 +16,7 @@
 
 自动检查优先读取 parquet 元数据; 显式 deep 自检额外按有界批次验证日K字段和数值。
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -52,6 +53,9 @@ AUTO_REPAIR_MAX_LAG_DAYS = 5
 # 参与检测的日K族表 (实时 flush 会写这三族的 daily/enriched)
 _DAILY_TABLES = ("kline_daily", "kline_etf_daily", "kline_index_daily")
 
+# 持有后台修复任务引用, 防止 event loop 提前回收尚未完成的 create_task
+_repair_tasks: set[object] = set()
+
 # 表 → 资产族 (用于管道/修复侧按族取起点)
 TABLE_FAMILY = {
     "kline_daily": "stock",
@@ -87,7 +91,9 @@ def active_daily_tables() -> tuple[str, ...]:
 DAILY_REQUIRED = ("symbol", "date", "open", "high", "low", "close", "volume")
 
 
-def _daily_validation(frame: pl.DataFrame, day: date | None) -> tuple[pl.DataFrame, dict[str, pl.Expr]]:
+def _daily_validation(
+    frame: pl.DataFrame, day: date | None
+) -> tuple[pl.DataFrame, dict[str, pl.Expr]]:
     """数值判据同时用于拦截与错误说明, 停牌零价沿用现有规则。"""
     if not set(DAILY_REQUIRED).issubset(frame.columns):
         raise ValueError("日K字段不完整")
@@ -97,16 +103,23 @@ def _daily_validation(frame: pl.DataFrame, day: date | None) -> tuple[pl.DataFra
         *(pl.col(c).cast(pl.Float64, strict=False) for c in DAILY_REQUIRED[2:]),
     )
     prices = ("open", "high", "low", "close")
-    halted = ((pl.col("volume") == 0) & (pl.col("open") == 0)
-              & (pl.col("high") == 0) & (pl.col("low") == 0) & (pl.col("close") >= 0))
+    halted = (
+        (pl.col("volume") == 0)
+        & (pl.col("open") == 0)
+        & (pl.col("high") == 0)
+        & (pl.col("low") == 0)
+        & (pl.col("close") >= 0)
+    )
     checks = {
         "股票代码缺失": pl.col("symbol").is_null() | (pl.col("symbol").str.strip_chars() == ""),
         "日期缺失或非法": pl.col("date").is_null(),
         "成交量缺失、非有限或为负": (
             pl.col("volume").is_null() | ~pl.col("volume").is_finite() | (pl.col("volume") < 0)
         ),
-        **{f"{label}缺失或非有限": pl.col(column).is_null() | ~pl.col(column).is_finite()
-           for column, label in zip(prices, ("开盘价", "最高价", "最低价", "收盘价"), strict=True)},
+        **{
+            f"{label}缺失或非有限": pl.col(column).is_null() | ~pl.col(column).is_finite()
+            for column, label in zip(prices, ("开盘价", "最高价", "最低价", "收盘价"), strict=True)
+        },
         "非停牌日开高低收存在零价或负价": (
             ~halted.fill_null(False) & pl.any_horizontal(pl.col(c) <= 0 for c in prices)
         ),
@@ -136,28 +149,48 @@ def invalid_daily_rows(frame: pl.DataFrame, day: date | None = None) -> pl.DataF
 
 def _invalid_daily_reason(frame: pl.DataFrame, day: date) -> str:
     frame, checks = _daily_validation(frame, day)
-    flags = frame.select(check.fill_null(False).any().alias(label) for label, check in checks.items()).row(0, named=True)
+    flags = frame.select(
+        check.fill_null(False).any().alias(label) for label, check in checks.items()
+    ).row(0, named=True)
     return "；".join(label for label, found in flags.items() if found)
 
 
-def inspect_invalid_history(root: Path, table: str, files: list[Path], invalid: pl.DataFrame) -> list[IntegrityIssue]:
+def inspect_invalid_history(
+    root: Path, table: str, files: list[Path], invalid: pl.DataFrame
+) -> list[IntegrityIssue]:
     """只在重算发现坏行后定位源分区; 行内日期损坏时仍按真实分区修补。"""
     from app.parquet import scan_daily_parquet
 
     paths = (
         scan_daily_parquet(files, include_file_paths="__integrity_file")
-        .join(invalid.select("symbol", "date").unique().lazy(),
-              on=["symbol", "date"], how="semi", nulls_equal=True)
-        .select("__integrity_file").unique().collect(engine="streaming")["__integrity_file"]
+        .join(
+            invalid.select("symbol", "date").unique().lazy(),
+            on=["symbol", "date"],
+            how="semi",
+            nulls_equal=True,
+        )
+        .select("__integrity_file")
+        .unique()
+        .collect(engine="streaming")["__integrity_file"]
     )
-    days = sorted({date.fromisoformat(Path(path).parent.name.removeprefix("date=")) for path in paths})
+    days = sorted(
+        {date.fromisoformat(Path(path).parent.name.removeprefix("date=")) for path in paths}
+    )
     # 与显式自检一致: 当天仍在更新, 不能登记成尚无法修补的历史问题。
     today = cn_today()
-    return [issue for day in days if day < today and (issue := inspect_daily_partition(root, table, day)) is not None]
+    return [
+        issue
+        for day in days
+        if day < today and (issue := inspect_daily_partition(root, table, day)) is not None
+    ]
 
 
 def _partition_problem(
-    root: Path, part: Path, day: date, *, deep: bool,
+    root: Path,
+    part: Path,
+    day: date,
+    *,
+    deep: bool,
 ) -> tuple[str, str, tuple[str, ...], tuple[str, ...]] | None:
     """有界逐文件检查, 读取错误不能与「权威历史没有 quote_ts」混为一谈。"""
     import pyarrow.parquet as pq
@@ -200,8 +233,12 @@ def _partition_problem(
             kind = "corrupt"
             unknown_symbols = True
     if bad:
-        return (kind, "；".join(dict.fromkeys(reasons)), tuple(dict.fromkeys(bad)),
-                () if unknown_symbols else tuple(sorted(symbols)))
+        return (
+            kind,
+            "；".join(dict.fromkeys(reasons)),
+            tuple(dict.fromkeys(bad)),
+            () if unknown_symbols else tuple(sorted(symbols)),
+        )
     if rows == 0:
         return "corrupt", "日期目录内的日K文件为空", tuple(p.name for p in paths), ()
     return None
@@ -234,12 +271,7 @@ def _quote_ts_max_ms(part_dir: Path) -> int | None:
                     file_max = int(value) if file_max is None else max(file_max, int(value))
             if file_max is None and meta.num_rows > 0:
                 # statistics 未写入 → 回退列扫描
-                file_max = (
-                    pl.scan_parquet(path)
-                    .select(pl.col("quote_ts").max())
-                    .collect()
-                    .item()
-                )
+                file_max = pl.scan_parquet(path).select(pl.col("quote_ts").max()).collect().item()
             candidates.append(file_max)
         except Exception as e:  # noqa: BLE001
             logger.debug("quote_ts scan skipped %s: %s", path, e)
@@ -290,8 +322,7 @@ def _partition_snapshot_defects(
             if "quote_ts" not in schema:
                 continue
             columns = [
-                name for name in ("symbol", "quote_ts", "volume", "amount")
-                if name in schema
+                name for name in ("symbol", "quote_ts", "volume", "amount") if name in schema
             ]
             frame = pl.read_parquet(path, columns=columns).with_columns(
                 pl.col("quote_ts").cast(pl.Int64, strict=False),
@@ -308,9 +339,7 @@ def _partition_snapshot_defects(
                 continue
             suspicious_rows += suspicious.height
 
-            activity_columns = [
-                name for name in ("volume", "amount") if name in suspicious.columns
-            ]
+            activity_columns = [name for name in ("volume", "amount") if name in suspicious.columns]
             if not activity_columns:
                 return None
             active = suspicious.filter(
@@ -324,7 +353,7 @@ def _partition_snapshot_defects(
                 active_symbols.update(active["symbol"].drop_nulls().to_list())
             elif active.height > 0:
                 return None  # 无 symbol 列却存在成交残留, 无法定位 → 整分区保守判坏
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - 无法读取分区文件时保守跳过,由上层按缺失处理
             logger.debug("snapshot residue scan skipped %s: %s", path, e)
             return None
 
@@ -344,7 +373,9 @@ def _partition_is_snapshot(day: date, part_dir: Path, quote_ts_max_ms: int | Non
     return defects is None or bool(defects)
 
 
-def inspect_daily_partition(data_dir: Path, table: str, day: date, *, deep: bool = True) -> IntegrityIssue | None:
+def inspect_daily_partition(
+    data_dir: Path, table: str, day: date, *, deep: bool = True
+) -> IntegrityIssue | None:
     if table not in TABLE_FAMILY:
         raise ValueError("不支持的日K资产类型")
     part = Path(data_dir) / table / f"date={day}"
@@ -356,7 +387,51 @@ def inspect_daily_partition(data_dir: Path, table: str, day: date, *, deep: bool
         return IntegrityIssue(day, table, kind, symbols=symbols, reason=reason, files=files)
     defects = _partition_snapshot_defects(day, part, _quote_ts_max_ms(part))
     if defects is None or defects:
-        return IntegrityIssue(day, table, "snapshot", symbols=tuple(sorted(defects)) if defects else ())
+        return IntegrityIssue(
+            day, table, "snapshot", symbols=tuple(sorted(defects)) if defects else ()
+        )
+    return None
+
+
+def inspect_daily_frame(
+    table: str, day: date, frame: pl.DataFrame | None, *, deep: bool = True
+) -> IntegrityIssue | None:
+    """CK 行的等价完整性判据（DES-002 P2）；无 storage 时仍走文件版。"""
+    if table not in TABLE_FAMILY:
+        raise ValueError("不支持的日K资产类型")
+    if frame is None or frame.is_empty():
+        return IntegrityIssue(day, table, "missing", reason="交易日日K缺失")
+    if deep:
+        invalid = invalid_daily_rows(frame, day)
+        if not invalid.is_empty():
+            symbols = tuple(
+                sorted(set(invalid["symbol"].drop_nulls().to_list()))
+                if "symbol" in invalid.columns
+                else ()
+            )
+            return IntegrityIssue(
+                day, table, "invalid", symbols=symbols, reason=_invalid_daily_reason(invalid, day)
+            )
+    if {"symbol", "date"}.issubset(frame.columns):
+        dup = frame.group_by(["symbol", "date"]).len().filter(pl.col("len") > 1)
+        if not dup.is_empty():
+            symbols = tuple(sorted(set(dup["symbol"].drop_nulls().to_list())))
+            return IntegrityIssue(day, table, "corrupt", symbols=symbols, reason="CK 中存在重复行")
+    if "quote_ts" in frame.columns:
+        ts = pl.col("quote_ts").cast(pl.Int64, strict=False)
+        cutoff = int(datetime.combine(day, CLOSE_CUTOFF, tzinfo=CN_TZ).timestamp() * 1000)
+        suspicious = (ts > 0) & (ts < cutoff)
+        authoritative = pl.col("quote_ts").is_null()
+        active = pl.lit(False)
+        if {"volume", "amount"}.issubset(frame.columns):
+            active = active | (
+                (pl.col("volume").cast(pl.Float64, strict=False).fill_null(0) > 0)
+                | (pl.col("amount").cast(pl.Float64, strict=False).fill_null(0) > 0)
+            )
+        defects = frame.filter(suspicious & ~authoritative & active)
+        if not defects.is_empty():
+            symbols = tuple(sorted(set(defects["symbol"].drop_nulls().to_list())))
+            return IntegrityIssue(day, table, "snapshot", symbols=symbols, reason="盘中快照未定版")
     return None
 
 
@@ -425,20 +500,30 @@ def scan_recent_integrity(
     tables: Iterable[str] | None = None,
     deep: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
+    storage=None,
 ) -> list[IntegrityIssue]:
-    """扫描最近交易日的数据完整性, 返回坏分区列表 (按日期升序)。
+    """扫描入口；显式 storage 时走 CK 权威检查。"""
+    if storage is not None:
+        return scan_recent_integrity_ck(
+            storage,
+            data_dir,
+            today=today,
+            lookback_days=lookback_days,
+            tables=tables,
+            deep=deep,
+            on_progress=on_progress,
+        )
+    return _scan_recent_integrity_local(
+        data_dir,
+        today=today,
+        lookback_days=lookback_days,
+        tables=tables,
+        deep=deep,
+        on_progress=on_progress,
+    )
 
-    每族表独立判定; 自动检查跳过近期无活动的表, 显式 deep 自检检查所选资产。
-    首次同步前的日期不推断为缺失, deep 模式下未知开市日期仅报告待核实。
-    """
-    data_dir = Path(data_dir)
-    today = today or datetime.now(CN_TZ).date()
-    window_start = today - timedelta(days=lookback_days)
-    issues: list[IntegrityIssue] = []
 
-    selected = tuple(tables) if tables is not None else _DAILY_TABLES
-    if not set(selected).issubset(_DAILY_TABLES):
-        raise ValueError("不支持的日K资产类型")
+def _local_daily_partitions(data_dir: Path) -> dict[str, set[date]]:
     partitions: dict[str, set[date]] = {}
     for table in _DAILY_TABLES:
         base = data_dir / table
@@ -452,6 +537,28 @@ def scan_recent_integrity(
                 except ValueError:
                     continue
         partitions[table] = existing
+    return partitions
+
+
+def _scan_recent_integrity_local(
+    data_dir: Path,
+    *,
+    today: date | None = None,
+    lookback_days: int = SCAN_WINDOW_DAYS,
+    tables: Iterable[str] | None = None,
+    deep: bool = False,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> list[IntegrityIssue]:
+    """扫描最近交易日的数据完整性, 返回坏分区列表 (按日期升序)。"""
+    data_dir = Path(data_dir)
+    today = today or datetime.now(CN_TZ).date()
+    window_start = today - timedelta(days=lookback_days)
+    issues: list[IntegrityIssue] = []
+
+    selected = tuple(tables) if tables is not None else _DAILY_TABLES
+    if not set(selected).issubset(_DAILY_TABLES):
+        raise ValueError("不支持的日K资产类型")
+    partitions = _local_daily_partitions(data_dir)
 
     candidates = set(_candidate_days(today, lookback_days))
     unconfirmed: set[date] = set()
@@ -460,10 +567,15 @@ def scan_recent_integrity(
         known_days = set().union(*partitions.values())
         # 没有权威日历时, 其他资产的本地分区可以证明当天确实开市;
         # 其余工作日仅列为待核实, 不拿节假日假缺口反复重拉。
-        weekdays = {window_start + timedelta(days=i) for i in range(lookback_days)
-                    if (window_start + timedelta(days=i)).weekday() < 5}
+        weekdays = {
+            window_start + timedelta(days=i)
+            for i in range(lookback_days)
+            if (window_start + timedelta(days=i)).weekday() < 5
+        }
         if calendar:
-            unconfirmed = {d for d in weekdays if d < min(calendar) or d > max(calendar)} - known_days
+            unconfirmed = {
+                d for d in weekdays if d < min(calendar) or d > max(calendar)
+            } - known_days
         else:
             unconfirmed = weekdays - known_days
             candidates = weekdays & known_days
@@ -473,7 +585,6 @@ def scan_recent_integrity(
     total = max(1, len(selected) * len(candidates))
     done = 0
     for table in selected:
-        base = data_dir / table
         existing = partitions[table]
         latest = max(existing) if existing else None
         # 族内近期无活动 → 不判定 (首次启动 / 长期停用)
@@ -490,11 +601,16 @@ def scan_recent_integrity(
                 on_progress(done, total)
             if day not in existing:
                 if day >= earliest:
-                    issues.append(IntegrityIssue(
-                        day=day, table=table,
-                        kind="unconfirmed" if day in unconfirmed else "missing",
-                        reason="交易日历不可用, 该日期是否开市尚未确认" if day in unconfirmed else "交易日日K缺失",
-                    ))
+                    issues.append(
+                        IntegrityIssue(
+                            day=day,
+                            table=table,
+                            kind="unconfirmed" if day in unconfirmed else "missing",
+                            reason="交易日历不可用, 该日期是否开市尚未确认"
+                            if day in unconfirmed
+                            else "交易日日K缺失",
+                        )
+                    )
                 continue
             issue = inspect_daily_partition(data_dir, table, day, deep=deep)
             if issue is not None:
@@ -504,14 +620,86 @@ def scan_recent_integrity(
     return issues
 
 
+def scan_recent_integrity_ck(
+    storage,
+    data_dir: Path,
+    *,
+    today: date | None = None,
+    lookback_days: int = SCAN_WINDOW_DAYS,
+    tables: Iterable[str] | None = None,
+    deep: bool = False,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> list[IntegrityIssue]:
+    """CK 权威完整性扫描；`data_dir` 仅用于保持对外报告路径兼容。"""
+    today = today or datetime.now(CN_TZ).date()
+    window_start = today - timedelta(days=lookback_days)
+    selected = tuple(tables) if tables is not None else _DAILY_TABLES
+    if not set(selected).issubset(_DAILY_TABLES):
+        raise ValueError("不支持的日K资产类型")
+    partitions = {table: set(storage.list_daily_dates(table)) for table in _DAILY_TABLES}
+    candidates = set(_candidate_days(today, lookback_days))
+    unconfirmed: set[date] = set()
+    if deep:
+        calendar = _trading_calendar()
+        known_days = set().union(*partitions.values())
+        weekdays = {
+            window_start + timedelta(days=i)
+            for i in range(lookback_days)
+            if (window_start + timedelta(days=i)).weekday() < 5
+        }
+        if calendar:
+            unconfirmed = {
+                d for d in weekdays if d < min(calendar) or d > max(calendar)
+            } - known_days
+        else:
+            unconfirmed = weekdays - known_days
+            candidates = weekdays & known_days
+        candidates |= {d for d in known_days if window_start <= d < today}
+        candidates |= unconfirmed
+
+    total = max(1, len(selected) * len(candidates))
+    done = 0
+    issues: list[IntegrityIssue] = []
+    for table in selected:
+        existing = partitions[table]
+        latest = max(existing) if existing else None
+        earliest = min(existing) if existing else None
+        if latest is None or (not deep and latest < window_start):
+            done += len(candidates)
+            if on_progress:
+                on_progress(done, total)
+            continue
+        for day in sorted(candidates):
+            done += 1
+            if on_progress:
+                on_progress(done, total)
+            if day not in existing:
+                if earliest is not None and day >= earliest:
+                    issues.append(
+                        IntegrityIssue(
+                            day=day,
+                            table=table,
+                            kind="unconfirmed" if day in unconfirmed else "missing",
+                            reason="交易日历不可用, 该日期是否开市尚未确认"
+                            if day in unconfirmed
+                            else "交易日日K缺失",
+                        )
+                    )
+                continue
+            frame = storage.read_daily(table, start=day, end=day)
+            issue = inspect_daily_frame(table, day, frame, deep=deep)
+            if issue is not None:
+                issues.append(issue)
+    issues.sort(key=lambda i: (i.day, i.table))
+    return issues
+
+
 def earliest_issue_day(
     issues: list[IntegrityIssue],
     tables: Iterable[str] | None = None,
 ) -> date | None:
     """坏分区中最早的一天; tables 限定参与的表族 (None=全部)。"""
-    scoped = (
-        [i for i in issues if i.table in tables] if tables is not None else issues
-    )
+    scoped = [i for i in issues if i.table in tables] if tables is not None else issues
     return min((i.day for i in scoped), default=None)
 
 
@@ -541,7 +729,7 @@ def repair_backoff_remaining_s(data_dir: Path, start_date: date) -> float:
     except (OSError, json.JSONDecodeError):
         return 0.0
     last = (payload.get("last_attempt") or {}).get(start_date.isoformat())
-    if not isinstance(last, (int, float)):
+    if not isinstance(last, int | float):
         return 0.0
     elapsed = time.time() - float(last)
     if elapsed >= INTEGRITY_REPAIR_BACKOFF_S:
@@ -605,8 +793,11 @@ def describe_issues(issues: list[IntegrityIssue]) -> str:
     for (table, kind), days in groups.items():
         day_text = "、".join(d.isoformat() for d in sorted(days))
         reason = {
-            "snapshot": "停机前的盘中快照", "missing": "缺失",
-            "corrupt": "文件损坏或为空", "invalid": "日K数值异常", "unconfirmed": "缺失待核实",
+            "snapshot": "停机前的盘中快照",
+            "missing": "缺失",
+            "corrupt": "文件损坏或为空",
+            "invalid": "日K数值异常",
+            "unconfirmed": "缺失待核实",
         }.get(kind, "需要检查")
         parts.append(f"{labels.get(table, '日K')}：{day_text} 的数据为{reason}")
     return "；".join(parts)
@@ -632,21 +823,40 @@ def launch_integrity_repair(
     调度自适应: 调用方在事件循环内 (API 端点) → executor 后台执行;
     无事件循环 (boot Timer 线程) → 独立 daemon 线程执行。
     """
-    import asyncio
-    import threading
-
     repo = getattr(app_state, "repo", None)
     capset = getattr(app_state, "capabilities", None)
-    if repo is None or capset is None:
+    if not _can_launch_repair(repo, capset, start_date, reason):
         return None, False
+
+    from app.services.pipeline_jobs import job_store
+
+    job_id, is_new = job_store.create()
+    if not is_new:
+        return job_id, False
+    with contextlib.suppress(Exception):
+        store = repo.store if repo is not None else None
+        if store is not None:
+            _record_repair_attempt(store.data_dir, start_date)
+
+    execute = _build_repair_runner(app_state, repo, capset, job_store, job_id)
+    _dispatch_repair_job(job_id, execute)
+    logger.warning(
+        "integrity: 自动修复任务启动 job=%s start=%s reason=%s", job_id, start_date, reason
+    )
+    return job_id, True
+
+
+def _can_launch_repair(repo, capset, start_date: date, reason: str) -> bool:
+    if repo is None or capset is None:
+        return False
     try:
         from app.tickflow.capabilities import Cap
 
         if not capset.has(Cap.KLINE_DAILY_BATCH):
             logger.info("integrity repair skipped: no KLINE_DAILY_BATCH capability")
-            return None, False
+            return False
     except Exception:  # noqa: BLE001
-        return None, False
+        return False
 
     try:
         remaining = repair_backoff_remaining_s(repo.store.data_dir, start_date)
@@ -656,28 +866,27 @@ def launch_integrity_repair(
         logger.warning(
             "integrity: 自动修复退避中 (start=%s, 剩余 %.0f 分钟, reason=%s), 跳过。"
             "上次修复未成功多为数据源拉取失败, 可稍后自动重试或在数据页手动修正",
-            start_date, remaining / 60, reason,
+            start_date,
+            remaining / 60,
+            reason,
         )
-        return None, False
+        return False
+    return True
 
+
+def _build_repair_runner(app_state, repo, capset, job_store, job_id: str):
     from app.services.pipeline_jobs import (
         JobCancelledError,
-        job_store,
         release_run_slot,
         run_with_capacity,
         try_acquire_run_slot,
     )
 
-    job_id, is_new = job_store.create()
-    if not is_new:
-        return job_id, False
-
-    with contextlib.suppress(Exception):
-        _record_repair_attempt(repo.store.data_dir, start_date)
     qs = getattr(app_state, "quote_service", None)
 
-    def progress(stage: str, pct: int, msg: str,
-                 stage_pct: int | None = None, skip_log: bool = False) -> None:
+    def progress(
+        stage: str, pct: int, msg: str, stage_pct: int | None = None, skip_log: bool = False
+    ) -> None:
         job_store.progress(job_id, stage, pct, msg, stage_pct=stage_pct, skip_log=skip_log)
 
     def _run() -> dict:
@@ -702,7 +911,7 @@ def launch_integrity_repair(
                 job_store.succeed(job_id, result)
         except JobCancelledError:
             pass  # 已由 terminate() 标记失败
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.exception("integrity repair failed: job_id=%s", job_id)
             job_store.fail(job_id, str(e))
         finally:
@@ -712,20 +921,24 @@ def launch_integrity_repair(
 
                 invalidate_storage_cache()
 
+    return _execute
+
+
+def _dispatch_repair_job(job_id: str, execute) -> None:
+    import asyncio
+    import threading
+
     try:
         loop = asyncio.get_running_loop()
 
         async def task() -> None:
-            await loop.run_in_executor(None, _execute)
+            await loop.run_in_executor(None, execute)
 
-        asyncio.create_task(task())
+        bg_task = asyncio.create_task(task())
+        _repair_tasks.add(bg_task)
+        bg_task.add_done_callback(_repair_tasks.discard)
     except RuntimeError:
-        threading.Thread(
-            target=_execute, daemon=True, name=f"integrity-repair-{job_id[:8]}"
-        ).start()
-
-    logger.warning("integrity: 自动修复任务启动 job=%s start=%s reason=%s", job_id, start_date, reason)
-    return job_id, True
+        threading.Thread(target=execute, daemon=True, name=f"integrity-repair-{job_id[:8]}").start()
 
 
 def boot_integrity_check(app_state) -> None:
@@ -738,7 +951,11 @@ def boot_integrity_check(app_state) -> None:
     if repo is None:
         return
     try:
-        issues = [i for i in scan_recent_integrity(repo.store.data_dir) if i.table in active_daily_tables()]
+        issues = [
+            i
+            for i in scan_recent_integrity(repo.store.data_dir)
+            if i.table in active_daily_tables()
+        ]
     except Exception as e:  # noqa: BLE001
         logger.warning("boot integrity scan failed: %s", e)
         return
@@ -746,16 +963,21 @@ def boot_integrity_check(app_state) -> None:
         logger.info("boot integrity check: 近 %d 个交易日数据完整", SCAN_WINDOW_DAYS)
         return
     earliest = earliest_issue_day(issues)
-    logger.warning("boot integrity check: %s (共 %d 个坏分区)", describe_issues(issues), len(issues))
-    if not within_auto_repair_window(earliest):
+    logger.warning(
+        "boot integrity check: %s (共 %d 个坏分区)", describe_issues(issues), len(issues)
+    )
+    if earliest is None or not within_auto_repair_window(earliest):
         logger.warning(
             "integrity: 最早坏日 %s 超出自动修复窗口(%d 天), 请在数据页手动执行数据修正",
-            earliest, AUTO_REPAIR_MAX_LAG_DAYS,
+            earliest,
+            AUTO_REPAIR_MAX_LAG_DAYS,
         )
         return
     with contextlib.suppress(Exception):
         launch_integrity_repair(
-            app_state, earliest, "boot_integrity_check",
+            app_state,
+            earliest,
+            "boot_integrity_check",
             symbols=_stock_snapshot_symbols(issues),
         )
 
@@ -765,9 +987,6 @@ def _stock_snapshot_symbols(issues: list[IntegrityIssue]) -> list[str] | None:
     if any(i.table == "kline_daily" and (i.kind != "snapshot" or not i.symbols) for i in issues):
         return None
     symbols = {
-        s
-        for i in issues
-        if i.table == "kline_daily" and i.kind == "snapshot"
-        for s in i.symbols
+        s for i in issues if i.table == "kline_daily" and i.kind == "snapshot" for s in i.symbols
     }
     return sorted(symbols) if symbols else None

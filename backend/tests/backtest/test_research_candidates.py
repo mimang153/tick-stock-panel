@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -40,7 +41,7 @@ def test_candidate_crud_and_atomic_file(tmp_path):
 
 def test_candidate_mining_provenance_is_idempotent_and_conflict_safe(tmp_path):
     store = CandidateStore(tmp_path)
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "origin_run_id": "mining-run-idempotent",
         "candidate_signature": "factor-signature",
         "kind": "strategy",
@@ -64,9 +65,7 @@ def test_candidate_mining_provenance_is_idempotent_and_conflict_safe(tmp_path):
     assert second == first
     assert len(store.list()) == 1
     with pytest.raises(CandidateValidationError, match="冲突"):
-        store.create_or_get_by_provenance(
-            **{**kwargs, "metrics": {"oos_sharpe": 1.1}}
-        )
+        store.create_or_get_by_provenance(**{**kwargs, "metrics": {"oos_sharpe": 1.1}})
     assert store.list() == [first]
 
 

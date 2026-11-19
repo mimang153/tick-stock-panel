@@ -4,6 +4,7 @@
 端点只透传前端展示需要的 id / context_length / discount_rate / 首档单价,
 并以 models 纯 id 列表保持向后兼容。
 """
+
 from __future__ import annotations
 
 import httpx
@@ -63,11 +64,15 @@ async def test_sponsor_models_returns_trimmed_pricing(monkeypatch):
                 "id": "openai/gpt-6.1-sol",
                 "object": "model",
                 "context_length": 1050000,
-                "pricing": {"discountRate": 1.0, "input": {"amount": 0.002}, "output": {"amount": 0.01}},
+                "pricing": {
+                    "discountRate": 1.0,
+                    "input": {"amount": 0.002},
+                    "output": {"amount": 0.01},
+                },
             },
-            {"id": "", "object": "model"},          # 空 id 剔除
-            {"object": "model"},                     # 无 id 剔除
-            "garbage",                               # 非 dict 剔除
+            {"id": "", "object": "model"},  # 空 id 剔除
+            {"object": "model"},  # 无 id 剔除
+            "garbage",  # 非 dict 剔除
         ],
     }
     monkeypatch.setattr(httpx, "AsyncClient", _fake_upstream(payload))
@@ -111,45 +116,49 @@ async def test_sponsor_models_tolerates_missing_pricing(monkeypatch):
 
     result = await settings_api.list_sponsor_models()
 
-    assert result["items"] == [{
-        "id": "vendor/plain-model",
-        "context_length": None,
-        "discount_rate": 1.0,
-        "input_price": None,
-        "output_price": None,
-        "busy_discount_rate": None,
-        "offpeak_discount_rate": None,
-        "offpeak_label": None,
-        "current_band": None,
-        "current_discount_rate": None,
-    }]
+    assert result["items"] == [
+        {
+            "id": "vendor/plain-model",
+            "context_length": None,
+            "discount_rate": 1.0,
+            "input_price": None,
+            "output_price": None,
+            "busy_discount_rate": None,
+            "offpeak_discount_rate": None,
+            "offpeak_label": None,
+            "current_band": None,
+            "current_discount_rate": None,
+        }
+    ]
 
 
 @pytest.mark.asyncio
 async def test_sponsor_models_passes_through_busy_offpeak_bands(monkeypatch):
     """忙闲时定价: 透传 BUSY / OFF_PEAK 两档折扣、时段说明与当前所处档位。"""
     payload = {
-        "data": [{
-            "id": "deepseek/deepseek-v4.1-flash",
-            "context_length": 1048576,
-            "pricing": {
-                "discountRate": 0.6,
-                "input": {"amount": 0.000295},
-                "output": {"amount": 0.001177},
-                "timePricing": {
-                    "currentBand": "OFF_PEAK",
-                    "timeBands": [
-                        {"code": "BUSY", "discountRate": 0.6, "current": False},
-                        {
-                            "code": "OFF_PEAK",
-                            "discountRate": 0.3,
-                            "current": True,
-                            "label": "00:00-09:00、12:00-14:00、18:00-00:00",
-                        },
-                    ],
+        "data": [
+            {
+                "id": "deepseek/deepseek-v4.1-flash",
+                "context_length": 1048576,
+                "pricing": {
+                    "discountRate": 0.6,
+                    "input": {"amount": 0.000295},
+                    "output": {"amount": 0.001177},
+                    "timePricing": {
+                        "currentBand": "OFF_PEAK",
+                        "timeBands": [
+                            {"code": "BUSY", "discountRate": 0.6, "current": False},
+                            {
+                                "code": "OFF_PEAK",
+                                "discountRate": 0.3,
+                                "current": True,
+                                "label": "00:00-09:00、12:00-14:00、18:00-00:00",
+                            },
+                        ],
+                    },
                 },
-            },
-        }],
+            }
+        ],
     }
     monkeypatch.setattr(httpx, "AsyncClient", _fake_upstream(payload))
 

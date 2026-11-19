@@ -1,4 +1,5 @@
 """ExtConfigStore.load_all 签名缓存测试 — 配置未变不重复读盘, 变更后立即可见, 返回副本。"""
+
 from __future__ import annotations
 
 import json
@@ -27,8 +28,9 @@ def _patched_loads(monkeypatch, counter: dict):
 
 
 def _config(cid: str, label: str) -> ExtConfig:
-    return ExtConfig(id=cid, label=label, mode="snapshot",
-                     fields=[ExtField(name="score", dtype="float")])
+    return ExtConfig(
+        id=cid, label=label, mode="snapshot", fields=[ExtField(name="score", dtype="float")]
+    )
 
 
 def test_second_load_all_hits_cache_without_disk_parse(tmp_path, monkeypatch):

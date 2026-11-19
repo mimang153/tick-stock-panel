@@ -1,4 +1,5 @@
 """盘后管道 API — 异步触发 + 进度跟踪。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +8,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 
+from app.api.data import invalidate_storage_cache
 from app.jobs import daily_pipeline
 from app.services.pipeline_jobs import (
     JobCancelledError,
@@ -15,10 +17,12 @@ from app.services.pipeline_jobs import (
     run_with_capacity,
     try_acquire_run_slot,
 )
-from app.api.data import invalidate_storage_cache
 
 # 长时间任务专用线程池（隔离于 FastAPI 默认线程池，防止阻塞请求处理）
 _long_task_executor = _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="long-task")
+
+# 持有后台任务强引用，防止事件循环期间被 GC；完成后自动移除。
+_background_tasks: set[asyncio.Task] = set()
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +46,8 @@ async def trigger_pipeline_job(repo, capset, quote_service=None) -> dict:
     卡死判定按「进度停滞」而非总时长(慢带宽下长任务不会被误杀), 见 reap_stale。
     """
     return await _submit_job(
-        repo, quote_service,
+        repo,
+        quote_service,
         lambda progress: (lambda: daily_pipeline.run_now(repo, capset, on_progress=progress)),
     )
 
@@ -63,8 +68,9 @@ async def _submit_job(repo, quote_service, make_run) -> dict:
     if not is_new:
         return {"job_id": job_id, "reused": True}
 
-    def progress(stage: str, pct: int, msg: str, stage_pct: int | None = None,
-                 skip_log: bool = False) -> None:
+    def progress(
+        stage: str, pct: int, msg: str, stage_pct: int | None = None, skip_log: bool = False
+    ) -> None:
         job_store.progress(job_id, stage, pct, msg, stage_pct=stage_pct, skip_log=skip_log)
 
     run = make_run(progress)
@@ -89,21 +95,25 @@ async def _submit_job(repo, quote_service, make_run) -> dict:
                 finally:
                     repo.refresh_cache()
 
-            result = await loop.run_in_executor(_long_task_executor, run_with_capacity, job_id, _run)
+            result = await loop.run_in_executor(
+                _long_task_executor, run_with_capacity, job_id, _run
+            )
             job_store.succeed(job_id, result)
             invalidate_storage_cache()
         except JobCancelledError:
             # 已被 reap/手动取消终止: job 状态已由 terminate() 写为 failed,
             # 拉取线程在分块回调处自行退出, 这里无需(也无法)再写状态。
             logger.warning("pipeline job %s cancelled", job_id)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.exception("pipeline job failed")
             job_store.fail(job_id, str(e))
             invalidate_storage_cache()
         finally:
             release_run_slot(job_id)
 
-    asyncio.create_task(task())
+    bg_task = asyncio.create_task(task())
+    _background_tasks.add(bg_task)
+    bg_task.add_done_callback(_background_tasks.discard)
     return {"job_id": job_id, "reused": False}
 
 
@@ -127,7 +137,9 @@ async def run_adj_factor_now(request: Request) -> dict:
     return await _submit_job(
         repo,
         getattr(request.app.state, "quote_service", None),
-        lambda progress: (lambda: daily_pipeline.run_adj_factor_sync(repo, capset, on_progress=progress)),
+        lambda progress: (
+            lambda: daily_pipeline.run_adj_factor_sync(repo, capset, on_progress=progress)
+        ),
     )
 
 

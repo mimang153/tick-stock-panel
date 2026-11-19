@@ -54,9 +54,7 @@ class _FakeFinClient:
 
 
 def _provider_with(monkeypatch, fake):
-    monkeypatch.setattr(
-        fp, "fuyao_client", type("M", (), {"FuyaoClient": lambda **kw: fake})
-    )
+    monkeypatch.setattr(fp, "fuyao_client", type("M", (), {"FuyaoClient": lambda **kw: fake}))
     monkeypatch.setattr(fp, "get_api_key", lambda: "test-key")
     monkeypatch.setattr(fp, "_HIST_INTERVAL_S", 0)
     return FuyaoProvider()
@@ -88,9 +86,7 @@ def test_income_mapping_canonical_columns(monkeypatch):
     assert row["announce_date"] == "2026-08-15"
     assert row["revenue"] == pytest.approx(_INCOME_ROW["operating_income"])
     assert row["net_income"] == pytest.approx(_INCOME_ROW["net_profit"])
-    assert row["net_income_attributable"] == pytest.approx(
-        _INCOME_ROW["parent_holder_net_profit"]
-    )
+    assert row["net_income_attributable"] == pytest.approx(_INCOME_ROW["parent_holder_net_profit"])
     assert row["basic_eps"] == 35.57
     # 扩展列: 扶摇独有数字字段原名透传; 字符串元数据不透传
     assert row["operating_expenses"] == 50000000000.0
@@ -123,9 +119,7 @@ def test_balance_and_cashflow_mapping(monkeypatch):
         "invest_cash_flow_net": -3000000000.0,
         "pay_dividends_profits_interest_cash": 64000000000.0,  # 扶摇独有 → 扩展列
     }
-    fake = _FakeFinClient(
-        statements={"balance_sheet": [balance], "cash_flow": [cashflow]}
-    )
+    fake = _FakeFinClient(statements={"balance_sheet": [balance], "cash_flow": [cashflow]})
     provider = _provider_with(monkeypatch, fake)
     bal = provider.get_financials("balance_sheet", ["600519.SH"]).to_dicts()[0]
     assert bal["total_assets"] == pytest.approx(balance["assets_total"])
@@ -157,8 +151,7 @@ def test_income_sparse_column_after_100_null_rows(monkeypatch):
     Null 列, 遇到中信银行的 6.1199e10 即 append 失败, income 整表从未写入。
     """
     rows_by_symbol = {
-        f"{600000 + i:06d}.SH": dict(_INCOME_ROW, interest_expenses=None)
-        for i in range(100)
+        f"{600000 + i:06d}.SH": dict(_INCOME_ROW, interest_expenses=None) for i in range(100)
     }
     rows_by_symbol["601998.SH"] = dict(_INCOME_ROW, interest_expenses=6.1199e10)
     provider = _provider_with(monkeypatch, _PerSymbolIncomeClient(rows_by_symbol))
@@ -265,13 +258,8 @@ def test_metrics_sparse_column_after_100_rows(monkeypatch):
         "indicators": [{"index_id": "index_weighted_avg_roe", "value": "10.5"}],
     }
     # 前 100 只: 无 basic_eps (eps_basic=None), 仅公共指标 roe
-    rows_by_symbol = {
-        f"{600000 + i:06d}.SH": dict(_INCOME_ROW, basic_eps=None)
-        for i in range(100)
-    }
-    indicators_by_symbol = {
-        f"{600000 + i:06d}.SH": [common] for i in range(100)
-    }
+    rows_by_symbol = {f"{600000 + i:06d}.SH": dict(_INCOME_ROW, basic_eps=None) for i in range(100)}
+    indicators_by_symbol = {f"{600000 + i:06d}.SH": [common] for i in range(100)}
     # 第 101 只 (银行): basic_eps 有值 + 行业特有指标首次出现
     rows_by_symbol["601998.SH"] = dict(_INCOME_ROW, basic_eps=2.31)
     indicators_by_symbol["601998.SH"] = [
@@ -295,10 +283,7 @@ def test_metrics_sparse_column_after_100_rows(monkeypatch):
     assert df.schema["financial_expense"] == pl.Float64
     bank = df.filter(pl.col("symbol") == "601998.SH").row(0, named=True)
     assert bank["financial_expense"] == pytest.approx(6.1199e10)
-    assert (
-        df.filter(pl.col("symbol") != "601998.SH")["financial_expense"].null_count()
-        == 100
-    )
+    assert df.filter(pl.col("symbol") != "601998.SH")["financial_expense"].null_count() == 100
     # 公共列 None→值 不再触发 ComputeError (修复前: "could not append value")
     assert df.schema["eps_basic"] == pl.Float64
     assert bank["eps_basic"] == 2.31
@@ -317,36 +302,42 @@ def test_shares_returns_empty(monkeypatch):
 
 def test_merge_fills_missing_cells_from_old_rows():
     """逐列填空: 同报告期新行缺的列由旧行补齐, 有值则覆盖 (并集共存语义)。"""
-    old = pl.DataFrame({
-        "symbol": ["600519.SH", "600519.SH"],
-        "period_end": ["2026-03-31", "2026-06-30"],
-        "announce_date": ["2026-04-20", "2026-08-10"],
-        "diluted_eps": [68.1, 70.2],       # tickflow 提供, fuyao 没有
-        "net_income": [280.0, 460.0],
-    })
-    new = pl.DataFrame({
-        "symbol": ["600519.SH"],
-        "period_end": ["2026-06-30"],
-        "announce_date": ["2026-08-15"],   # 更晚公告 → 该期以新行为基准
-        "net_income": [461.5],             # 修正值覆盖
-        # diluted_eps 缺失 → 由旧行 70.2 补齐
-        "bps": [200.99],                   # fuyao 扩展列, 旧行没有
-    })
+    old = pl.DataFrame(
+        {
+            "symbol": ["600519.SH", "600519.SH"],
+            "period_end": ["2026-03-31", "2026-06-30"],
+            "announce_date": ["2026-04-20", "2026-08-10"],
+            "diluted_eps": [68.1, 70.2],  # tickflow 提供, fuyao 没有
+            "net_income": [280.0, 460.0],
+        }
+    )
+    new = pl.DataFrame(
+        {
+            "symbol": ["600519.SH"],
+            "period_end": ["2026-06-30"],
+            "announce_date": ["2026-08-15"],  # 更晚公告 → 该期以新行为基准
+            "net_income": [461.5],  # 修正值覆盖
+            # diluted_eps 缺失 → 由旧行 70.2 补齐
+            "bps": [200.99],  # fuyao 扩展列, 旧行没有
+        }
+    )
     merged = _merge_report_history(old, new).to_dicts()
     assert len(merged) == 2
     q2 = next(r for r in merged if r["period_end"] == "2026-06-30")
-    assert q2["net_income"] == pytest.approx(461.5)   # 新值覆盖
-    assert q2["diluted_eps"] == pytest.approx(70.2)   # 旧行补齐
-    assert q2["bps"] == pytest.approx(200.99)         # 扩展列并入
+    assert q2["net_income"] == pytest.approx(461.5)  # 新值覆盖
+    assert q2["diluted_eps"] == pytest.approx(70.2)  # 旧行补齐
+    assert q2["bps"] == pytest.approx(200.99)  # 扩展列并入
     q1 = next(r for r in merged if r["period_end"] == "2026-03-31")
-    assert q1["diluted_eps"] == pytest.approx(68.1)   # 未触碰期原样保留
+    assert q1["diluted_eps"] == pytest.approx(68.1)  # 未触碰期原样保留
     # 旧公告覆盖新公告的倒序场景: announce 早的行不覆盖晚的
-    reversed_new = pl.DataFrame({
-        "symbol": ["600519.SH"],
-        "period_end": ["2026-06-30"],
-        "announce_date": ["2026-08-01"],
-        "net_income": [999.0],
-    })
+    reversed_new = pl.DataFrame(
+        {
+            "symbol": ["600519.SH"],
+            "period_end": ["2026-06-30"],
+            "announce_date": ["2026-08-01"],
+            "net_income": [999.0],
+        }
+    )
     q2b = _merge_report_history(old, reversed_new).to_dicts()[1]
     # 公告更晚的 old 行 (08-10) 胜出, 早公告的新行不覆盖 → 业绩修正以最新公告为准
     assert q2b["net_income"] == pytest.approx(460.0)

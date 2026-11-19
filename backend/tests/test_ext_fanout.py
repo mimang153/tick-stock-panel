@@ -4,6 +4,7 @@
 单条目失败容忍(重试后跳过)、全部条目失败报错、必填项校验、
 以及端到端落盘 (config.json + parquet, 走 fetch_and_ingest 通用路径)。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -28,9 +29,7 @@ _AUTH_HEADER = {"X-api-key": "test-key"}
 
 
 def _ok(items: list[dict]) -> httpx.Response:
-    return httpx.Response(
-        200, json={"code": 0, "message": "success", "data": {"item": items}}
-    )
+    return httpx.Response(200, json={"code": 0, "message": "success", "data": {"item": items}})
 
 
 def _mock_transport(
@@ -115,21 +114,22 @@ def mock_http(monkeypatch: pytest.MonkeyPatch):
     同时注入测试 Key: _apply_auth 在缺凭据时 fail-closed 报错, 这是生产要的
     行为, 测 fanout 逻辑时需补上凭据。
     """
-    import app.services.ext_pull as ext_pull
     import app.services.ext_data as ext_data
+    import app.services.ext_pull as ext_pull
 
-    monkeypatch.setattr(
-        ext_data, "get_ext_api_key", lambda config_id: "test-key"
-    )
+    monkeypatch.setattr(ext_data, "get_ext_api_key", lambda config_id: "test-key")
 
     def install(transport: httpx.MockTransport):
         real_request = ext_pull._request_json
 
         async def patched(pull, config_id, day=None, extra_params=None, *, url_override=None):
             # 复用真实实现的 URL/鉴权拼装, 只把 transport 换成 Mock
-            from app.services.ext_pull import _apply_auth, _append_query_params, _with_date_param
+            from app.services.ext_pull import _append_query_params, _apply_auth, _with_date_param
+
             url = url_override or (
-                _with_date_param(pull.url, pull.date_param, day, pull.date_format) if day else pull.url
+                _with_date_param(pull.url, pull.date_param, day, pull.date_format)
+                if day
+                else pull.url
             )
             if extra_params:
                 url = _append_query_params(url, extra_params)
@@ -160,6 +160,7 @@ def test_clean_label_drops_missing_value_placeholders() -> None:
 
 def test_fanout_missing_required_keys_raises() -> None:
     config = _concept_config()
+    assert config.pull is not None and config.pull.fanout is not None
     config.pull.fanout.pop("member_id_field")
     with pytest.raises(ValueError, match="缺少必填项"):
         asyncio.run(fetch_fanout_rows(config))
@@ -247,9 +248,7 @@ def test_fanout_dedupes_repeated_labels(mock_http) -> None:
 # ---- 端到端落盘 (通用写入链) ----
 
 
-def test_fanout_rows_persist_via_generic_writer(
-    tmp_path: Path, mock_http
-) -> None:
+def test_fanout_rows_persist_via_generic_writer(tmp_path: Path, mock_http) -> None:
     mock_http(_mock_transport({"cn_concept": _CATALOG_CN_CONCEPT}, _CONSTITUENTS_BY_CODE))
     config = _concept_config()
 
@@ -275,9 +274,7 @@ def test_fanout_industry_separator(mock_http) -> None:
             {"H1.TI": [{"thscode": "600519.SH", "name": "贵州茅台"}]},
         )
     )
-    config = _concept_config(
-        url_tag="industry", value_col="所属同花顺行业", separator="-"
-    )
+    config = _concept_config(url_tag="industry", value_col="所属同花顺行业", separator="-")
     rows = asyncio.run(fetch_fanout_rows(config))
     assert rows[0]["所属同花顺行业"] == "金融"
 
@@ -290,10 +287,12 @@ def test_pull_config_roundtrip_preserves_fanout(tmp_path: Path) -> None:
 
     loaded = ExtConfigStore(tmp_path).get("ext_gn_ths")
     assert loaded is not None and loaded.pull is not None
+    assert config.pull is not None
     assert loaded.pull.fanout == config.pull.fanout
 
 
 # ---- 429 限流: 配额窗口退避 + 失败补拉轮 ----
+
 
 @pytest.fixture(autouse=True)
 def _fast_fanout_sleep(monkeypatch: pytest.MonkeyPatch):
@@ -333,9 +332,9 @@ def test_fanout_429_replenish_round_recovers_entries(mock_http) -> None:
     rows = asyncio.run(fetch_fanout_rows(_concept_config()))
 
     labels = {r["所属概念"] for r in rows}
-    assert any("新能源汽车" in v for v in labels)      # B2 补拉成功
-    assert any("白酒概念" in v for v in labels)        # B1 不受影响
-    assert calls["B2.TI"] >= 3                          # 主轮 2 次 + 补拉至少 1 次
+    assert any("新能源汽车" in v for v in labels)  # B2 补拉成功
+    assert any("白酒概念" in v for v in labels)  # B1 不受影响
+    assert calls["B2.TI"] >= 3  # 主轮 2 次 + 补拉至少 1 次
 
 
 def test_fanout_429_persistent_gives_up_after_replenish_rounds(mock_http) -> None:
@@ -346,8 +345,8 @@ def test_fanout_429_persistent_gives_up_after_replenish_rounds(mock_http) -> Non
     rows = asyncio.run(fetch_fanout_rows(_concept_config()))
 
     labels = {r["所属概念"] for r in rows}
-    assert any("白酒概念" in v for v in labels)                    # B1 正常
-    assert not any("新能源汽车" in v for v in labels)               # B2 放弃
+    assert any("白酒概念" in v for v in labels)  # B1 正常
+    assert not any("新能源汽车" in v for v in labels)  # B2 放弃
     assert calls["B2.TI"] == 2 * 4  # retries=1 → 2 次/轮 × (主轮+3 补轮)
 
 

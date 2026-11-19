@@ -8,10 +8,10 @@
   - free 档(免费有效 key)      → TickFlow.free()(key 被 SDK 忽略,运行时走 free-api)
   - starter/pro/expert(付费 key) → TickFlow(api_key=key, base_url)
 """
+
 from __future__ import annotations
 
 import logging
-import os
 
 from tickflow import AsyncTickFlow, TickFlow
 
@@ -19,15 +19,11 @@ from app import secrets_store
 
 logger = logging.getLogger(__name__)
 
-# SDK 默认超时配置 (见 tickflow/_base_client.py): timeout=30s, max_retries=3。
-# 单次请求最坏 4×30s + 退避 ≈ 127s。日志中标注此值, 便于在卡死时对照耗时。
+# SDK 默认 timeout=30s×3 重试, 最坏 ≈127s; 日志标注此值便于对照卡死耗时。
 
 _sync_client: TickFlow | None = None
 _async_client: AsyncTickFlow | None = None
 _paid_realtime_client: TickFlow | None = None
-
-
-# ===== 服务器归属判定 =====
 
 # free-api 服务器默认节点(SDK 默认值),none/free 档运行时走这里。
 FREE_ENDPOINT = "https://free-api.tickflow.org"
@@ -45,6 +41,7 @@ def _should_use_free_server() -> bool:
         return True
     # 有 key 时按探测出的档位判定(避免读 capabilities.json 在首次启动前未生成的边界)
     from app.tickflow.policy import base_tier_name
+
     return base_tier_name() in ("none", "free")
 
 
@@ -116,6 +113,7 @@ def current_mode() -> str:
     if not secrets_store.get_tickflow_key():
         return "none"
     from app.tickflow.policy import base_tier_name
+
     tier = base_tier_name()
     if tier in ("none", "free"):
         return "free" if tier == "free" else "none"
@@ -130,7 +128,6 @@ def current_endpoint() -> str:
     """
     if _should_use_free_server():
         return FREE_ENDPOINT
-    # 自定义端点(付费模式测速切换后):优先返回
     base = _base_url()
     if base:
         return base.rstrip("/")

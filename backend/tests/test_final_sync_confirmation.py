@@ -8,9 +8,11 @@
   达到边界 (含容差) 才落盘/评估监控, 否则只更新展示缓存;
 - _final_boundary_ms/_past_final_deadline 提供边界与重试窗口 (收盘 15:00/15:30)。
 """
+
 from __future__ import annotations
 
-from datetime import datetime, time as dt_time
+from datetime import datetime
+from datetime import time as dt_time
 
 import pytest
 
@@ -27,8 +29,11 @@ def _record(ts_ms: int) -> dict:
     return {
         "symbol": "002084.SZ",
         "last_price": 7.07,
-        "open": 7.00, "high": 7.10, "low": 6.95,
-        "volume": 100_000, "amount": 707_000.0,
+        "open": 7.00,
+        "high": 7.10,
+        "low": 6.95,
+        "volume": 100_000,
+        "amount": 707_000.0,
         "timestamp": ts_ms,
     }
 
@@ -44,6 +49,7 @@ class _StubRepo:
 
     def get_etf_instruments(self):
         import polars as pl
+
         return pl.DataFrame()
 
     def flush_live_daily(self, df) -> None:
@@ -62,8 +68,16 @@ def service(monkeypatch) -> tuple[QuoteService, _StubRepo, dict]:
     monkeypatch.setattr(qs_module, "_persist_last_fetch", lambda ms: None)
     monkeypatch.setattr(qs, "_update_volume_delta", lambda *a, **k: None)
     monkeypatch.setattr(qs, "_evaluate_monitors", lambda *a, **k: None)
-    monkeypatch.setattr(qs, "_broadcast_quote_updated", lambda: events.__setitem__("broadcast", events["broadcast"] + 1))
-    monkeypatch.setattr(qs, "_flush_live_enriched", lambda *a, **k: events.__setitem__("enriched", events["enriched"] + 1))
+    monkeypatch.setattr(
+        qs,
+        "_broadcast_quote_updated",
+        lambda: events.__setitem__("broadcast", events["broadcast"] + 1),
+    )
+    monkeypatch.setattr(
+        qs,
+        "_flush_live_enriched",
+        lambda *a, **k: events.__setitem__("enriched", events["enriched"] + 1),
+    )
     return qs, repo, events
 
 
@@ -73,13 +87,15 @@ def test_final_snapshot_before_boundary_skips_disk(service) -> None:
     boundary = _beijing_ms(15, 0)
 
     qs._process_full_market_records(
-        [_record(boundary - 60_000)], t0=0.0, now_ts=0.0,
+        [_record(boundary - 60_000)],
+        t0=0.0,
+        now_ts=0.0,
         final_boundary_ms=boundary,
     )
 
     assert qs._last_final_confirmed is False
-    assert repo.calls == []          # 未写 kline_daily
-    assert events["enriched"] == 0   # 未写 enriched
+    assert repo.calls == []  # 未写 kline_daily
+    assert events["enriched"] == 0  # 未写 enriched
     assert events["broadcast"] == 1  # 展示缓存路径仍走通
 
 
@@ -89,7 +105,9 @@ def test_final_snapshot_after_boundary_writes(service) -> None:
     boundary = _beijing_ms(15, 0)
 
     qs._process_full_market_records(
-        [_record(boundary + 30_000)], t0=0.0, now_ts=0.0,
+        [_record(boundary + 30_000)],
+        t0=0.0,
+        now_ts=0.0,
         final_boundary_ms=boundary,
     )
 
@@ -106,7 +124,10 @@ def test_snapshot_without_timestamp_never_confirmed(service) -> None:
     rec.pop("timestamp")
 
     qs._process_full_market_records(
-        [rec], t0=0.0, now_ts=0.0, final_boundary_ms=_beijing_ms(15, 0),
+        [rec],
+        t0=0.0,
+        now_ts=0.0,
+        final_boundary_ms=_beijing_ms(15, 0),
     )
 
     assert qs._last_final_confirmed is False
@@ -119,7 +140,9 @@ def test_normal_poll_ignores_boundary(service) -> None:
     qs, repo, events = service
 
     qs._process_full_market_records(
-        [_record(_beijing_ms(14, 59))], t0=0.0, now_ts=0.0,
+        [_record(_beijing_ms(14, 59))],
+        t0=0.0,
+        now_ts=0.0,
     )
 
     assert qs._last_final_confirmed is None

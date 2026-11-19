@@ -8,6 +8,7 @@
 指数分时 /api/index/minute (#308) 已改用 trading_day.is_trading_day() 的三态口径:
 False = 确定休市才回退, None = 未知维持原判据。这里对齐同一口径。
 """
+
 from __future__ import annotations
 
 import json
@@ -24,19 +25,21 @@ from app.market_time import CN_TZ
 from app.services import preferences, trading_day
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
-HOLIDAY = date(2026, 10, 1)          # 周四, 国庆休市
-LAST_SESSION = date(2026, 9, 30)      # 节前最后一个交易日
+HOLIDAY = date(2026, 10, 1)  # 周四, 国庆休市
+LAST_SESSION = date(2026, 9, 30)  # 节前最后一个交易日
 MORNING = datetime(2026, 10, 1, 10, 0, tzinfo=CN_TZ)
 SYMBOL = "600519.SH"
 
 
 def _session(day: date, symbol: str = SYMBOL) -> pl.DataFrame:
     start = datetime(day.year, day.month, day.day, 9, 31)
-    return pl.DataFrame({
-        "symbol": [symbol] * 240,
-        "datetime": [start + timedelta(minutes=i) for i in range(240)],
-        "close": [100.0] * 240,
-    })
+    return pl.DataFrame(
+        {
+            "symbol": [symbol] * 240,
+            "datetime": [start + timedelta(minutes=i) for i in range(240)],
+            "close": [100.0] * 240,
+        }
+    )
 
 
 @pytest.fixture
@@ -64,8 +67,8 @@ def _batch_request() -> MagicMock:
     repo = MagicMock()
     repo.get_etf_symbol_set.return_value = set()
     sessions = {LAST_SESSION: _session(LAST_SESSION)}
-    repo.get_minute_batch.side_effect = (
-        lambda syms, day, asset_type="stock": sessions.get(day, pl.DataFrame())
+    repo.get_minute_batch.side_effect = lambda syms, day, asset_type="stock": sessions.get(
+        day, pl.DataFrame()
     )
     repo.latest_minute_date_global.return_value = LAST_SESSION
     repo.latest_daily_date.return_value = LAST_SESSION
@@ -122,8 +125,9 @@ class _FakeRepo:
     def __init__(self) -> None:
         # /minute 现读取 repo.store.data_dir 判断分钟基准标记 (未标记目录即旧行为)
         import tempfile
-        from types import SimpleNamespace
         from pathlib import Path
+        from types import SimpleNamespace
+
         self.store = SimpleNamespace(data_dir=Path(tempfile.mkdtemp()))
 
     def resolve_asset_type(self, symbol: str) -> str:
@@ -182,6 +186,8 @@ def test_minute_explicit_date_is_not_replaced(market) -> None:
     set_verdict, _, _ = market
     set_verdict(False)
 
-    body = _client().get("/api/kline/minute", params={"symbol": SYMBOL, "date": "2026-10-01"}).json()
+    body = (
+        _client().get("/api/kline/minute", params={"symbol": SYMBOL, "date": "2026-10-01"}).json()
+    )
 
     assert body["date"] == "2026-10-01"

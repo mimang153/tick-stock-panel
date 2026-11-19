@@ -5,6 +5,7 @@
 
 隔离到临时偏好文件, 不污染真实偏好。
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -15,7 +16,7 @@ from app.services import preferences
 
 def main() -> None:
     prefs_path = Path(tempfile.mkdtemp()) / "preferences.json"
-    preferences._path = lambda: prefs_path  # noqa: SLF001 - demo 隔离
+    preferences._path = lambda: prefs_path
     preferences._invalidate_cache()
 
     print("== 复盘推送模式 review_push_mode ==")

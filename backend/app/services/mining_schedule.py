@@ -44,10 +44,12 @@ def beijing_now(now: datetime | None = None) -> datetime:
 
 
 def beijing_date(now: datetime | None = None) -> date:
+    """Return the Beijing calendar date for the given instant (or now)."""
     return beijing_now(now).date()
 
 
 def iso_week(value: date) -> tuple[int, int]:
+    """Return (ISO year, week) used as the weekly schedule run identity."""
     iso_year, week, _ = value.isocalendar()
     return iso_year, week
 
@@ -122,15 +124,20 @@ def _build_data_fingerprint_once(
 
 
 def mining_factor_snapshot(names: Iterable[str]) -> list[dict]:
+    """按计算顺序快照因子定义，作为挖掘指纹的一部分防止定义漂移。"""
     snapshot = []
     for fid in factor_calculation_order(names):
         spec = get_factor(fid)
         if spec is None:
             continue
         record = {
-            "id": fid, "version": spec.version, "formula": spec.formula_text,
-            "lang": spec.lang, "components": [[name, weight] for name, weight in spec.components],
-            "dependencies": sorted(spec.dependencies), "warmup_bars": spec.warmup_bars,
+            "id": fid,
+            "version": spec.version,
+            "formula": spec.formula_text,
+            "lang": spec.lang,
+            "components": [[name, weight] for name, weight in spec.components],
+            "dependencies": sorted(spec.dependencies),
+            "warmup_bars": spec.warmup_bars,
         }
         if spec.lang == "python":
             record["declared_warmup"] = spec.declared_warmup
@@ -139,6 +146,7 @@ def mining_factor_snapshot(names: Iterable[str]) -> list[dict]:
 
 
 def verify_mining_factor_snapshot(names: Iterable[str], fingerprint: Any) -> None:
+    """校验运行中因子定义未漂移；旧任务无快照时按当前注册状态放行。"""
     # 旧任务没有因子快照, 仍按当前注册状态校验。新任务只核对该候选实际用到的定义。
     if not isinstance(fingerprint, Mapping) or "factors" not in fingerprint:
         return
@@ -160,6 +168,7 @@ def verify_mining_factor_snapshot(names: Iterable[str], fingerprint: Any) -> Non
 
 
 def schedule_claim(day: date) -> str:
+    """生成周任务的稳定 run_id，保证同一 ISO 周重复触发只占用一个 run。"""
     iso_year, week = iso_week(day)
     return f"weekly-{iso_year}-W{week:02d}"
 
@@ -213,16 +222,21 @@ def run_weekly_mining(app_state: Any, *, now: datetime | None = None) -> dict[st
 
 
 def _prerequisite_error(repo: Any, request: dict[str, Any]) -> str | None:
+    """返回挖掘请求的阻塞原因；数据齐备时返回 None。在线读 CK，离线回退本地 marker。"""
     data_dir = Path(repo.store.data_dir)
     end = request.get("end")
     if end is None:
         return "stock enriched data is unavailable"
-    regime = regime_path(data_dir)
-    try:
-        if not regime.is_file() or regime.stat().st_size <= 0:
+    from app.storage.runtime import get_storage
+
+    if get_storage() is None:
+        # 离线路径仍以本地 regime parquet 为准。
+        regime = regime_path(data_dir)
+        try:
+            if not regime.is_file() or regime.stat().st_size <= 0:
+                return "regime data is unavailable"
+        except OSError:
             return "regime data is unavailable"
-    except OSError:
-        return "regime data is unavailable"
 
     start = request.get("start")
     start_date = date.fromisoformat(start) if start is not None else None
@@ -241,18 +255,13 @@ def _prerequisite_error(repo: Any, request: dict[str, Any]) -> str | None:
         required_outer_folds(profile),
     )
     if len(covered) < required:
-        return (
-            "insufficient enriched trading dates: "
-            f"need {required}, got {len(covered)}"
-        )
+        return f"insufficient enriched trading dates: need {required}, got {len(covered)}"
 
     regime_history = load_regime_history(data_dir)
     if regime_history.is_empty() or "date" not in regime_history.columns:
         return "regime data is unavailable"
     regime_dates = set(
-        regime_history.select(
-            pl.col("date").cast(pl.Utf8).str.slice(0, 10)
-        ).to_series().to_list()
+        regime_history.select(pl.col("date").cast(pl.Utf8).str.slice(0, 10)).to_series().to_list()
     )
     required_predecessors = set(covered[:-1])
     missing_regime = required_predecessors - regime_dates
@@ -286,6 +295,7 @@ def _record_skipped_prerequisite(
 
 
 def _instrument_metadata(repo: Any, asset_type: str) -> dict[str, Any]:
+    """标的静态信息摘要，纳入指纹以捕捉股本/涨跌幅规则的变化。"""
     instruments = repo.get_instruments_asset(asset_type)
     if instruments is None or instruments.is_empty() or "symbol" not in instruments.columns:
         return {"rows": 0, "digest": "no-instruments"}
@@ -310,6 +320,7 @@ def _instrument_metadata(repo: Any, asset_type: str) -> dict[str, Any]:
 
 
 def _enriched_metadata(root: Path) -> dict[str, Any]:
+    """enriched 分区文件元数据摘要，作为离线指纹的输入之一。"""
     records: list[dict[str, Any]] = []
     for partition in sorted(root.glob("date=*"), key=lambda item: item.name):
         try:
@@ -335,6 +346,7 @@ def _selected_strategy_metadata(
     strategy_ids: list[str],
     data_dir: Path,
 ) -> list[dict[str, Any]]:
+    """选中策略的定义与实现摘要，纳入指纹以捕捉策略代码漂移。"""
     if not strategy_ids:
         return []
     engine = getattr(app_state, "strategy_engine", None)
@@ -365,6 +377,7 @@ def _selected_strategy_metadata(
 
 
 def _path_metadata(path: Path | None, *, root: Path) -> dict[str, Any] | None:
+    """返回文件相对路径、大小与 mtime，供指纹比对；路径不存在返回 None。"""
     if path is None:
         return None
     try:
@@ -380,6 +393,7 @@ def _path_metadata(path: Path | None, *, root: Path) -> dict[str, Any] | None:
 
 
 def _content_metadata(path: Path | None, *, root: Path) -> dict[str, Any] | None:
+    """文件内容摘要（大小 + SHA256），用于自定义策略源码漂移检测。"""
     if path is None:
         return None
     try:
@@ -401,10 +415,12 @@ def _implementation_metadata(module_root: Path) -> dict[str, Any]:
             content = path.read_bytes()
         except OSError:
             continue
-        records.append({
-            "path": path.relative_to(module_root).as_posix(),
-            "sha256": hashlib.sha256(content).hexdigest(),
-        })
+        records.append(
+            {
+                "path": path.relative_to(module_root).as_posix(),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        )
     return {
         "file_count": len(records),
         "digest": hashlib.sha256(_canonical_json(records).encode("utf-8")).hexdigest(),

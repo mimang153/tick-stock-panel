@@ -3,6 +3,7 @@
 见 app/services/upgrade_guard.py: 源码运行 (无清单) 时 enabled=false,
 本组端点仍可调用, 返回停用原因。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -34,7 +35,9 @@ def upgrade_guard_status(request: Request) -> dict:
     except UpgradeGuardBusyError:
         return {"enabled": True, "scanning": True}
     except (OSError, ValueError) as exc:
-        raise HTTPException(status_code=503, detail="升级备份不可用，请检查磁盘空间、目录权限或备份状态") from exc
+        raise HTTPException(
+            status_code=503, detail="升级备份不可用，请检查磁盘空间、目录权限或备份状态"
+        ) from exc
     status["scanning"] = guard.is_scanning()
     return status
 
@@ -50,7 +53,9 @@ def upgrade_guard_scan(request: Request) -> dict:
     except UpgradeGuardBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (OSError, ValueError) as exc:
-        raise HTTPException(status_code=503, detail="升级备份未完成，请检查磁盘空间、目录权限或备份状态后重试") from exc
+        raise HTTPException(
+            status_code=503, detail="升级备份未完成，请检查磁盘空间、目录权限或备份状态后重试"
+        ) from exc
     status["scanning"] = False
     return status
 
@@ -73,7 +78,9 @@ def upgrade_guard_restore(req: RestoreIn, request: Request) -> dict:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except OSError as exc:
-        raise HTTPException(status_code=503, detail="文件恢复失败，请检查程序目录权限后重试") from exc
+        raise HTTPException(
+            status_code=503, detail="文件恢复失败，请检查程序目录权限后重试"
+        ) from exc
     return {"ok": True, "restored": str(restored)}
 
 
@@ -85,5 +92,7 @@ def upgrade_guard_dismiss(request: Request) -> dict:
     except UpgradeGuardBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (OSError, ValueError) as exc:
-        raise HTTPException(status_code=503, detail="升级报告确认失败，请检查备份目录后重试") from exc
+        raise HTTPException(
+            status_code=503, detail="升级报告确认失败，请检查备份目录后重试"
+        ) from exc
     return {"ok": True}

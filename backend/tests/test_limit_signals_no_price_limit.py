@@ -10,6 +10,7 @@ listing_date 窗口判定 (price_limits.is_no_limit_day) 补齐哨兵覆盖不�
 维表 as_of 只命中一个行情日, 窗口内其余交易日与 as_of 漂移后的历史重算由
 listing_date 判定兜底 (601091.SH 2026-09-18: 昨收 20.8 收 57.77 被误记涨停+1 连板)。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -30,29 +31,37 @@ YESTERDAY = date(2026, 9, 16)
 TODAY = date(2026, 9, 17)
 
 
-def _rows(prev_close: float, *, open_: float, high: float, low: float, close: float) -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": ["001234.SZ", "001234.SZ"],
-        "date": [YESTERDAY, TODAY],
-        "open": [prev_close, open_],
-        "high": [prev_close, high],
-        "low": [prev_close, low],
-        "close": [prev_close, close],
-        "raw_close": [prev_close, close],
-        "raw_high": [prev_close, high],
-        "raw_low": [prev_close, low],
-        "volume": [1000.0, 1000.0],
-    })
+def _rows(
+    prev_close: float, *, open_: float, high: float, low: float, close: float
+) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "symbol": ["001234.SZ", "001234.SZ"],
+            "date": [YESTERDAY, TODAY],
+            "open": [prev_close, open_],
+            "high": [prev_close, high],
+            "low": [prev_close, low],
+            "close": [prev_close, close],
+            "raw_close": [prev_close, close],
+            "raw_high": [prev_close, high],
+            "raw_low": [prev_close, low],
+            "volume": [1000.0, 1000.0],
+        }
+    )
 
 
-def _instruments(limit_up: float, limit_down: float, as_of: date = TODAY, symbol: str = "001234.SZ") -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": [symbol],
-        "name": ["新股"],
-        "limit_up": [limit_up],
-        "limit_down": [limit_down],
-        "as_of": [as_of],
-    })
+def _instruments(
+    limit_up: float, limit_down: float, as_of: date = TODAY, symbol: str = "001234.SZ"
+) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "symbol": [symbol],
+            "name": ["新股"],
+            "limit_up": [limit_up],
+            "limit_down": [limit_down],
+            "as_of": [as_of],
+        }
+    )
 
 
 def _realtime(rows: pl.DataFrame, instruments: pl.DataFrame) -> dict:
@@ -64,10 +73,10 @@ def _realtime(rows: pl.DataFrame, instruments: pl.DataFrame) -> dict:
 
 # 昨收 20.00, 主板理论涨停 22.00 / 跌停 18.00; 判定价含 ∓0.005 容差
 CASES = {
-    "up_close": dict(open_=21.0, high=23.5, low=20.5, close=23.4),        # 涨超 10% 收盘
-    "up_touch_fade": dict(open_=21.0, high=22.5, low=20.5, close=21.5),   # 冲过理论涨停价后回落
-    "down_close": dict(open_=19.0, high=19.5, low=17.5, close=17.6),      # 跌超 10% 收盘
-    "down_touch_up": dict(open_=18.2, high=19.0, low=17.8, close=18.8),   # 跌破理论跌停价后收阳
+    "up_close": dict(open_=21.0, high=23.5, low=20.5, close=23.4),  # 涨超 10% 收盘
+    "up_touch_fade": dict(open_=21.0, high=22.5, low=20.5, close=21.5),  # 冲过理论涨停价后回落
+    "down_close": dict(open_=19.0, high=19.5, low=17.5, close=17.6),  # 跌超 10% 收盘
+    "down_touch_up": dict(open_=18.2, high=19.0, low=17.8, close=18.8),  # 跌破理论跌停价后收阳
 }
 LIMIT_PRICES = ("limit_up_price", "limit_down_price")
 
@@ -92,7 +101,9 @@ def test_down_signals_alone_also_respect_sentinel():
     instruments = _instruments(limit_up=100000.0, limit_down=0.0)
 
     full = pipeline.compute_limit_signals(
-        rows, instruments, needed={"limit_down_price", "consecutive_limit_downs"},
+        rows,
+        instruments,
+        needed={"limit_down_price", "consecutive_limit_downs"},
     ).row(-1, named=True)
 
     assert full["limit_down_price"] is None
@@ -124,6 +135,7 @@ def test_regular_stock_limit_up_unchanged():
 # ================================================================
 # listing_date 无涨跌幅窗口判定 (哨兵覆盖不到的历史行兜底)
 # ================================================================
+
 
 def test_window_days_by_board_and_listing_date():
     listing = date(2026, 9, 17)
@@ -157,9 +169,7 @@ def test_full_path_listing_date_window_marks_no_limit_on_stale_as_of():
     listing_date 窗口兜底, 涨超 10% 不再被误记涨停。"""
     rows = _rows(20.0, **CASES["up_close"])
     instruments = _instruments(limit_up=0.0, limit_down=0.0, as_of=date(2026, 9, 20))
-    instruments = instruments.with_columns(
-        pl.lit(TODAY).cast(pl.Date).alias("listing_date")
-    )
+    instruments = instruments.with_columns(pl.lit(TODAY).cast(pl.Date).alias("listing_date"))
 
     full = pipeline.compute_limit_signals(rows, instruments).row(-1, named=True)
 
@@ -171,17 +181,32 @@ def test_full_path_listing_date_window_marks_no_limit_on_stale_as_of():
 
 def test_sixth_trading_day_after_window_resumes_limit_signals():
     """窗口第 6 个交易日起恢复正常涨跌停判定 (601091: 上市 09-10, 09-17 是第 6 日)。"""
-    dates = [date(2026, 9, 10), date(2026, 9, 11), date(2026, 9, 14),
-             date(2026, 9, 15), date(2026, 9, 16), date(2026, 9, 17)]
+    dates = [
+        date(2026, 9, 10),
+        date(2026, 9, 11),
+        date(2026, 9, 14),
+        date(2026, 9, 15),
+        date(2026, 9, 16),
+        date(2026, 9, 17),
+    ]
     closes = [20.0, 20.0, 20.0, 20.0, 20.0, 22.0]  # 第 6 日收盘 = 理论涨停 22.00
-    rows = pl.DataFrame({
-        "symbol": ["601091.SH"] * 6,
-        "date": dates,
-        "open": closes, "high": closes, "low": [19.8] * 5 + [21.0], "close": closes,
-        "raw_close": closes, "raw_high": closes, "raw_low": [19.8] * 5 + [21.0],
-        "volume": [1000.0] * 6,
-    })
-    instruments = _instruments(limit_up=0.0, limit_down=0.0, as_of=date(2026, 9, 20), symbol="601091.SH")
+    rows = pl.DataFrame(
+        {
+            "symbol": ["601091.SH"] * 6,
+            "date": dates,
+            "open": closes,
+            "high": closes,
+            "low": [19.8] * 5 + [21.0],
+            "close": closes,
+            "raw_close": closes,
+            "raw_high": closes,
+            "raw_low": [19.8] * 5 + [21.0],
+            "volume": [1000.0] * 6,
+        }
+    )
+    instruments = _instruments(
+        limit_up=0.0, limit_down=0.0, as_of=date(2026, 9, 20), symbol="601091.SH"
+    )
     instruments = instruments.with_columns(
         pl.lit(date(2026, 9, 10)).cast(pl.Date).alias("listing_date")
     )

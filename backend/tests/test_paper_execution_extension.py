@@ -1,4 +1,8 @@
-"""扩展的信号/参数/订单契约，使用真实策略引擎与模拟仓账务。"""
+"""扩展的信号/参数/订单契约，使用真实策略引擎与模拟仓账务。
+
+DES-005: 模拟盘账户/订单按 account_id 存 PG，env fixture 用 conftest 的
+paper_account_ids 生成唯一 id，避免共享库跨用例碰撞。
+"""
 
 from datetime import date, datetime
 from types import SimpleNamespace
@@ -16,7 +20,8 @@ NOW = datetime(2026, 10, 26, 16, tzinfo=CN_TZ)
 
 
 @pytest.fixture
-def env(tmp_path, monkeypatch):
+def env(tmp_path, monkeypatch, paper_account_ids):
+    account_id, manual_id = paper_account_ids(2)
     directory = tmp_path / "strategies" / "custom"
     directory.mkdir(parents=True)
     path = directory / "demo.py"
@@ -52,10 +57,16 @@ def filter(df, params):
     quotes = SimpleNamespace(status=lambda: {"final_sync_done": True, "final_sync_failed": None})
     monkeypatch.setattr(paper, "cn_today", lambda: DAY)
     monkeypatch.setattr(paper, "cn_now", lambda: NOW)
-    paper.create_account(tmp_path, 100_000)
+    paper.create_account(tmp_path, 100_000, account_id=account_id)
     service = ExecutionService(tmp_path, engine, screener, quotes)
     return SimpleNamespace(
-        root=tmp_path, engine=engine, service=service, screener=screener, path=path
+        root=tmp_path,
+        engine=engine,
+        service=service,
+        screener=screener,
+        path=path,
+        account_id=account_id,
+        manual_id=manual_id,
     )
 
 
@@ -68,26 +79,26 @@ def bind(env, **config_values):
             **config_values,
         }
     }
-    preview = env.service.preview(source)
-    return env.service.bind("default", source, preview["revision"], now=NOW)
+    preview = env.service.preview(source, env.account_id)
+    return env.service.bind(env.account_id, source, preview["revision"], now=NOW)
 
 
 def test_six_signals_are_not_truncated_or_merged_and_restart_does_not_duplicate(env):
     bind(env)
     env.service.tick(NOW)
-    orders = paper.load_orders(env.root)
+    orders = paper.load_orders(env.root, account_id=env.account_id)
     assert len(orders) == 6
     assert all(o["side"] == "buy" and o["order_type"] == "next_open" for o in orders)
     restarted = ExecutionService(env.root, env.engine, env.screener, env.service.quotes)
     restarted.tick(NOW)
-    assert len(paper.load_orders(env.root)) == 6
+    assert len(paper.load_orders(env.root, account_id=env.account_id)) == 6
 
 
 def test_candidate_without_entry_signal_does_not_buy(env):
     env.screener.frame = env.screener.frame.with_columns(pl.lit(False).alias("signal_entry"))
     bind(env)
     env.service.tick(NOW)
-    assert paper.load_orders(env.root) == []
+    assert paper.load_orders(env.root, account_id=env.account_id) == []
 
 
 def test_snapshot_freezes_saved_params_and_backtest_explicit_params_win(env):
@@ -95,8 +106,8 @@ def test_snapshot_freezes_saved_params_and_backtest_explicit_params_win(env):
     bind(env, params={"threshold": 9.0})
     config.save_override(env.root, "demo", {"params": {"threshold": 20.0}})
     env.service.tick(NOW)
-    assert len(paper.load_orders(env.root)) == 6
-    snapshot = env.service.get("default")["snapshot"]
+    assert len(paper.load_orders(env.root, account_id=env.account_id)) == 6
+    snapshot = env.service.get(env.account_id)["snapshot"]
     assert snapshot["params"]["threshold"] == 9.0
     assert snapshot["overrides"]["entry_signals"] == ["entry"]
 
@@ -104,24 +115,24 @@ def test_snapshot_freezes_saved_params_and_backtest_explicit_params_win(env):
 def test_wait_for_confirmed_current_bar_and_do_not_replay_past_signal(env):
     bind(env)
     env.service.tick(NOW.replace(hour=14))
-    assert paper.load_orders(env.root) == []
+    assert paper.load_orders(env.root, account_id=env.account_id) == []
     env.service.quotes.status = lambda: {
         "final_sync_done": True,
         "final_sync_failed": "unconfirmed_snapshot",
     }
     env.service.tick(NOW)
-    assert paper.load_orders(env.root) == []
+    assert paper.load_orders(env.root, account_id=env.account_id) == []
     env.service.quotes.status = lambda: {"final_sync_done": True, "final_sync_failed": None}
     env.service.tick(NOW.replace(day=27))
-    assert paper.load_orders(env.root) == []
+    assert paper.load_orders(env.root, account_id=env.account_id) == []
 
 
 def test_changed_strategy_pauses_instead_of_using_new_code(env):
     bind(env)
     env.path.write_text(env.path.read_text() + "\n# changed\n")
     env.service.tick(NOW)
-    assert paper.load_orders(env.root) == []
-    assert env.service.get("default")["status"] == "blocked"
+    assert paper.load_orders(env.root, account_id=env.account_id) == []
+    assert env.service.get(env.account_id)["status"] == "blocked"
 
 
 @pytest.mark.parametrize(
@@ -151,26 +162,27 @@ def test_existing_rules_require_explicit_takeover_and_new_conflict_blocks(env):
             "size_mode": "fixed_amount",
             "size_value": 1000,
         },
+        account_id=env.account_id,
     )
     with pytest.raises(ValueError, match="旧跟单"):
         bind(env)
     source = {"strategy_id": "demo"}
-    preview = env.service.preview(source)
-    env.service.bind("default", source, preview["revision"], disable_legacy=True, now=NOW)
-    assert not paper_auto.load_auto_rules(env.root, enabled_only=True)
-    rule = paper_auto.load_auto_rules(env.root)[0]
-    paper_auto.set_enabled(env.root, rule["id"], True)
+    preview = env.service.preview(source, env.account_id)
+    env.service.bind(env.account_id, source, preview["revision"], disable_legacy=True, now=NOW)
+    assert not paper_auto.load_auto_rules(env.root, env.account_id, enabled_only=True)
+    rule = paper_auto.load_auto_rules(env.root, env.account_id)[0]
+    paper_auto.set_enabled(env.root, rule["id"], True, env.account_id)
     env.service.tick(NOW)
-    assert env.service.get("default")["status"] == "blocked"
-    assert paper.load_orders(env.root) == []
+    assert env.service.get(env.account_id)["status"] == "blocked"
+    assert paper.load_orders(env.root, account_id=env.account_id) == []
 
 
 def test_preview_revision_prevents_stale_binding(env):
     source = {"strategy_id": "demo"}
-    preview = env.service.preview(source)
+    preview = env.service.preview(source, env.account_id)
     env.path.write_text(env.path.read_text() + "\n# edit\n")
     with pytest.raises(ValueError, match="预览"):
-        env.service.bind("default", source, preview["revision"], now=NOW)
+        env.service.bind(env.account_id, source, preview["revision"], now=NOW)
 
 
 def fill_buys(env, monkeypatch, day=27):
@@ -195,7 +207,7 @@ def fill_buys(env, monkeypatch, day=27):
         )
     monkeypatch.setattr(paper, "cn_today", lambda: DAY.replace(day=day))
     monkeypatch.setattr(paper, "cn_now", lambda: NOW.replace(day=day))
-    summary = paper.settle_day(env.root, DAY.replace(day=27).isoformat())
+    summary = paper.settle_day(env.root, DAY.replace(day=27).isoformat(), account_id=env.account_id)
     assert summary["filled"] == 6
     return repo
 
@@ -218,11 +230,11 @@ def test_sell_signals_do_not_wait_for_buy_cooldown_and_no_repeated_orders(env, m
     fill_buys(env, monkeypatch, day=28)
     set_bar(env, 28)
     env.service.tick(NOW.replace(day=28))
-    orders = paper.load_orders(env.root)
+    orders = paper.load_orders(env.root, account_id=env.account_id)
     assert len([o for o in orders if o["side"] == "sell"]) == 6
     assert all(o["qty"] > 0 for o in orders)
     env.service.tick(NOW.replace(day=28))
-    assert len(paper.load_orders(env.root)) == 12
+    assert len(paper.load_orders(env.root, account_id=env.account_id)) == 12
 
 
 def test_entry_day_sell_intent_survives_restart_and_queues_before_next_open(env, monkeypatch):
@@ -231,30 +243,34 @@ def test_entry_day_sell_intent_survives_restart_and_queues_before_next_open(env,
     fill_buys(env, monkeypatch)
     set_bar(env, 27)
     env.service.tick(NOW.replace(day=27))
-    assert not [o for o in paper.load_orders(env.root) if o["side"] == "sell"]
+    assert not [
+        o for o in paper.load_orders(env.root, account_id=env.account_id) if o["side"] == "sell"
+    ]
     monkeypatch.setattr(paper, "cn_today", lambda: DAY.replace(day=28))
     morning = NOW.replace(day=28, hour=9, minute=10)
     monkeypatch.setattr(paper, "cn_now", lambda: morning)
     restarted = ExecutionService(env.root, env.engine, env.screener, env.service.quotes)
     restarted.tick(morning)
-    sells = [o for o in paper.load_orders(env.root) if o["side"] == "sell"]
+    sells = [
+        o for o in paper.load_orders(env.root, account_id=env.account_id) if o["side"] == "sell"
+    ]
     assert len(sells) == 6
     assert all(o["order_type"] == "next_open" for o in sells)
-    assert paper.settle_day(env.root, "2026-10-28")["filled"] == 6
+    assert paper.settle_day(env.root, "2026-10-28", account_id=env.account_id)["filled"] == 6
 
 
 def test_reserved_buys_are_counted_in_cash_and_position_limit(env):
     bind(env, max_positions=2, max_exposure_pct=0.5)
     env.service.tick(NOW)
-    orders = paper.load_orders(env.root)
+    orders = paper.load_orders(env.root, account_id=env.account_id)
     assert len(orders) == 2
     assert sum(o["qty"] * o["ref_price"] for o in orders) <= 50_000
     # 模拟进程在写检查点前退出；订单来源本身仍能去重。
-    state = env.service._load("default")
+    state = env.service._load(env.account_id)
     state["last_bar"] = None
     env.service._save(state)
     env.service.tick(NOW)
-    assert len(paper.load_orders(env.root)) == 2
+    assert len(paper.load_orders(env.root, account_id=env.account_id)) == 2
 
 
 def test_risk_uses_raw_prices_and_fresh_per_symbol_timestamp(env, monkeypatch):
@@ -271,15 +287,26 @@ def test_risk_uses_raw_prices_and_fresh_per_symbol_timestamp(env, monkeypatch):
     env.service.quotes.status = lambda: {"quote_age_ms": 1}
     env.service.quotes.get_enriched_today = lambda: (frame, live_now.date())
     env.service.tick(live_now)
-    sells = [o for o in paper.load_orders(env.root) if o["side"] == "sell"]
+    sells = [
+        o for o in paper.load_orders(env.root, account_id=env.account_id) if o["side"] == "sell"
+    ]
     assert len(sells) == 6
     assert all(
         o["order_type"] == "market" and o["ref_price"] == 9.4 and o["source"].endswith(":stop_loss")
         for o in sells
     )
     # 原账务照常撮合、记录真实费用；扩展没有创建第二份成交。
-    assert len(paper.evaluate_intraday(env.root, {o["symbol"]: 9.4 for o in sells})) == 6
-    assert all(p["qty"] == 0 for p in paper.load_positions(env.root).values())
+    assert (
+        len(
+            paper.evaluate_intraday(
+                env.root, {o["symbol"]: 9.4 for o in sells}, account_id=env.account_id
+            )
+        )
+        == 6
+    )
+    assert all(
+        p["qty"] == 0 for p in paper.load_positions(env.root, account_id=env.account_id).values()
+    )
 
 
 def test_stale_symbol_quote_does_not_trigger_protection(env, monkeypatch):
@@ -293,8 +320,10 @@ def test_stale_symbol_quote_does_not_trigger_protection(env, monkeypatch):
     env.service.quotes.status = lambda: {"quote_age_ms": 1}
     env.service.quotes.get_enriched_today = lambda: (frame, live_now.date())
     env.service.tick(live_now)
-    assert not [o for o in paper.load_orders(env.root) if o["side"] == "sell"]
-    assert "过期" in env.service.get("default")["risk_message"]
+    assert not [
+        o for o in paper.load_orders(env.root, account_id=env.account_id) if o["side"] == "sell"
+    ]
+    assert "过期" in env.service.get(env.account_id)["risk_message"]
 
 
 def test_max_hold_uses_trading_bars_not_calendar_days(env, monkeypatch):
@@ -304,31 +333,33 @@ def test_max_hold_uses_trading_bars_not_calendar_days(env, monkeypatch):
     env.screener.repo = repo
     set_bar(env, 28, exit=False)
     env.service.tick(NOW.replace(day=28))
-    assert not [o for o in paper.load_orders(env.root) if o["side"] == "sell"]
+    assert not [
+        o for o in paper.load_orders(env.root, account_id=env.account_id) if o["side"] == "sell"
+    ]
 
 
 def test_fee_drift_and_manual_orders_pause_only_managed_account(env):
     bind(env)
-    paper.update_settings(env.root, "default", commission_pct=0.0009)
+    paper.update_settings(env.root, env.account_id, commission_pct=0.0009)
     env.service.tick(NOW)
-    assert env.service.get("default")["status"] == "blocked"
-    assert paper.load_orders(env.root) == []
-    paper.create_account(env.root, 100_000, account_id="manual")
+    assert env.service.get(env.account_id)["status"] == "blocked"
+    assert paper.load_orders(env.root, account_id=env.account_id) == []
+    paper.create_account(env.root, 100_000, account_id=env.manual_id)
     _, error = paper.create_order(
-        env.root, "000001.SZ", "buy", account_id="manual", qty=100, ref_price=10.0
+        env.root, "000001.SZ", "buy", account_id=env.manual_id, qty=100, ref_price=10.0
     )
     assert error is None
 
 
 def test_newer_or_corrupt_state_is_not_executed(env):
     bind(env)
-    state = env.service._load("default")
+    state = env.service._load(env.account_id)
     state["version"] = 999
     env.service._save(state)
     env.service.tick(NOW)
-    assert paper.load_orders(env.root) == []
+    assert paper.load_orders(env.root, account_id=env.account_id) == []
     with pytest.raises(ValueError, match="版本"):
-        env.service.get("default")
+        env.service.get(env.account_id)
 
 
 def test_concurrent_ticks_submit_once(env):
@@ -337,17 +368,17 @@ def test_concurrent_ticks_submit_once(env):
     bind(env)
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(lambda _i: env.service.tick(NOW), range(4)))
-    assert len(paper.load_orders(env.root)) == 6
+    assert len(paper.load_orders(env.root, account_id=env.account_id)) == 6
 
 
 def test_disabled_binding_does_not_evaluate_strategy(env, monkeypatch):
     bind(env)
-    env.service.set_enabled("default", False)
+    env.service.set_enabled(env.account_id, False)
     monkeypatch.setattr(
         env.engine, "run", lambda *_a, **_k: pytest.fail("disabled strategy evaluated")
     )
     env.service.tick(NOW)
-    assert paper.load_orders(env.root) == []
+    assert paper.load_orders(env.root, account_id=env.account_id) == []
 
 
 def test_extension_api_and_lifecycle(env, monkeypatch):
@@ -362,12 +393,13 @@ def test_extension_api_and_lifecycle(env, monkeypatch):
     app.state.strategy_engine = env.engine
     app.state.quote_service = env.service.quotes
     app.include_router(routes.build_router())
+    q = f"?account={env.account_id}"
     with TestClient(app) as client:
-        assert client.get("/api/custom/paper-execution/state").json() == {"binding": None}
+        assert client.get(f"/api/custom/paper-execution/state{q}").json() == {"binding": None}
         source = {"strategy_id": "demo"}
-        preview = client.post("/api/custom/paper-execution/preview", json=source).json()
+        preview = client.post(f"/api/custom/paper-execution/preview{q}", json=source).json()
         response = client.put(
-            "/api/custom/paper-execution/binding",
+            f"/api/custom/paper-execution/binding{q}",
             json={"source": source, "revision": preview["revision"]},
         )
         assert response.status_code == 200
@@ -375,13 +407,13 @@ def test_extension_api_and_lifecycle(env, monkeypatch):
         assert client.get("/api/custom/paper-execution/state?account=../bad").status_code == 409
         assert (
             client.post(
-                "/api/custom/paper-execution/preview",
+                f"/api/custom/paper-execution/preview{q}",
                 json={"strategy_id": "demo", "candidate_id": "x"},
             ).status_code
             == 422
         )
         assert (
-            client.post("/api/custom/paper-execution/enabled", json={"enabled": False}).json()[
+            client.post(f"/api/custom/paper-execution/enabled{q}", json={"enabled": False}).json()[
                 "binding"
             ]["enabled"]
             is False
@@ -409,7 +441,7 @@ def test_signal_mask_and_effective_params_match_backtest(env):
             "initial_capital": 100_000,
         }
     }
-    preview = env.service.preview(source)
+    preview = env.service.preview(source, env.account_id)
     snapshot = preview["snapshot"]
     strategy = env.engine.get("demo")
     backtest = StrategyBacktestService.__new__(StrategyBacktestService)
@@ -436,8 +468,8 @@ def test_missing_signal_blocks_account_instead_of_silently_ignoring_it(env):
     bind(env)
     env.screener.frame = env.screener.frame.drop("signal_exit")
     env.service.tick(NOW)
-    assert paper.load_orders(env.root) == []
-    assert "依赖尚不可用" in env.service.get("default")["message"]
+    assert paper.load_orders(env.root, account_id=env.account_id) == []
+    assert "依赖尚不可用" in env.service.get(env.account_id)["message"]
 
 
 @pytest.mark.parametrize(
@@ -470,14 +502,14 @@ def test_risk_thresholds(risk, entry, peak, price, expected):
 
 def test_missing_optional_runtime_fields_default_to_paused(env):
     bind(env)
-    state = env.service._load("default")
+    state = env.service._load(env.account_id)
     for key in ("enabled", "status", "message", "events", "risk", "exits", "last_bar"):
         state.pop(key)
     env.service._save(state)
     env.service.tick(NOW)
-    assert not env.service.get("default")["enabled"]
-    assert env.service.get("default")["events"] == []
-    assert paper.load_orders(env.root) == []
+    assert not env.service.get(env.account_id)["enabled"]
+    assert env.service.get(env.account_id)["events"] == []
+    assert paper.load_orders(env.root, account_id=env.account_id) == []
 
 
 def test_definition_change_during_evaluation_prevents_orders(env, monkeypatch):
@@ -491,8 +523,8 @@ def test_definition_change_during_evaluation_prevents_orders(env, monkeypatch):
 
     monkeypatch.setattr(env.engine, "run", changed)
     env.service.tick(NOW)
-    assert paper.load_orders(env.root) == []
-    assert env.service.get("default")["status"] == "blocked"
+    assert paper.load_orders(env.root, account_id=env.account_id) == []
+    assert env.service.get(env.account_id)["status"] == "blocked"
 
 
 def test_dependency_fingerprint_uses_original_files_not_export_serialization(env):
@@ -518,14 +550,14 @@ def test_dependency_fingerprint_uses_original_files_not_export_serialization(env
     env.screener.frame = env.screener.frame.with_columns(pl.lit(True).alias("csg_qa_entry"))
     bind(env)
     env.service.tick(NOW)
-    assert len(paper.load_orders(env.root)) == 6
-    assert env.service.get("default")["enabled"] is True
+    assert len(paper.load_orders(env.root, account_id=env.account_id)) == 6
+    assert env.service.get(env.account_id)["enabled"] is True
     assert definition is not None
     definition["conditions"][0]["right"] = 100  # type: ignore[index]
     path.write_text(json.dumps(definition))
     env.service.tick(NOW)
-    assert env.service.get("default")["status"] == "blocked"
-    assert "依赖已变更" in env.service.get("default")["message"]
+    assert env.service.get(env.account_id)["status"] == "blocked"
+    assert "依赖已变更" in env.service.get(env.account_id)["message"]
 
 
 def test_definition_revision_is_stable_across_processes_and_reload(env):
@@ -587,15 +619,16 @@ MATRIX_STRATEGY = Native()
     )
     bind(env)
     env.service.tick(NOW)
-    assert len(paper.load_orders(env.root)) == 6
-    assert env.service.get("default")["snapshot"]["overrides"]["stop_loss"] == -0.06
+    assert len(paper.load_orders(env.root, account_id=env.account_id)) == 6
+    assert env.service.get(env.account_id)["snapshot"]["overrides"]["stop_loss"] == -0.06
 
 
 def test_negative_trailing_thresholds_normalize_like_backtest(env):
     from app.backtest.strategy import StrategyBacktestService
 
     preview = env.service.preview(
-        {"config": {"strategy_id": "demo", "overrides": {"trailing_stop": -0.05}}}
+        {"config": {"strategy_id": "demo", "overrides": {"trailing_stop": -0.05}}},
+        env.account_id,
     )
     assert preview["snapshot"]["overrides"][
         "trailing_stop"

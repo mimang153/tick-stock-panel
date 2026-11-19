@@ -5,6 +5,7 @@ import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 import yaml
@@ -19,8 +20,10 @@ from app.data_providers.custom import loader, packages
 from app.data_providers.custom.managed import ManagedProvider
 from app.services import preferences
 
-CODE = '''from types import SimpleNamespace
+CODE = """from types import SimpleNamespace
 from .client import price
+
+
 name = "demo_source"
 def probe_api_key(key):
     return key == "valid-key", "ok" if key == "valid-key" else "invalid"
@@ -31,7 +34,7 @@ class Provider:
         return [{"symbol": "600000.SH", "last": price, "change_pct": 0.02}]
     def close(self):
         pass
-'''
+"""
 
 
 @pytest.fixture
@@ -49,8 +52,15 @@ def isolated(monkeypatch, tmp_path):
 
 
 def bundle(version="1.0.0", *, code=CODE, extra=None, **changes):
-    doc = dict(name="demo_source", display_name="演示数据源", version=version,
-               plugin_api_version=1, entry="provider:Provider", datasets=["realtime"], runtime="none")
+    doc = dict(
+        name="demo_source",
+        display_name="演示数据源",
+        version=version,
+        plugin_api_version=1,
+        entry="provider:Provider",
+        datasets=["realtime"],
+        runtime="none",
+    )
     doc.update(changes)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as archive:
@@ -100,8 +110,10 @@ def test_plugin_link_labels_and_markdown_survive_install_and_restart(isolated):
     from app.api.settings import router as settings_router
 
     fields = {
-        "homepage": "https://example.com/docs", "homepage_label": "使用文档",
-        "key_manage_url": "https://example.com/account", "key_manage_label": "获取个人 Key",
+        "homepage": "https://example.com/docs",
+        "homepage_label": "使用文档",
+        "key_manage_url": "https://example.com/account",
+        "key_manage_label": "获取个人 Key",
         "description": "## 连接说明\n使用 **个人 Key**。",
         "usage_notes": ["阅读 [文档](https://example.com/docs)。"],
     }
@@ -128,7 +140,7 @@ def test_plugin_link_labels_require_short_text(isolated, field, value):
 
 def test_key_first_probe_then_save_and_only_refresh_target(isolated):
     other = SimpleNamespace(close=lambda: pytest.fail("unrelated provider closed"))
-    loader._PROVIDERS["other"] = other
+    loader._PROVIDERS["other"] = cast(Any, other)
     install(bundle(api_key_env="DEMO_KEY"))
     handle = loader.get_provider("demo_source")
     with pytest.raises(ProviderRequestError):
@@ -181,7 +193,19 @@ def test_pending_replacement_preview_rejects_stale_install_state(isolated):
     assert current["pending_version"] == "2.0.0"
 
 
-@pytest.mark.parametrize("filename", ["../escape.py", "/escape.py", "a\\b.py", "a/../b.py", "CON.py", "client.PY", "x.dll", "a./b.py"])
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "../escape.py",
+        "/escape.py",
+        "a\\b.py",
+        "a/../b.py",
+        "CON.py",
+        "client.PY",
+        "x.dll",
+        "a./b.py",
+    ],
+)
 def test_archive_paths_and_payload_limits(isolated, filename):
     with pytest.raises(ValueError):
         packages.inspect_archive(bundle(extra={filename: "pass"}))
@@ -189,7 +213,11 @@ def test_archive_paths_and_payload_limits(isolated, filename):
 
 
 def test_manifest_contract_and_dependency_compatibility(isolated):
-    for changes in ({"plugin_api_version": 9}, {"entry": "app.other:Provider"}, {"datasets": ["invented"]}):
+    for changes in (
+        {"plugin_api_version": 9},
+        {"entry": "app.other:Provider"},
+        {"datasets": ["invented"]},
+    ):
         with pytest.raises(ValueError):
             packages.inspect_archive(bundle(**changes))
     preview, _ = packages.inspect_archive(bundle(requires_python=">=99"))
@@ -248,7 +276,9 @@ def test_confirmed_uninstall_resets_only_its_routes_and_preserves_keys(isolated)
     expected["daily_data_provider"] = "other_source"
     assert preferences.load() == {**expected, "realtime_quotes_enabled": False}
     assert "恢复默认" in result["message"]
-    assert packages.read_state("demo_source")["remove"]
+    state = packages.read_state("demo_source")
+    assert state is not None
+    assert state["remove"]
     with pytest.raises(ProviderRequestError):
         loader.get_provider("demo_source").get_realtime()
     cold_restart()
@@ -312,7 +342,9 @@ def test_uninstall_restores_routes_and_provider_when_refresh_fails(isolated, mon
     assert loader.get_provider("demo_source").get_realtime()[0]["last"] == 1
 
 
-def test_management_api_accepts_confirmed_route_reset_and_refreshes_capabilities(isolated, monkeypatch):
+def test_management_api_accepts_confirmed_route_reset_and_refreshes_capabilities(
+    isolated, monkeypatch
+):
     from app.tickflow import policy
 
     monkeypatch.setattr("app.services.auth.is_configured", lambda: False)
@@ -323,9 +355,14 @@ def test_management_api_accepts_confirmed_route_reset_and_refreshes_capabilities
     app = FastAPI()
     app.include_router(router)
     with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 50000)) as client:
-        refused = client.post("/api/custom/source-packages/demo_source/manage", json={"action": "remove"})
+        refused = client.post(
+            "/api/custom/source-packages/demo_source/manage", json={"action": "remove"}
+        )
         assert refused.status_code == 400
-        result = client.post("/api/custom/source-packages/demo_source/manage", json={"action": "remove", "reset_routes": True})
+        result = client.post(
+            "/api/custom/source-packages/demo_source/manage",
+            json={"action": "remove", "reset_routes": True},
+        )
         assert result.status_code == 200
         assert preferences.get_realtime_data_provider() == "tickflow"
         assert app.state.capabilities is sentinel
@@ -339,7 +376,9 @@ def test_cannot_route_back_to_a_plugin_pending_uninstall(isolated):
     install(bundle())
     packages.manage("demo_source", "remove")
     with pytest.raises(HTTPException, match="等待卸载"):
-        update_data_providers(DataProvidersIn(realtime_data_provider="demo_source"), SimpleNamespace())
+        update_data_providers(
+            DataProvidersIn(realtime_data_provider="demo_source"), cast(Any, SimpleNamespace())
+        )
     assert "realtime_data_provider" not in preferences.load()
 
 
@@ -365,7 +404,7 @@ def test_uninstall_serializes_with_a_concurrent_routing_request(isolated, monkey
         routing = executor.submit(
             update_data_providers,
             DataProvidersIn(realtime_data_provider="demo_source"),
-            SimpleNamespace(),
+            cast(Any, SimpleNamespace()),
         )
         finish.set()
         removal.result(timeout=3)
@@ -376,12 +415,15 @@ def test_uninstall_serializes_with_a_concurrent_routing_request(isolated, monkey
 
 def test_handle_delays_close_until_stream_consumed():
     closed = []
+
     class Source:
         def iter_daily(self):
             yield 1
             yield 2
+
         def close(self):
             closed.append(self)
+
     old, new = Source(), Source()
     handle = ManagedProvider(old)
     stream = handle.iter_daily()
@@ -396,13 +438,16 @@ def test_handle_delays_close_until_stream_consumed():
 def test_handle_delays_close_during_concurrent_request():
     started, finish = threading.Event(), threading.Event()
     closed = []
+
     class Source:
         def get_realtime(self):
             started.set()
             assert finish.wait(3)
             return [1]
+
         def close(self):
             closed.append(self)
+
     old, new = Source(), Source()
     handle = ManagedProvider(old)
     worker = threading.Thread(target=handle.get_realtime)
@@ -417,26 +462,53 @@ def test_handle_delays_close_during_concurrent_request():
 
 def test_management_auth_and_upload_api(isolated, monkeypatch):
     from app.services import auth
+
     monkeypatch.setattr(auth, "is_configured", lambda: False)
     app = FastAPI()
     app.include_router(router)
     with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 50000)) as client:
-        assert client.post("/api/custom/source-packages/inspect", files={"file": ("source.zip", bundle())}, headers={"Origin": "https://evil.example"}).status_code == 403
-        preview = client.post("/api/custom/source-packages/inspect", files={"file": ("source.zip", bundle())})
+        assert (
+            client.post(
+                "/api/custom/source-packages/inspect",
+                files={"file": ("source.zip", bundle())},
+                headers={"Origin": "https://evil.example"},
+            ).status_code
+            == 403
+        )
+        preview = client.post(
+            "/api/custom/source-packages/inspect", files={"file": ("source.zip", bundle())}
+        )
         assert preview.status_code == 200
-        result = client.post("/api/custom/source-packages/install", files={"file": ("source.zip", bundle())}, data={"digest": preview.json()["digest"]})
+        result = client.post(
+            "/api/custom/source-packages/install",
+            files={"file": ("source.zip", bundle())},
+            data={"digest": preview.json()["digest"]},
+        )
         assert result.status_code == 200
-        assert client.post("/api/custom/source-packages/demo_source/manage", json={"action": "disable"}).status_code == 200
+        assert (
+            client.post(
+                "/api/custom/source-packages/demo_source/manage", json={"action": "disable"}
+            ).status_code
+            == 200
+        )
     with TestClient(app, base_url="http://localhost", client=("192.168.1.3", 50000)) as client:
-        assert client.post("/api/custom/source-packages/inspect", files={"file": ("s.zip", bundle())}).status_code == 403
+        assert (
+            client.post(
+                "/api/custom/source-packages/inspect", files={"file": ("s.zip", bundle())}
+            ).status_code
+            == 403
+        )
 
 
 def test_valid_key_with_failed_initialization_restores_original(isolated):
-    code = CODE.replace('    def get_realtime(self):', '''    def __init__(self):
+    code = CODE.replace(
+        "    def get_realtime(self):",
+        """    def __init__(self):
         from app import secrets_store
         if secrets_store.load().get("demo_source_api_key") == "valid-key":
             raise RuntimeError("constructor failed")
-    def get_realtime(self):''')
+    def get_realtime(self):""",
+    )
     install(bundle(code=code, api_key_env="DEMO_KEY"))
     secrets_store.save({"demo_source_api_key": "old-key"})
     loader.refresh_plugin("demo_source")
@@ -485,6 +557,7 @@ def test_zip_symlink_is_rejected(isolated):
 
 def test_external_capability_matrix_marks_unconfigured_route_unusable(isolated):
     from app.data_providers.capabilities import build_capability_matrix
+
     install(bundle(api_key_env="DEMO_KEY"))
     matrix = build_capability_matrix({"realtime_data_provider": "demo_source"})
     realtime = next(row for row in matrix["capabilities"] if row["id"] == "realtime")

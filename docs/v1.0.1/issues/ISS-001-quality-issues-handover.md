@@ -64,7 +64,7 @@
 | TR-09 | 公开类缺 docstring、注释偏 what | 补 docstring，注释改 why |
 | TR-10 | CK 唯一读源未收口 | 按 B4 独立迁移处理 |
 | TR-11 | 测试仍有裸 `DataStore(tmp_path)` | 逐个判定读路径，纯本地逻辑可保留 |
-| TR-12 | Redis 后端与 Arrow IPC 未落地 | 属目标契约，非本次回归 |
+| TR-12 | ~~Redis 后端与 Arrow IPC 未落地~~ → **已落地**（2026-11-19） | Redis CacheBackend（Arrow IPC/JSON + TTL + generation）已实现并 S4 起为默认；此行保留历史条目，当前状态见 ISS-003 §1.1、ISS-005 |
 | TR-14 | 弱口令下限 6 位、cookie `secure=False` | 自托管场景已有缓解；如需达标另改 |
 | TR-16 | 无 RBAC、detect-url 缺长度约束 | 补 Pydantic 约束；RBAC 符合当前单用户设计 |
 | TR-17 | suggestion 未分页、CORS `allow_origins=*` | 公网部署前评估并补限制 |

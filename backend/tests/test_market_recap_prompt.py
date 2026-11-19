@@ -1,4 +1,5 @@
 """复盘系统提示词可配置 — preferences 键、生效链路与 API 端点。"""
+
 import json
 from types import SimpleNamespace
 
@@ -44,7 +45,9 @@ def test_prompt_empty_or_none_restores_default_and_removes_key():
 
 def test_prompt_rejects_overlong_text():
     with pytest.raises(ValueError):
-        preferences.set_market_recap_system_prompt("字" * (preferences.MARKET_RECAP_PROMPT_MAX_CHARS + 1))
+        preferences.set_market_recap_system_prompt(
+            "字" * (preferences.MARKET_RECAP_PROMPT_MAX_CHARS + 1)
+        )
     # 拒绝后不落盘
     assert preferences.get_market_recap_system_prompt() == ""
 
@@ -80,10 +83,12 @@ async def test_stream_passes_custom_prompt_to_llm(monkeypatch, tmp_path):
     }
     monkeypatch.setattr(market_recap, "build_market_overview", lambda *a, **k: overview)
     monkeypatch.setattr(
-        "app.services.dragon_tiger.build_recap_context", lambda data_dir: "",
+        "app.services.dragon_tiger.build_recap_context",
+        lambda data_dir: "",
     )
     monkeypatch.setattr(
-        "app.services.auction_benchmark.build_recap_context", lambda data_dir: "",
+        "app.services.auction_benchmark.build_recap_context",
+        lambda data_dir: "",
     )
 
     captured: list[list[dict]] = []

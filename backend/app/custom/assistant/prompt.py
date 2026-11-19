@@ -4,6 +4,7 @@
 口径与 services.ai_provider.build_focus_instruction 一致(该函数面向单报告
 focus 字段, 此处面向多轮对话, 故独立实现而非复用拼接)。
 """
+
 from __future__ import annotations
 
 from app.market_time import cn_today

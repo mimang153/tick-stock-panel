@@ -18,8 +18,7 @@ from app.strategy.ai_generator import AIStrategyGenerator
 from app.strategy.engine import StrategyDataContext, StrategyEngine
 
 STRATEGY_PATH = (
-    Path(__file__).parent / "fixtures" / "strategies_minute"
-    / "custom_minute_price_volume.py"
+    Path(__file__).parent / "fixtures" / "strategies_minute" / "custom_minute_price_volume.py"
 )
 START = datetime(2026, 10, 20, 9, 31)
 
@@ -27,6 +26,7 @@ START = datetime(2026, 10, 20, 9, 31)
 @pytest.fixture
 def strategy():
     spec = importlib.util.spec_from_file_location("minute_price_volume", STRATEGY_PATH)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -40,16 +40,18 @@ def _bars(
     last_close=10.2,
     last_volume=300.0,
 ):
-    return pl.DataFrame({
-        "symbol": [symbol] * count,
-        "datetime": [start + timedelta(minutes=i) for i in range(count)],
-        "open": [10.0] * count,
-        "high": [max(10.0, last_close)] * count,
-        "low": [min(10.0, last_close)] * count,
-        "close": [10.0] * (count - 1) + [last_close],
-        "volume": [100.0] * (count - 1) + [last_volume],
-        "amount": [100_000.0] * count,
-    })
+    return pl.DataFrame(
+        {
+            "symbol": [symbol] * count,
+            "datetime": [start + timedelta(minutes=i) for i in range(count)],
+            "open": [10.0] * count,
+            "high": [max(10.0, last_close)] * count,
+            "low": [min(10.0, last_close)] * count,
+            "close": [10.0] * (count - 1) + [last_close],
+            "volume": [100.0] * (count - 1) + [last_volume],
+            "amount": [100_000.0] * count,
+        }
+    )
 
 
 def test_exact_thresholds_and_previous_twenty_bar_baseline(strategy):
@@ -64,7 +66,8 @@ def test_exact_thresholds_and_previous_twenty_bar_baseline(strategy):
 
 
 @pytest.mark.parametrize(
-    "last_close,last_volume", [(10.19, 300.0), (10.2, 299.0), (10.19, 299.0)],
+    "last_close,last_volume",
+    [(10.19, 300.0), (10.2, 299.0), (10.19, 299.0)],
 )
 def test_both_conditions_are_required(strategy, last_close, last_volume):
     bars = _bars(last_close=last_close, last_volume=last_volume)
@@ -74,7 +77,9 @@ def test_both_conditions_are_required(strategy, last_close, last_volume):
 def test_baseline_is_twenty_bar_average_not_previous_minute(strategy):
     bars = _bars(last_close=10.25, last_volume=600.0).with_columns(
         pl.when(pl.col("datetime") == START + timedelta(minutes=19))
-        .then(300.0).otherwise(pl.col("volume")).alias("volume")
+        .then(300.0)
+        .otherwise(pl.col("volume"))
+        .alias("volume")
     )
     row = strategy.filter_minute_history(bars, {}).row(0, named=True)
 
@@ -90,29 +95,35 @@ def test_parameters_can_be_adjusted(strategy):
 
 
 def test_only_latest_bar_can_match(strategy):
-    bars = pl.concat([
-        _bars(),
-        _bars(start=START + timedelta(minutes=21), count=1, last_close=10.2, last_volume=100.0),
-    ])
+    bars = pl.concat(
+        [
+            _bars(),
+            _bars(start=START + timedelta(minutes=21), count=1, last_close=10.2, last_volume=100.0),
+        ]
+    )
     assert strategy.filter_minute_history(bars, {}).is_empty()
 
 
 def test_latest_day_and_symbols_are_isolated(strategy):
-    bars = pl.concat([
-        _bars(start=START - timedelta(days=1)),
-        _bars(count=10),
-        _bars(symbol="600002.SH"),
-        _bars(symbol="600003.SH", last_volume=299.0),
-    ]).reverse()
+    bars = pl.concat(
+        [
+            _bars(start=START - timedelta(days=1)),
+            _bars(count=10),
+            _bars(symbol="600002.SH"),
+            _bars(symbol="600003.SH", last_volume=299.0),
+        ]
+    ).reverse()
     result = strategy.filter_minute_history(bars, {})
     assert result["symbol"].to_list() == ["600002.SH"]
 
 
 def test_window_restarts_after_lunch(strategy):
-    bars = pl.concat([
-        _bars(start=datetime(2026, 10, 20, 11, 10)),
-        _bars(start=datetime(2026, 10, 20, 13, 0), count=10),
-    ])
+    bars = pl.concat(
+        [
+            _bars(start=datetime(2026, 10, 20, 11, 10)),
+            _bars(start=datetime(2026, 10, 20, 13, 0), count=10),
+        ]
+    )
     assert strategy.filter_minute_history(bars, {}).is_empty()
 
 
@@ -133,7 +144,8 @@ def test_invalid_historical_volume_fails_closed(strategy, bad_value):
     bars = _bars().with_columns(
         pl.when(pl.col("datetime") == START + timedelta(minutes=10))
         .then(pl.lit(bad_value, dtype=pl.Float64))
-        .otherwise(pl.col("volume")).alias("volume")
+        .otherwise(pl.col("volume"))
+        .alias("volume")
     )
     assert strategy.filter_minute_history(bars, {}).is_empty()
 
@@ -144,7 +156,8 @@ def test_invalid_latest_price_or_volume_fails_closed(strategy, column, bad_value
     bars = _bars().with_columns(
         pl.when(pl.col("datetime") == START + timedelta(minutes=20))
         .then(pl.lit(bad_value, dtype=pl.Float64))
-        .otherwise(pl.col(column)).alias(column)
+        .otherwise(pl.col(column))
+        .alias(column)
     )
     assert strategy.filter_minute_history(bars, {}).is_empty()
 
@@ -152,7 +165,9 @@ def test_invalid_latest_price_or_volume_fails_closed(strategy, column, bad_value
 def test_zero_baseline_fails_closed(strategy):
     bars = _bars().with_columns(
         pl.when(pl.col("datetime") < START + timedelta(minutes=20))
-        .then(0.0).otherwise(pl.col("volume")).alias("volume")
+        .then(0.0)
+        .otherwise(pl.col("volume"))
+        .alias("volume")
     )
     assert strategy.filter_minute_history(bars, {}).is_empty()
 
@@ -189,8 +204,8 @@ def test_timezone_aware_data_is_normalized(strategy):
 
 
 @pytest.mark.parametrize(
-    "params", [{"volume_window": 0}, {"volume_window": 121},
-               {"min_change_pct": -1}, {"volume_multiple": 0}],
+    "params",
+    [{"volume_window": 0}, {"volume_window": 121}, {"min_change_pct": -1}, {"volume_multiple": 0}],
 )
 def test_invalid_parameters_are_rejected(strategy, params):
     with pytest.raises(ValueError):
@@ -203,13 +218,19 @@ def test_import_save_and_engine_execution(tmp_path):
     engine = StrategyEngine([tmp_path / "strategies" / "custom"])
     saved = save_strategy_code_core(
         StrategyCodeSaveRequest(
-            strategy_id="custom_minute_price_volume", code=code,
-            target_source="custom", mode="create",
-        ), engine, tmp_path,
+            strategy_id="custom_minute_price_volume",
+            code=code,
+            target_source="custom",
+            mode="create",
+        ),
+        engine,
+        tmp_path,
     )
     assert saved["ok"] is True
     context = StrategyDataContext(
-        asset_type="stock", timeframe="1m", as_of=date(2026, 10, 20),
+        asset_type="stock",
+        timeframe="1m",
+        as_of=date(2026, 10, 20),
         current=pl.DataFrame({"symbol": ["600001.SH"], "name": ["测试标的"]}),
         history=_bars(),
     )
@@ -236,7 +257,8 @@ def test_py_file_import_through_resource_api(tmp_path, monkeypatch):
         assert preview["entries"][0]["issues"] == []
 
         response = client.post(
-            "/api/definitions/resources/apply", files=files,
+            "/api/definitions/resources/apply",
+            files=files,
             data={"selected": json.dumps(preview["roots"]), "revision": preview["revision"]},
         )
         assert response.status_code == 200, response.text

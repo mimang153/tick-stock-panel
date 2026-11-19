@@ -1,9 +1,10 @@
 """策略守护 (发布后持续复验) HTTP API。"""
+
 from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -47,6 +48,7 @@ class GuardianAdoptRequest(BaseModel):
 
 
 def _manager(request: Request) -> MiningJobManager:
+    """取得守护任务管理器；不可用时返回 503。"""
     manager = getattr(request.app.state, "guardian_manager", None)
     if manager is None:
         raise HTTPException(status_code=503, detail="guardian manager is unavailable")
@@ -54,14 +56,17 @@ def _manager(request: Request) -> MiningJobManager:
 
 
 def _store(request: Request) -> GuardianStore:
+    """返回守护档案存储。"""
     return GuardianStore(request.app.state.repo.store.data_dir)
 
 
 def _data_dir(request: Request):
+    """返回当前数据源根目录。"""
     return request.app.state.repo.store.data_dir
 
 
 def _project_last_check(check: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """投影最近一次复验结果，非映射值视为无。"""
     if not isinstance(check, Mapping):
         return None
     return {
@@ -80,6 +85,7 @@ def _project_last_check(check: Mapping[str, Any] | None) -> dict[str, Any] | Non
 
 
 def _project_profile(profile: Mapping[str, Any], name: str | None) -> dict[str, Any]:
+    """把守护档案投影为对外视图，含连续 watch 告警判定。"""
     baseline = profile.get("baseline") or {}
     metrics = baseline.get("metrics") or {}
     checks = profile.get("checks") or []
@@ -110,6 +116,7 @@ def _project_profile(profile: Mapping[str, Any], name: str | None) -> dict[str, 
 
 @router.get("/overview")
 def get_overview(request: Request) -> dict[str, Any]:
+    """返回守护档案总览，含每个策略的最新复验与告警状态。"""
     store = _store(request)
     engine = getattr(request.app.state, "strategy_engine", None)
     try:
@@ -181,6 +188,7 @@ def adopt_strategy(
 
 @router.post("/{strategy_id}/drop")
 def drop_strategy(strategy_id: str, request: Request) -> dict[str, Any]:
+    """移除指定策略的守护档案。"""
     store = _store(request)
     try:
         removed = store.drop(strategy_id)
@@ -193,6 +201,7 @@ def drop_strategy(strategy_id: str, request: Request) -> dict[str, Any]:
 
 @router.post("/{strategy_id}/rerun")
 def rerun_strategy(strategy_id: str, request: Request) -> dict[str, Any]:
+    """手动触发单个策略的守护复验。"""
     store = _store(request)
     if store.get(strategy_id) is None:
         raise HTTPException(status_code=404, detail=f"guardian profile not found: {strategy_id}")
@@ -204,6 +213,7 @@ def rerun_strategy(strategy_id: str, request: Request) -> dict[str, Any]:
 
 @router.post("/run")
 def run_all(request: Request) -> dict[str, Any]:
+    """手动触发全部策略的守护复验。"""
     manager = _manager(request)
     _reject_active_run(manager)
     run = _enqueue_run(manager, request, strategy_ids=None)
@@ -212,6 +222,7 @@ def run_all(request: Request) -> dict[str, Any]:
 
 @router.get("/runs")
 def list_runs(request: Request, limit: int = 20) -> dict[str, Any]:
+    """列出最近的守护复验任务。"""
     if not 1 <= limit <= 100:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
     manager = _manager(request)
@@ -224,6 +235,7 @@ def list_runs(request: Request, limit: int = 20) -> dict[str, Any]:
 
 @router.get("/runs/{run_id}")
 def get_run(run_id: str, request: Request) -> dict[str, Any]:
+    """返回单次守护复验任务详情，成功时附带摘要。"""
     manager = _manager(request)
     manifest = manager.store.get(run_id)
     if manifest is None:
@@ -270,9 +282,7 @@ class GuardianComboCreateRequest(BaseModel):
 
 
 @router.post("/combinations/create")
-def create_combination(
-    payload: GuardianComboCreateRequest, request: Request
-) -> dict[str, Any]:
+def create_combination(payload: GuardianComboCreateRequest, request: Request) -> dict[str, Any]:
     try:
         result = create_guardian_composite(
             request.app.state.repo.store.data_dir,
@@ -290,6 +300,7 @@ def create_combination(
 
 @router.get("/config")
 def get_config() -> dict[str, Any]:
+    """返回当前守护调度配置。"""
     return preferences.get_guardian_schedule()
 
 
@@ -298,7 +309,9 @@ def update_config(payload: GuardianConfigPatch) -> dict[str, Any]:
     current = preferences.get_guardian_schedule()
     updates = payload.model_dump(exclude_none=True)
     if not updates:
-        raise HTTPException(status_code=400, detail="at least one guardian config field is required")
+        raise HTTPException(
+            status_code=400, detail="at least one guardian config field is required"
+        )
     merged = {**current, **updates}
     try:
         return preferences.set_guardian_schedule(
@@ -313,14 +326,14 @@ def update_config(payload: GuardianConfigPatch) -> dict[str, Any]:
 
 
 def _active_run(manager: MiningJobManager) -> dict[str, Any] | None:
-    manifests = manager.store.list_runs(limit=1, statuses=ACTIVE_RUN_STATUSES)
+    manifests = manager.store.list_runs(limit=1, statuses=cast(Any, ACTIVE_RUN_STATUSES))
     if not manifests:
         return None
     return _project_run(manager, manifests[0])
 
 
 def _reject_active_run(manager: MiningJobManager) -> None:
-    if manager.store.list_runs(limit=1, statuses=ACTIVE_RUN_STATUSES):
+    if manager.store.list_runs(limit=1, statuses=cast(Any, ACTIVE_RUN_STATUSES)):
         raise HTTPException(status_code=409, detail="已有守护复验任务在运行")
 
 
@@ -354,8 +367,6 @@ def _project_run(manager: MiningJobManager, manifest: Mapping[str, Any]) -> dict
         "finished_at": manifest.get("finished_at"),
         "error": manifest.get("error"),
         "progress": (
-            summary.get("progress")
-            if isinstance(summary.get("progress"), Mapping)
-            else None
+            summary.get("progress") if isinstance(summary.get("progress"), Mapping) else None
         ),
     }

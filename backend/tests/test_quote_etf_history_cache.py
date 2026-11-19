@@ -16,12 +16,18 @@ def sample(tmp_path, monkeypatch):
     days = [TODAY - timedelta(days=i) for i in range(1, 145)]
     days = sorted(d for d in days if d.weekday() < 5)
     for i, day in enumerate(days):
-        frame = pl.DataFrame({
-            "symbol": ["510300.SH", "159915.SZ"], "date": [day] * 2,
-            "open": [10.0, 20.0], "high": [11.0+i/100, 21.0+i/100],
-            "low": [9.0, 19.0], "close": [10.0+i/100, 20.0+i/100],
-            "volume": [10000.0, 20000.0], "amount": [100000.0, 400000.0],
-        })
+        frame = pl.DataFrame(
+            {
+                "symbol": ["510300.SH", "159915.SZ"],
+                "date": [day] * 2,
+                "open": [10.0, 20.0],
+                "high": [11.0 + i / 100, 21.0 + i / 100],
+                "low": [9.0, 19.0],
+                "close": [10.0 + i / 100, 20.0 + i / 100],
+                "volume": [10000.0, 20000.0],
+                "amount": [100000.0, 400000.0],
+            }
+        )
         path = tmp_path / "kline_etf_daily" / f"date={day}" / "part.parquet"
         path.parent.mkdir(parents=True)
         frame.write_parquet(path)
@@ -68,7 +74,9 @@ def test_warm_etf_output_matches_cold_recompute_after_changes(sample, monkeypatc
     elif change == "factor":
         path = root / "adj_factor_etf/all.parquet"
         path.parent.mkdir(parents=True)
-        pl.DataFrame({"symbol": ["510300.SH"], "trade_date": [days[-5]], "ex_factor": [1.1]}).write_parquet(path)
+        pl.DataFrame(
+            {"symbol": ["510300.SH"], "trade_date": [days[-5]], "ex_factor": [1.1]}
+        ).write_parquet(path)
     elif change == "rollover":
         path = root / "kline_etf_daily" / f"date={TODAY}" / "part.parquet"
         path.parent.mkdir(parents=True)
@@ -106,8 +114,10 @@ def test_today_disk_writes_do_not_invalidate_history(sample, monkeypatch):
     today.write_parquet(path)
     service._flush_live_enriched(today, asset_type="etf")
     assert len(scans) == 1
-    assert_frame_equal(output[-1].select("symbol", "raw_close").sort("symbol"),
-                       today.select("symbol", pl.col("close").alias("raw_close")).sort("symbol"))
+    assert_frame_equal(
+        output[-1].select("symbol", "raw_close").sort("symbol"),
+        today.select("symbol", pl.col("close").alias("raw_close")).sort("symbol"),
+    )
 
 
 def test_oversized_history_is_not_retained_and_repo_change_clears_cache(sample, monkeypatch):

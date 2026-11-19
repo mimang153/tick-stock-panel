@@ -2,6 +2,7 @@
 
 按 capability 分别维护令牌桶。Phase 0:基础实现;Phase 1 接入批量合并、优先级队列。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -13,9 +14,9 @@ from .capabilities import Cap, CapabilitySet
 
 @dataclass
 class _Bucket:
-    capacity: int        # 每分钟令牌数
+    capacity: int  # 每分钟令牌数
     tokens: float
-    last_refill: float   # 单位:秒
+    last_refill: float  # 单位:秒
 
     def consume(self, n: int = 1) -> float:
         """尝试消费 n 个令牌,返回需要等待的秒数(0 表示无需等待)。"""

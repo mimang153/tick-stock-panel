@@ -32,6 +32,7 @@ fanout 配方字段:
 大概率补齐。轮次用尽仍失败的条目记 warning 跳过 — snapshot 为覆盖式
 写入, 稍后重新执行即可整体重试, 语义与回填「可续补」一致。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -48,13 +49,19 @@ _DEFAULT_CONCURRENCY = 8
 _DEFAULT_RETRIES = 1
 # 429 退避: 等一个分钟级配额窗口再试 (对齐 ext_pull._BACKFILL_429_WAIT_S)
 _RATE_LIMIT_WAIT_S = 30.0
-_RATE_LIMIT_JITTER_S = 10.0   # 抖动打散并发重试的惊群
-_REPLENISH_ROUNDS = 3         # 主轮后对失败条目的补拉轮次上限
-_sleep = asyncio.sleep        # 测试注入点: 替换后可消除真实等待
+_RATE_LIMIT_JITTER_S = 10.0  # 抖动打散并发重试的惊群
+_REPLENISH_ROUNDS = 3  # 主轮后对失败条目的补拉轮次上限
+_sleep = asyncio.sleep  # 测试注入点: 替换后可消除真实等待
 
 _REQUIRED_KEYS = (
-    "url", "param", "id_field", "items_path", "member_id_field",
-    "symbol_col", "name_col", "value_col",
+    "url",
+    "param",
+    "id_field",
+    "items_path",
+    "member_id_field",
+    "symbol_col",
+    "name_col",
+    "value_col",
 )
 
 
@@ -81,15 +88,7 @@ async def fetch_fanout_rows(config: ExtConfig, target_date=None) -> list[dict]:
         return await _fetch_fanout_rows(config, target_date)
 
 
-async def _fetch_fanout_rows(config: ExtConfig, target_date=None) -> list[dict]:
-    """执行两级拉取并反转为「成员 → 类别清单」行。"""
-    from app.services.ext_pull import (
-        _append_query_params,
-        _extract_rows,
-        _request_json,
-        _status_code,
-    )
-
+def _validate_fanout_config(config: ExtConfig):
     pull = config.pull
     if pull is None:
         raise ValueError("拉取未配置")
@@ -97,20 +96,33 @@ async def _fetch_fanout_rows(config: ExtConfig, target_date=None) -> list[dict]:
     missing = [k for k in _REQUIRED_KEYS if not fanout.get(k)]
     if missing:
         raise ValueError(f"fanout 配方缺少必填项: {', '.join(missing)}")
+    return pull, fanout
+
+
+async def _load_fanout_entries(pull, config: ExtConfig, target_date, fanout: dict):
+    from app.services.ext_pull import _extract_rows, _request_json
 
     # ---- 第一级: 类别清单 ----
     catalog = await _request_json(pull, config.id, target_date)
     _raise_on_envelope_error(catalog)
     items = _extract_rows(catalog, pull.response_path)
-
     id_field = fanout["id_field"]
     label_field = fanout.get("label_field") or id_field
-    entries = [
-        it for it in items
-        if isinstance(it, dict) and str(it.get(id_field) or "").strip()
-    ]
+    entries = [it for it in items if isinstance(it, dict) and str(it.get(id_field) or "").strip()]
     if not entries:
         raise ValueError(f"第一级返回 0 个可用条目 (id_field={id_field})")
+    return entries, id_field, label_field
+
+
+async def _fetch_fanout_members(
+    pull, config: ExtConfig, fanout: dict, entries: list[dict], id_field: str
+):
+    from app.services.ext_pull import (
+        _append_query_params,
+        _extract_rows,
+        _request_json,
+        _status_code,
+    )
 
     # ---- 第二级: 逐条目成员 (并发 + 单条目重试 + 429 配额窗口退避) ----
     concurrency = int(fanout.get("concurrency") or _DEFAULT_CONCURRENCY)
@@ -130,9 +142,7 @@ async def _fetch_fanout_rows(config: ExtConfig, target_date=None) -> list[dict]:
         async with sem:
             for attempt in range(retries + 1):
                 try:
-                    data = await _request_json(
-                        pull, config.id, None, url_override=member_url
-                    )
+                    data = await _request_json(pull, config.id, None, url_override=member_url)
                     _raise_on_envelope_error(data)
                     return _extract_rows(data, fanout.get("items_path") or "")
                 except Exception as e:  # noqa: BLE001 — 单条目失败: 重试后进补拉轮
@@ -154,7 +164,9 @@ async def _fetch_fanout_rows(config: ExtConfig, target_date=None) -> list[dict]:
             await _rate_limit_backoff()
             logger.info(
                 "fanout 补拉第 %d/%d 轮: 剩余 %d 个条目",
-                round_no, _REPLENISH_ROUNDS, len(pending),
+                round_no,
+                _REPLENISH_ROUNDS,
+                len(pending),
             )
         members_list = await asyncio.gather(*(_members(e) for _, e in pending))
         still: list[tuple[int, dict]] = []
@@ -164,7 +176,18 @@ async def _fetch_fanout_rows(config: ExtConfig, target_date=None) -> list[dict]:
             else:
                 results[slot[0]] = members
         pending = still
+    return results, pending, rate_limited
 
+
+def _aggregate_fanout_rows(
+    entries: list[dict],
+    results: dict[int, list[dict]],
+    pending: list[tuple[int, dict]],
+    fanout: dict,
+    label_field: str,
+    id_field: str,
+    rate_limited: list[bool],
+) -> list[dict]:
     # ---- 反转聚合: 成员 → 类别清单 (顺序跟随目录顺序, 保证拼接结果稳定) ----
     m_id = fanout["member_id_field"]
     m_name = fanout.get("member_label_field")
@@ -188,13 +211,14 @@ async def _fetch_fanout_rows(config: ExtConfig, target_date=None) -> list[dict]:
             if label and label not in row[fanout["value_col"]]:
                 row[fanout["value_col"]].append(label)
 
-    failed = [
-        str(e.get(label_field) or e.get(id_field) or "") for _, e in pending
-    ]
+    failed = [str(e.get(label_field) or e.get(id_field) or "") for _, e in pending]
     if failed:
         logger.warning(
             "fanout 第二级失败 %d/%d (重试与 %d 轮补拉后仍失败, 已跳过): %s",
-            len(failed), len(entries), _REPLENISH_ROUNDS, "、".join(failed[:5]),
+            len(failed),
+            len(entries),
+            _REPLENISH_ROUNDS,
+            "、".join(failed[:5]),
         )
     if not agg:
         hint = " (疑似限流 429, 稍后重新执行即可重试全部条目)" if rate_limited[0] else ""
@@ -205,3 +229,15 @@ async def _fetch_fanout_rows(config: ExtConfig, target_date=None) -> list[dict]:
         {**row, fanout["value_col"]: separator.join(row[fanout["value_col"]])}
         for row in agg.values()
     ]
+
+
+async def _fetch_fanout_rows(config: ExtConfig, target_date=None) -> list[dict]:
+    """执行两级拉取并反转为「成员 → 类别清单」行。"""
+    pull, fanout = _validate_fanout_config(config)
+    entries, id_field, label_field = await _load_fanout_entries(pull, config, target_date, fanout)
+    results, pending, rate_limited = await _fetch_fanout_members(
+        pull, config, fanout, entries, id_field
+    )
+    return _aggregate_fanout_rows(
+        entries, results, pending, fanout, label_field, id_field, rate_limited
+    )

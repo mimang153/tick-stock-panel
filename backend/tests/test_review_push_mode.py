@@ -1,11 +1,22 @@
 """复盘推送触发方式 review_push_mode 测试 — auto/manual 白名单与默认值 + 推送门控。"""
+
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
 from app.services import preferences
+
+# 端点不读 request; 用 duck-typed 占位(None)绕过 Request[State] 静态签名。
+_NO_REQUEST: Any = None
+
+
+def _record(result, log, *items):
+    """记录本次调用参数后返回既定结果(替代 append(x) or result 惯用法)。"""
+    log.extend(items)
+    return result
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +50,7 @@ def test_set_review_push_mode_rejects_invalid_value():
 #   manual: 定时复盘只归档不推送; 手动保存需显式 push=True 才推
 #   auto:   归档即推(与旧逻辑一致)
 
+
 def test_save_report_manual_requires_explicit_push(monkeypatch):
     from app.api import market_recap
     from app.jobs import daily_pipeline
@@ -56,11 +68,15 @@ def test_save_report_manual_requires_explicit_push(monkeypatch):
     preferences.set_review_push_mode("manual")
 
     # 默认 push=False: manual 模式下只归档, 不外发
-    market_recap.save_report(None, market_recap.SaveReportRequest(as_of="2026-07-18", content="正文"))
+    market_recap.save_report(
+        _NO_REQUEST, market_recap.SaveReportRequest(as_of="2026-07-18", content="正文")
+    )
     assert pushed == []
 
     # 显式 push=True: manual 模式下外发
-    market_recap.save_report(None, market_recap.SaveReportRequest(as_of="2026-07-18", content="正文", push=True))
+    market_recap.save_report(
+        _NO_REQUEST, market_recap.SaveReportRequest(as_of="2026-07-18", content="正文", push=True)
+    )
     assert pushed == [{"as_of": "2026-07-18", "emotion_label": ""}]
 
 
@@ -81,7 +97,9 @@ def test_save_report_auto_pushes_without_flag(monkeypatch):
     preferences.set_review_push_mode("auto")
 
     # auto 模式: 无需 push 标志即外发
-    market_recap.save_report(None, market_recap.SaveReportRequest(as_of="2026-07-18", content="正文"))
+    market_recap.save_report(
+        _NO_REQUEST, market_recap.SaveReportRequest(as_of="2026-07-18", content="正文")
+    )
     assert pushed == [{"as_of": "2026-07-18", "emotion_label": ""}]
 
 
@@ -96,7 +114,7 @@ def _patch_scheduled_review(monkeypatch, pushed: list, archived: list):
     monkeypatch.setattr(daily_pipeline, "_stream_review_with_retry", _fake_stream)
     monkeypatch.setattr(
         "app.services.market_recap_reports.save_report",
-        lambda d: archived.append(d) or {"id": "r1"},
+        lambda d: _record({"id": "r1"}, archived, d),
     )
     monkeypatch.setattr(
         daily_pipeline,

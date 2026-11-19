@@ -12,6 +12,7 @@
 - 合成事件只喂模拟盘下单, 不进 SSE 告警/系统通知/webhook/留痕
   (quote_service 用 is_paper_watch_event 分流)。
 """
+
 from __future__ import annotations
 
 import logging
@@ -114,6 +115,8 @@ def sync(data_dir: Path, monitor_engine: Any, strategy_engine: Any) -> dict[str,
     if added or removed:
         logger.info(
             "paper watch synced: +%s -%s (watching %d strategies)",
-            added, removed, len(want),
+            added,
+            removed,
+            len(want),
         )
     return {"added": added, "removed": removed, "watching": sorted(want)}

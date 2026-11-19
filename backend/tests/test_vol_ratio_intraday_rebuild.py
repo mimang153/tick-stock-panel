@@ -7,6 +7,7 @@ compute_indicators — 今日分区是实时快照的部分量, 而全量量比�
 (0 < elapsed < 240) 时, 今日行按已交易分钟折算, 与 live 增量路径同口径;
 盘后/盘前/历史数据 (回测、慢路径) 完全不受影响。
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -26,15 +27,17 @@ def _make_df(include_today: bool = True) -> pl.DataFrame:
     days = [TODAY - timedelta(days=k) for k in range(6, 0, -1)]  # 前 6 个日历日
     if include_today:
         days.append(TODAY)
-    return pl.DataFrame({
-        "symbol": ["600000.SH"] * len(days),
-        "date": days,
-        "open": [10.0] * len(days),
-        "high": [10.5] * len(days),
-        "low": [9.5] * len(days),
-        "close": [10.0] * len(days),
-        "volume": [200.0] * (len(days) - 1) + [100.0],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["600000.SH"] * len(days),
+            "date": days,
+            "open": [10.0] * len(days),
+            "high": [10.5] * len(days),
+            "low": [9.5] * len(days),
+            "close": [10.0] * len(days),
+            "volume": [200.0] * (len(days) - 1) + [100.0],
+        }
+    )
 
 
 def _vol_ratio_of_latest(df: pl.DataFrame) -> float:

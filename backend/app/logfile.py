@@ -5,6 +5,7 @@ main.py (backend.log, 源码/服务器模式) 与 desktop.py:_setup_logging
 混放, 且桌面版用普通 FileHandler 追加、不切割 —— 长期挂机的 desktop.log
 会无限增长 (用户反馈的磁盘隐患)。
 """
+
 import contextlib
 import logging
 import os
@@ -56,14 +57,18 @@ class StallSafeRotatingFileHandler(RotatingFileHandler):
         self._failures += 1
         exc = sys.exc_info()[1]
         if self._failures < _MAX_ROTATE_FAILURES:
-            logger.warning("文件日志滚动失败 (%s): %s — 若持续失败将停用文件输出",
-                           type(exc).__name__ if exc else "未知错误", exc)
+            logger.warning(
+                "文件日志滚动失败 (%s): %s — 若持续失败将停用文件输出",
+                type(exc).__name__ if exc else "未知错误",
+                exc,
+            )
             return
         self._stopping = True
         logger.error(
             "文件日志已停用: %s。多为日志文件被其他进程占用 (Windows: 残留 backend 进程"
             "或编辑器打开 %s)。终端日志不受影响, 清理占用后重启恢复。",
-            exc, self.baseFilename,
+            exc,
+            self.baseFilename,
         )
         root = logging.getLogger()
         if self in root.handlers:
@@ -85,10 +90,8 @@ def _migrate_legacy(log_dir, filename: str) -> None:
         dst = log_dir / name
         if dst.exists():
             continue
-        try:
+        with contextlib.suppress(OSError):
             os.replace(src, dst)
-        except OSError:
-            pass
 
 
 def attach_rotating_log(filename: str, *, max_mb: int, backup_count: int) -> None:
@@ -107,11 +110,11 @@ def attach_rotating_log(filename: str, *, max_mb: int, backup_count: int) -> Non
             log_dir / filename,
             maxBytes=max_mb * 1024 * 1024,
             backupCount=backup_count,
-            mode="a", encoding="utf-8", errors="replace",
+            mode="a",
+            encoding="utf-8",
+            errors="replace",
         )
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-        )
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
         logging.getLogger().addHandler(handler)
     except Exception as e:  # noqa: BLE001
         logger.warning("文件日志初始化失败, 仅输出到终端: %s", e)

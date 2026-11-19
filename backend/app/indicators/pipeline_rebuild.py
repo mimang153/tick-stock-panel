@@ -148,14 +148,27 @@ def _compute_storage_batches(
     return _root.pl.concat(parts, how="diagonal_relaxed", rechunk=False)
 
 
-def _validate_repair_batch(root: _root.Path, asset_type: str, files, raw, daily_dirname) -> None:
+def _validate_repair_batch(
+    root: _root.Path, asset_type: str, files, raw, daily_dirname, storage=None
+) -> None:
     """修补重算前校验原始历史；异常时写健康报告并抛出。"""
     from app.services import daily_health, data_integrity
 
     bad = data_integrity.invalid_daily_rows(raw)
     if bad.is_empty():
         return
-    issues = data_integrity.inspect_invalid_history(root, daily_dirname(asset_type), files, bad)
+    if storage is not None:
+        table = daily_dirname(asset_type)
+        today = data_integrity.cn_today()
+        issues = []
+        for day in bad["date"].drop_nulls().unique().to_list():
+            frame = storage.read_daily(table, start=day, end=day)
+            issue = data_integrity.inspect_daily_frame(table, day, frame)
+            # 当日仍在进行中，不能登记成不可修补的历史问题。
+            if issue is not None and issue.day != today:
+                issues.append(issue)
+    else:
+        issues = data_integrity.inspect_invalid_history(root, daily_dirname(asset_type), files, bad)
     daily_health.record_issues(root, issues)
     if issues:
         first = issues[0]
@@ -170,7 +183,7 @@ def _validate_repair_batch(root: _root.Path, asset_type: str, files, raw, daily_
     )
 
 
-def recompute_daily_symbols(
+def recompute_daily_symbols(  # func-length-allow: DES-002 已内联 CK generation 生命周期，拆分会改变发布顺序
     repo,
     asset_type: str,
     *,
@@ -184,11 +197,17 @@ def recompute_daily_symbols(
     from app.tickflow.repository import daily_dirname, enriched_dirname
 
     root = _root.Path(repo.store.data_dir)
-    files = repo.daily_repair_files(asset_type)
-    if not files:
-        raise ValueError("没有可用于重算的原始日K")
+    generation_store = getattr(repo, "storage", None)
     store = _root._daily_store()
     daily_table = daily_dirname(asset_type)
+    if generation_store is not None:
+        if not generation_store.list_daily_dates(daily_table):
+            raise ValueError("没有可用于重算的原始日K")
+        files = []
+    else:
+        files = repo.daily_repair_files(asset_type)
+        if not files:
+            raise ValueError("没有可用于重算的原始日K")
     selected = (
         sorted(set(symbols))
         if symbols is not None
@@ -206,12 +225,19 @@ def recompute_daily_symbols(
     )
     shares = _root.load_share_history(root) if asset_type == "stock" else _root.pl.DataFrame()
     batch_size = max(1, min(preferences.get_enriched_batch_size(), 200))
-    publication = _root.EnrichedPublication(
+    publication_cls = (
+        _root.CKEnrichedPublication if generation_store is not None else _root.EnrichedPublication
+    )
+    publication = publication_cls(
         root,
         asset_type,
         recover=True,
         claim_wait_s=_root._PUBLICATION_CLAIM_WAIT_S,
         purpose="daily_repair",
+    )
+    begin_generation = getattr(generation_store, "begin_generation", None)
+    generation_id = (
+        begin_generation(asset_type, "system", start) if begin_generation is not None else None
     )
     written = 0
     total = (len(selected) + batch_size - 1) // batch_size
@@ -223,7 +249,9 @@ def recompute_daily_symbols(
                 symbols=batch,
                 columns=_root._daily_read_columns(store, daily_table),
             ).sort(["symbol", "date"])
-            _root._validate_repair_batch(root, asset_type, files, raw, daily_dirname)
+            _root._validate_repair_batch(
+                root, asset_type, files, raw, daily_dirname, storage=generation_store
+            )
             in_batch = _root.pl.col("symbol").is_in(batch)
             batch_factors = factors.filter(in_batch) if not factors.is_empty() else factors
             batch_inst = instruments.filter(in_batch) if not instruments.is_empty() else instruments
@@ -239,10 +267,16 @@ def recompute_daily_symbols(
                 asset_type, output, start=start, symbols=batch, publication=publication
             )
             publication.heartbeat()
+            if generation_id is not None and generation_store is not None:
+                generation_store.heartbeat_generation(asset_type, generation_id, "system")
             if on_batch_done:
                 on_batch_done(offset // batch_size + 1, total)
         publication.commit()
+        if generation_id is not None and generation_store is not None:
+            generation_store.commit_generation(asset_type, generation_id, "system")
     except BaseException:
+        if generation_id is not None and generation_store is not None:
+            generation_store.fail_generation(asset_type, generation_id, "system")
         publication.abandon()
         raise
     enriched_dirname(asset_type)
@@ -265,22 +299,37 @@ def run_pipeline(
     读写持续失败, 且停止实时行情 (运行期唯一频繁的写入方) 也无法自愈。
     """
     import app.indicators.pipeline as _root
+    from app.storage.runtime import get_storage
 
     d = _root.Path(data_dir or _root.settings.data_dir)
-    publication = _root.EnrichedPublication(
+    runtime = get_storage()
+    # 显式 storage 下事实表与 generation 都以 CK 为准；离线路径保留本地 publication。
+    publication_cls = (
+        _root.CKEnrichedPublication if runtime is not None else _root.EnrichedPublication
+    )
+    publication = publication_cls(
         d,
         "stock",
         recover=True,
         claim_wait_s=_root._PUBLICATION_CLAIM_WAIT_S,
     )
+    ck_store = runtime.store if runtime is not None else None
+    generation_id = (
+        ck_store.begin_generation("stock", "system", None) if ck_store is not None else None
+    )
     try:
-        return _root._run_pipeline_impl(
+        result = _root._run_pipeline_impl(
             data_dir=data_dir,
             symbols=symbols,
             new_dates_only=new_dates_only,
             on_batch_done=on_batch_done,
             publication=publication,
         )
+        if generation_id is not None and ck_store is not None:
+            ck_store.commit_generation("stock", generation_id, "system")
+        return result
     except BaseException:
+        if generation_id is not None and ck_store is not None:
+            ck_store.fail_generation("stock", generation_id, "system")
         publication.abandon()
         raise

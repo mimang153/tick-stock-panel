@@ -4,6 +4,7 @@ import threading
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import polars as pl
 import pytest
@@ -27,12 +28,22 @@ def require_responsive_loop():
 
 @pytest.mark.parametrize("endpoint", ["upload", "detect"])
 async def test_file_parsing_leaves_loop_responsive(tmp_path, monkeypatch, endpoint):
-    config = ExtConfig(id="test", label="test", mode="snapshot", fields=[
-        ExtField("symbol"), ExtField("value", dtype="float"),
-    ])
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
-    )))
+    config = ExtConfig(
+        id="test",
+        label="test",
+        mode="snapshot",
+        fields=[
+            ExtField("symbol"),
+            ExtField("value", dtype="float"),
+        ],
+    )
+    request: Any = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
+            )
+        )
+    )
     check = require_responsive_loop()
     original = pl.read_csv
 
@@ -56,9 +67,16 @@ async def test_file_parsing_leaves_loop_responsive(tmp_path, monkeypatch, endpoi
 
 
 async def test_scheduled_ingest_leaves_loop_responsive(tmp_path, monkeypatch):
-    config = ExtConfig(id="test", label="test", mode="snapshot", fields=[
-        ExtField("symbol"), ExtField("value", dtype="float"),
-    ], pull=PullConfig(url="https://example.test/data", enabled=True))
+    config = ExtConfig(
+        id="test",
+        label="test",
+        mode="snapshot",
+        fields=[
+            ExtField("symbol"),
+            ExtField("value", dtype="float"),
+        ],
+        pull=PullConfig(url="https://example.test/data", enabled=True),
+    )
     check = require_responsive_loop()
     original = ext_pull.rows_to_parquet
 
@@ -71,7 +89,10 @@ async def test_scheduled_ingest_leaves_loop_responsive(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ext_pull, "fetch_rows_for_date", fetch)
     monkeypatch.setattr(ext_pull, "rows_to_parquet", write)
-    assert await ext_pull.fetch_and_ingest(config, tmp_path, date(2026, 10, 29)) == (1, "2026-10-29")
+    assert await ext_pull.fetch_and_ingest(config, tmp_path, date(2026, 10, 29)) == (
+        1,
+        "2026-10-29",
+    )
 
 
 async def test_cancelling_request_does_not_release_running_write_slot():
@@ -110,7 +131,7 @@ async def test_cancelled_queued_import_never_runs():
     loop = asyncio.get_running_loop()
     entered = asyncio.Event()
     release = threading.Event()
-    calls = []
+    calls: list = []
 
     def first():
         loop.call_soon_threadsafe(entered.set)
@@ -136,9 +157,13 @@ async def test_archive_inspection_and_reload_leave_loop_responsive(monkeypatch, 
     from app.api import config_backup, strategy
 
     check = require_responsive_loop()
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        strategy_engine=SimpleNamespace(reload=check),
-    )))
+    request: Any = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                strategy_engine=SimpleNamespace(reload=check),
+            )
+        )
+    )
 
     def inspect(data):
         check()
@@ -153,13 +178,21 @@ async def test_archive_inspection_and_reload_leave_loop_responsive(monkeypatch, 
     if kind == "backup":
         monkeypatch.setattr(config_backup.config_backup, "inspect_archive", inspect)
         monkeypatch.setattr(config_backup.config_backup, "apply_archive", apply)
-        assert await config_backup.inspect_backup(UploadFile(io.BytesIO(b"archive"))) == {"items": []}
-        result = await config_backup.apply_backup(request, UploadFile(io.BytesIO(b"archive")), False, "")
+        assert await config_backup.inspect_backup(UploadFile(io.BytesIO(b"archive"))) == {
+            "items": []
+        }
+        result = await config_backup.apply_backup(
+            request, UploadFile(io.BytesIO(b"archive")), False, ""
+        )
     else:
         monkeypatch.setattr(strategy._bundle_service(), "inspect_bundle", inspect)
         monkeypatch.setattr(strategy._bundle_service(), "apply_bundle", apply)
-        assert await strategy.inspect_strategy_bundle(UploadFile(io.BytesIO(b"archive"))) == {"items": []}
-        result = await strategy.apply_strategy_bundle(request, UploadFile(io.BytesIO(b"archive")), False)
+        assert await strategy.inspect_strategy_bundle(UploadFile(io.BytesIO(b"archive"))) == {
+            "items": []
+        }
+        result = await strategy.apply_strategy_bundle(
+            request, UploadFile(io.BytesIO(b"archive")), False
+        )
     assert result["reload_hints"]["strategies"] is True
 
 
@@ -179,7 +212,11 @@ async def test_cancelled_parser_cleans_its_own_temporary_files(tmp_path, monkeyp
     monkeypatch.setattr(ext_data.pl, "read_csv", parse)
     original_mkdtemp = ext_data.tempfile.mkdtemp
     monkeypatch.setattr(ext_data.tempfile, "mkdtemp", lambda: original_mkdtemp(dir=tmp_path))
-    task = asyncio.create_task(ext_data.detect_fields(None, UploadFile(io.BytesIO(b"symbol\n600000.SH\n"), filename="x.csv")))
+    task = asyncio.create_task(
+        ext_data.detect_fields(
+            None, UploadFile(io.BytesIO(b"symbol\n600000.SH\n"), filename="x.csv")
+        )
+    )
     await asyncio.wait_for(entered.wait(), 1)
     task.cancel()
     try:

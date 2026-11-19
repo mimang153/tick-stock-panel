@@ -5,7 +5,10 @@
 ① service 层有界重试 (撞发布 → 重读新世代重跑, 耗尽上抛);
 ② API 层把耗尽的 EnrichedGenerationUnavailableError 映射为 400 中文指引。
 """
+
 from __future__ import annotations
+
+from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
@@ -27,7 +30,7 @@ def _fast_retry(monkeypatch):
 
 
 def test_run_retries_once_on_generation_change(monkeypatch):
-    svc = FactorBacktestService(_FakeEngine())
+    svc = FactorBacktestService(cast(Any, _FakeEngine()))
     calls = []
 
     def _fake_run(config, *, regime_by_date=None):
@@ -37,12 +40,12 @@ def test_run_retries_once_on_generation_change(monkeypatch):
         return "ok"
 
     monkeypatch.setattr(svc, "_run", _fake_run)
-    assert svc.run(object()) == "ok"
+    assert svc.run(cast(Any, object())) == "ok"
     assert len(calls) == 2
 
 
 def test_run_raises_after_attempts_exhausted(monkeypatch):
-    svc = FactorBacktestService(_FakeEngine())
+    svc = FactorBacktestService(cast(Any, _FakeEngine()))
     calls = []
 
     def _fake_run(config, *, regime_by_date=None):
@@ -51,12 +54,12 @@ def test_run_raises_after_attempts_exhausted(monkeypatch):
 
     monkeypatch.setattr(svc, "_run", _fake_run)
     with pytest.raises(EnrichedGenerationUnavailableError):
-        svc.run(object())
+        svc.run(cast(Any, object()))
     assert len(calls) == FactorBacktestService._SNAPSHOT_MAX_ATTEMPTS
 
 
 def test_run_batch_retries_on_generation_change(monkeypatch):
-    svc = FactorBacktestService(_FakeEngine())
+    svc = FactorBacktestService(cast(Any, _FakeEngine()))
     calls = []
 
     def _fake_batch(config, *, regime_by_date=None):
@@ -66,7 +69,7 @@ def test_run_batch_retries_on_generation_change(monkeypatch):
         return "ok"
 
     monkeypatch.setattr(svc, "_run_batch", _fake_batch)
-    assert svc.run_batch(object()) == "ok"
+    assert svc.run_batch(cast(Any, object())) == "ok"
     assert len(calls) == 3
 
 
@@ -88,9 +91,14 @@ def test_factor_run_api_maps_generation_error_to_400(monkeypatch, tmp_path):
         raise EnrichedGenerationUnavailableError("exhausted")
 
     monkeypatch.setattr(FactorBacktestService, "run", _boom)
-    r = client.post("/api/backtest/factor/run", json={
-        "factor_name": "momentum_5d", "start": "2026-01-01", "end": "2026-06-30",
-    })
+    r = client.post(
+        "/api/backtest/factor/run",
+        json={
+            "factor_name": "momentum_5d",
+            "start": "2026-01-01",
+            "end": "2026-06-30",
+        },
+    )
     assert r.status_code == 400
     assert "正在更新" in r.json()["detail"]
 
@@ -102,8 +110,13 @@ def test_factor_batch_api_maps_generation_error_to_400(monkeypatch, tmp_path):
         raise EnrichedGenerationUnavailableError("exhausted")
 
     monkeypatch.setattr(FactorBacktestService, "run_batch", _boom)
-    r = client.post("/api/backtest/factor/batch", json={
-        "factor_names": ["momentum_5d"], "start": "2026-01-01", "end": "2026-06-30",
-    })
+    r = client.post(
+        "/api/backtest/factor/batch",
+        json={
+            "factor_names": ["momentum_5d"],
+            "start": "2026-01-01",
+            "end": "2026-06-30",
+        },
+    )
     assert r.status_code == 400
     assert "正在更新" in r.json()["detail"]

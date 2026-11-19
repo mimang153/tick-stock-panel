@@ -5,6 +5,7 @@
 
 UI 改 Key 时只动这个文件,不动 .env。
 """
+
 from __future__ import annotations
 
 import copy
@@ -25,6 +26,7 @@ _cache_sig: tuple[int, int] | None = None
 
 def _path() -> Path:
     from app.config import settings
+
     p = settings.data_dir / "user_data" / "secrets.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
@@ -68,7 +70,9 @@ def save(updates: dict) -> dict:
     current.update({k: v for k, v in updates.items() if v is not None})
     p = _path()
     atomic_write_text(
-        p, json.dumps(current, indent=2, ensure_ascii=False), mode=0o600,
+        p,
+        json.dumps(current, indent=2, ensure_ascii=False),
+        mode=0o600,
     )
     return current
 
@@ -85,7 +89,9 @@ def clear(*keys: str) -> dict:
     for k in keys:
         current.pop(k, None)
     atomic_write_text(
-        p, json.dumps(current, indent=2, ensure_ascii=False), mode=0o600,
+        p,
+        json.dumps(current, indent=2, ensure_ascii=False),
+        mode=0o600,
     )
     return current
 
@@ -96,6 +102,7 @@ def get_tickflow_key() -> str:
     if val:
         return val
     from app.config import settings
+
     return settings.tickflow_api_key or ""
 
 
@@ -105,6 +112,7 @@ def get_ai_key() -> str:
     if val:
         return val
     from app.config import settings
+
     return settings.ai_api_key or ""
 
 
@@ -114,6 +122,7 @@ def get_ai_config(key: str, default: str = "") -> str:
     if val:
         return val
     from app.config import settings
+
     return getattr(settings, key, default) or default
 
 
@@ -126,6 +135,7 @@ def get_ai_config_int(key: str, default: int) -> int:
         except (TypeError, ValueError):
             logger.warning("ai config %s is not an int: %r", key, val)
     from app.config import settings
+
     return int(getattr(settings, key, default) or default)
 
 

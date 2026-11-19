@@ -2,12 +2,13 @@
 
 直接调用 search_instruments, 用最小 FakeRepo 提供 instruments 缓存, 不走 HTTP/DB。
 """
+
 from __future__ import annotations
 
 import types
+from typing import Any
 
 import polars as pl
-import pytest
 
 from app.api.kline import search_instruments
 
@@ -23,15 +24,17 @@ class _FakeRepo:
         return self._by_asset.get(asset_type, pl.DataFrame())
 
 
-def _request(repo: _FakeRepo) -> types.SimpleNamespace:
+def _request(repo: _FakeRepo) -> Any:
     return types.SimpleNamespace(app=types.SimpleNamespace(state=types.SimpleNamespace(repo=repo)))
 
 
-STOCKS = pl.DataFrame({
-    "symbol": ["000001.SZ", "600000.SH", "600519.SH", "000333.SZ", "600737.SH"],
-    "code": ["000001", "600000", "600519", "000333", "600737"],
-    "name": ["平安银行", "浦发银行", "贵州茅台", "美的集团", "中粮糖业"],
-})
+STOCKS = pl.DataFrame(
+    {
+        "symbol": ["000001.SZ", "600000.SH", "600519.SH", "000333.SZ", "600737.SH"],
+        "code": ["000001", "600000", "600519", "000333", "600737"],
+        "name": ["平安银行", "浦发银行", "贵州茅台", "美的集团", "中粮糖业"],
+    }
+)
 
 
 def _search(q: str, asset_types: str = "stock", limit: int = 20) -> list[dict]:
@@ -40,6 +43,7 @@ def _search(q: str, asset_types: str = "stock", limit: int = 20) -> list[dict]:
 
 
 # ===== 既有逻辑回归: 代码 / 名称搜索不受影响 =====
+
 
 def test_code_prefix_match():
     """code 前缀: 6005 → 600519 (前缀优先)。"""
@@ -62,6 +66,7 @@ def test_empty_query_returns_empty():
 
 
 # ===== 拼音首字母搜索 (新功能) =====
+
 
 def test_pinyin_full_initials_match():
     """payh → 平安银行"""
@@ -102,24 +107,31 @@ def test_pinyin_and_code_prefix_coexist():
 
 # ===== 多音字 =====
 
-POLYPHONE_STOCKS = pl.DataFrame({
-    "symbol": ["600729.SH", "000625.SZ"],
-    "code": ["600729", "000625"],
-    "name": ["重庆百货", "长安汽车"],
-})
+POLYPHONE_STOCKS = pl.DataFrame(
+    {
+        "symbol": ["600729.SH", "000625.SZ"],
+        "code": ["600729", "000625"],
+        "name": ["重庆百货", "长安汽车"],
+    }
+)
 
 
 def test_polyphone_all_readings_match():
     """'重庆' 多音字: cq (chóng) 和 zq (zhòng) 读音都应命中。"""
     repo = _FakeRepo({"stock": POLYPHONE_STOCKS})
     # 取首字母集, 验证两种读音都能搜到
-    cq = search_instruments(_request(repo), q="cqbh", limit=20, asset_types="stock")["results"]      # chóng qīng
-    zq = search_instruments(_request(repo), q="zqbh", limit=20, asset_types="stock")["results"]      # zhòng qìng
+    cq = search_instruments(_request(repo), q="cqbh", limit=20, asset_types="stock")[
+        "results"
+    ]  # chóng qīng
+    zq = search_instruments(_request(repo), q="zqbh", limit=20, asset_types="stock")[
+        "results"
+    ]  # zhòng qìng
     assert "600729.SH" in [r["symbol"] for r in cq]
     assert "600729.SH" in [r["symbol"] for r in zq]
 
 
 # ===== 边界 =====
+
 
 def test_non_ascii_skips_pinyin_branch():
     """中文输入不走拼音分支, 仍按名称匹配。"""

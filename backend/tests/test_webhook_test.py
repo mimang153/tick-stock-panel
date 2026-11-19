@@ -2,7 +2,10 @@
 
 纯逻辑，不触网（monkeypatch webhook_adapter.send_*），直接调用 settings 端点函数。
 """
+
 from __future__ import annotations
+
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -19,14 +22,19 @@ WECOM_URL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-key"
 
 
 def test_feishu_sends_saved_url_and_secret(monkeypatch):
-    calls = {}
+    calls: dict = {}
     monkeypatch.setattr("app.services.preferences.get_feishu_webhook_url", lambda: FEISHU_URL)
     monkeypatch.setattr("app.services.preferences.get_feishu_webhook_secret", lambda: "my-secret")
     monkeypatch.setattr(
         "app.services.webhook_adapter.send_feishu",
         lambda url, title, body, secret="", max_attempts=3: calls.update(
-            url=url, title=title, body=body, secret=secret, max_attempts=max_attempts,
-        ) or True,
+            url=url,
+            title=title,
+            body=body,
+            secret=secret,
+            max_attempts=max_attempts,
+        )
+        or True,
     )
 
     result = run_webhook_test(WebhookTestIn(channel="feishu"))
@@ -51,10 +59,13 @@ def test_feishu_send_failure_returns_ok_false(monkeypatch):
     assert "推送失败" in result["detail"]
 
 
-@pytest.mark.parametrize("channel,url_getter", [
-    ("feishu", "app.services.preferences.get_feishu_webhook_url"),
-    ("wecom", "app.services.preferences.get_wecom_webhook_url"),
-])
+@pytest.mark.parametrize(
+    "channel,url_getter",
+    [
+        ("feishu", "app.services.preferences.get_feishu_webhook_url"),
+        ("wecom", "app.services.preferences.get_wecom_webhook_url"),
+    ],
+)
 def test_not_configured_returns_ok_false(monkeypatch, channel, url_getter):
     monkeypatch.setattr(url_getter, lambda: "")
 
@@ -65,7 +76,9 @@ def test_not_configured_returns_ok_false(monkeypatch, channel, url_getter):
 
 
 def test_invalid_saved_feishu_url_returns_ok_false(monkeypatch):
-    monkeypatch.setattr("app.services.preferences.get_feishu_webhook_url", lambda: "https://evil.example/hook/xx")
+    monkeypatch.setattr(
+        "app.services.preferences.get_feishu_webhook_url", lambda: "https://evil.example/hook/xx"
+    )
 
     result = run_webhook_test(WebhookTestIn(channel="feishu"))
 
@@ -74,7 +87,7 @@ def test_invalid_saved_feishu_url_returns_ok_false(monkeypatch):
 
 
 def test_wecom_sends_saved_url(monkeypatch):
-    calls = {}
+    calls: dict = {}
     monkeypatch.setattr("app.services.preferences.get_wecom_webhook_url", lambda: WECOM_URL)
     monkeypatch.setattr(
         "app.services.webhook_adapter.send_wecom",
@@ -90,7 +103,7 @@ def test_wecom_sends_saved_url(monkeypatch):
 
 
 def test_custom_webhook_sends_saved_url_and_secret(monkeypatch):
-    calls = {}
+    calls: dict = {}
     monkeypatch.setattr(
         "app.services.preferences.get_custom_webhook_url",
         lambda: "https://example.com/tickflow",
@@ -98,13 +111,13 @@ def test_custom_webhook_sends_saved_url_and_secret(monkeypatch):
     monkeypatch.setattr("app.secrets_store.get_custom_webhook_secret", lambda: "secret")
     monkeypatch.setattr(
         "app.services.webhook_adapter.send_custom",
-        lambda url, title, body, event_type, data=None, secret="", max_attempts=3:
-            calls.update(
-                url=url,
-                event_type=event_type,
-                secret=secret,
-                max_attempts=max_attempts,
-            ) or True,
+        lambda url, title, body, event_type, data=None, secret="", max_attempts=3: calls.update(
+            url=url,
+            event_type=event_type,
+            secret=secret,
+            max_attempts=max_attempts,
+        )
+        or True,
     )
 
     result = run_webhook_test(WebhookTestIn(channel="custom"))
@@ -119,7 +132,7 @@ def test_custom_webhook_sends_saved_url_and_secret(monkeypatch):
 
 
 def test_email_sends_with_saved_smtp_config(monkeypatch):
-    calls = {}
+    calls: dict = {}
     config = {
         "host": "smtp.example.com",
         "port": 465,
@@ -132,8 +145,10 @@ def test_email_sends_with_saved_smtp_config(monkeypatch):
     monkeypatch.setattr("app.secrets_store.get_email_smtp_password", lambda: "password")
     monkeypatch.setattr(
         "app.services.email_adapter.send_email",
-        lambda cfg, password, subject, body, max_attempts=2:
-            calls.update(config=cfg, password=password, subject=subject, max_attempts=max_attempts) or True,
+        lambda cfg, password, subject, body, max_attempts=2: calls.update(
+            config=cfg, password=password, subject=subject, max_attempts=max_attempts
+        )
+        or True,
     )
 
     result = run_webhook_test(WebhookTestIn(channel="email"))
@@ -146,4 +161,4 @@ def test_email_sends_with_saved_smtp_config(monkeypatch):
 
 def test_unknown_channel_rejected_by_pydantic():
     with pytest.raises(ValidationError):
-        WebhookTestIn(channel="sms")
+        WebhookTestIn(channel=cast(Any, "sms"))

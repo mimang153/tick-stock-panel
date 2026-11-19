@@ -4,10 +4,12 @@
 (event.type / event.delta / response.status / item.call_id 等) — 适配层
 本身也只依赖这些字段, 与 _iter_openai_text 的宽松风格一致。
 """
+
 from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -84,15 +86,18 @@ def _fake_client(result=None, stream=None, error=None):
 
 
 def test_chat_input_converts_tool_round_trip_shapes():
-    messages = [
+    messages: list[Any] = [
         {"role": "system", "content": "你是助手"},
         {"role": "user", "content": "查一下茅台"},
         {
             "role": "assistant",
             "content": "先查行情",
             "tool_calls": [
-                {"id": "call_1", "type": "function",
-                 "function": {"name": "get_quote", "arguments": '{"symbol": "600519"}'}},
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_quote", "arguments": '{"symbol": "600519"}'},
+                },
             ],
         },
         {"role": "tool", "tool_call_id": "call_1", "content": '{"ok": true}'},
@@ -104,17 +109,23 @@ def test_chat_input_converts_tool_round_trip_shapes():
         {"role": "system", "content": "你是助手"},
         {"role": "user", "content": "查一下茅台"},
         {"role": "assistant", "content": "先查行情"},
-        {"type": "function_call", "call_id": "call_1", "name": "get_quote",
-         "arguments": '{"symbol": "600519"}'},
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "get_quote",
+            "arguments": '{"symbol": "600519"}',
+        },
         {"type": "function_call_output", "call_id": "call_1", "output": '{"ok": true}'},
     ]
 
 
 def test_chat_input_plain_assistant_and_missing_role():
-    items = ai_responses.chat_input([
-        {"role": "assistant", "content": "纯文本回复"},
-        {"content": "无角色消息"},
-    ])
+    items = ai_responses.chat_input(
+        [
+            {"role": "assistant", "content": "纯文本回复"},
+            {"content": "无角色消息"},
+        ]
+    )
     assert items == [
         {"role": "assistant", "content": "纯文本回复"},
         {"role": "user", "content": "无角色消息"},
@@ -122,26 +133,42 @@ def test_chat_input_plain_assistant_and_missing_role():
 
 
 def test_responses_tools_flattens_and_passes_through_flat():
-    chat_schema = [{
-        "type": "function",
-        "function": {"name": "get_quote", "description": "查行情", "parameters": {"type": "object"}},
-    }]
-    flat_schema = [{
-        "type": "function",
-        "name": "get_kline",
-        "parameters": {"type": "object"},
-    }]
+    chat_schema = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_quote",
+                "description": "查行情",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+    flat_schema = [
+        {
+            "type": "function",
+            "name": "get_kline",
+            "parameters": {"type": "object"},
+        }
+    ]
 
-    assert ai_responses.responses_tools(chat_schema) == [{
-        "type": "function", "name": "get_quote",
-        "description": "查行情", "parameters": {"type": "object"},
-    }]
+    assert ai_responses.responses_tools(chat_schema) == [
+        {
+            "type": "function",
+            "name": "get_quote",
+            "description": "查行情",
+            "parameters": {"type": "object"},
+        }
+    ]
     # 已扁平的 schema 原样接受(个别网关直接吐扁平形态); description 缺省可省
-    assert ai_responses.responses_tools(flat_schema) == [{
-        "type": "function", "name": "get_kline", "parameters": {"type": "object"},
-    }]
+    assert ai_responses.responses_tools(flat_schema) == [
+        {
+            "type": "function",
+            "name": "get_kline",
+            "parameters": {"type": "object"},
+        }
+    ]
     # 非 dict / 无 function 体的条目静默跳过
-    assert ai_responses.responses_tools([None, {"type": "other"}]) == []
+    assert ai_responses.responses_tools(cast(Any, [None, {"type": "other"}])) == []
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +199,8 @@ def test_responses_kwargs_omits_none_max_tokens():
 
 def test_responses_kwargs_carries_tools():
     kwargs = ai_responses.responses_kwargs(
-        temperature=None, max_tokens=None,
+        temperature=None,
+        max_tokens=None,
         tools=[{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
     )
     assert kwargs["tools"] == [{"type": "function", "name": "f", "parameters": {"type": "object"}}]
@@ -180,25 +208,37 @@ def test_responses_kwargs_carries_tools():
 
 def test_responses_retry_kwargs_drops_rejected_params():
     temperature_reject = _FakeApiError(400, {"error": {"message": "temperature only 1 is allowed"}})
-    reasoning_reject = _FakeApiError(400, {"error": {"message": "Unsupported parameter: 'reasoning'"}})
+    reasoning_reject = _FakeApiError(
+        400, {"error": {"message": "Unsupported parameter: 'reasoning'"}}
+    )
 
     retry = ai_responses.responses_retry_kwargs(
-        temperature_reject, {"temperature": 0.3, "reasoning": {"effort": "high"}},
+        temperature_reject,
+        {"temperature": 0.3, "reasoning": {"effort": "high"}},
     )
     assert retry == {"reasoning": {"effort": "high"}}
 
     retry = ai_responses.responses_retry_kwargs(
-        reasoning_reject, {"temperature": 0.3, "reasoning": {"effort": "high"}},
+        reasoning_reject,
+        {"temperature": 0.3, "reasoning": {"effort": "high"}},
     )
     assert retry == {"temperature": 0.3}
 
     # 非 400 / 无关 400 不重试
-    assert ai_responses.responses_retry_kwargs(
-        _FakeApiError(500, {"error": {"message": "boom"}}), {"temperature": 0.3},
-    ) is None
-    assert ai_responses.responses_retry_kwargs(
-        _FakeApiError(400, {"error": {"message": "model not found"}}), {"temperature": 0.3},
-    ) is None
+    assert (
+        ai_responses.responses_retry_kwargs(
+            _FakeApiError(500, {"error": {"message": "boom"}}),
+            {"temperature": 0.3},
+        )
+        is None
+    )
+    assert (
+        ai_responses.responses_retry_kwargs(
+            _FakeApiError(400, {"error": {"message": "model not found"}}),
+            {"temperature": 0.3},
+        )
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +299,9 @@ async def test_iter_text_rejects_stream_without_content():
 @pytest.mark.asyncio
 async def test_iter_text_failed_event_raises_with_detail():
     resp = SimpleNamespace(
-        status="failed", output=[], error=SimpleNamespace(message="quota exceeded"),
+        status="failed",
+        output=[],
+        error=SimpleNamespace(message="quota exceeded"),
     )
     stream = _fake_stream(_evt("response.failed", response=resp))
     with pytest.raises(RuntimeError, match="quota exceeded"):
@@ -284,19 +326,33 @@ async def test_run_text_extracts_text_with_and_without_helper_attr(monkeypatch):
     monkeypatch.setattr(ai_responses, "responses_client", lambda timeout: client)
     monkeypatch.setattr(secrets_store, "load", lambda: {})
 
-    assert await ai_responses.run_text(
-        [{"role": "user", "content": "hi"}], temperature=0.3, max_tokens=100, timeout=5,
-    ) == "聚合文本"
+    assert (
+        await ai_responses.run_text(
+            [{"role": "user", "content": "hi"}],
+            temperature=0.3,
+            max_tokens=100,
+            timeout=5,
+        )
+        == "聚合文本"
+    )
     assert calls[0]["input"] == [{"role": "user", "content": "hi"}]
     assert calls[0]["max_output_tokens"] == 100
 
     # output_text 便利属性缺失时逐 item 聚合
-    resp2 = SimpleNamespace(status="completed", output=[_message_item("逐条"), _message_item("聚合")])
+    resp2 = SimpleNamespace(
+        status="completed", output=[_message_item("逐条"), _message_item("聚合")]
+    )
     client2, _ = _fake_client(result=resp2)
     monkeypatch.setattr(ai_responses, "responses_client", lambda timeout: client2)
-    assert await ai_responses.run_text(
-        [{"role": "user", "content": "hi"}], temperature=None, max_tokens=None, timeout=5,
-    ) == "逐条聚合"
+    assert (
+        await ai_responses.run_text(
+            [{"role": "user", "content": "hi"}],
+            temperature=None,
+            max_tokens=None,
+            timeout=5,
+        )
+        == "逐条聚合"
+    )
 
 
 @pytest.mark.asyncio
@@ -313,7 +369,10 @@ async def test_run_text_incomplete_raises(monkeypatch):
 
     with pytest.raises(RuntimeError, match="输出达到长度上限"):
         await ai_responses.run_text(
-            [{"role": "user", "content": "hi"}], temperature=None, max_tokens=10, timeout=5,
+            [{"role": "user", "content": "hi"}],
+            temperature=None,
+            max_tokens=10,
+            timeout=5,
         )
 
 
@@ -330,12 +389,16 @@ async def test_run_message_once_returns_chat_shape_calls(monkeypatch):
 
     message = await ai_responses.run_message_once(
         [{"role": "user", "content": "查"}],
-        temperature=0.3, max_tokens=None, timeout=5,
+        temperature=0.3,
+        max_tokens=None,
+        timeout=5,
         tools=[{"type": "function", "function": {"name": "get_quote"}}],
     )
     tc = message.tool_calls[0]
     assert (tc.id, tc.function.name, tc.function.arguments) == (
-        "call_1", "get_quote", '{"symbol":"600519"}',
+        "call_1",
+        "get_quote",
+        '{"symbol":"600519"}',
     )
     # 工具 schema 以扁平形态下发
     assert calls[0]["tools"] == [{"type": "function", "name": "get_quote"}]
@@ -361,7 +424,10 @@ async def test_run_message_once_retries_without_rejected_temperature(monkeypatch
     monkeypatch.setattr(secrets_store, "load", lambda: {})
 
     text = await ai_responses.run_message_once(
-        [{"role": "user", "content": "hi"}], temperature=0.3, max_tokens=None, timeout=5,
+        [{"role": "user", "content": "hi"}],
+        temperature=0.3,
+        max_tokens=None,
+        timeout=5,
     )
     assert text.content == "OK"
     assert calls[0]["temperature"] == 0.3
@@ -376,26 +442,40 @@ async def test_run_message_once_retries_without_rejected_temperature(monkeypatch
 @pytest.mark.asyncio
 async def test_stream_round_accumulates_tool_calls_from_fragments(monkeypatch):
     stream = _fake_stream(
-        _evt("response.output_item.added",
-             item=SimpleNamespace(id="fc_1", type="function_call", call_id="call_1",
-                                  name="get_quote", arguments="")),
+        _evt(
+            "response.output_item.added",
+            item=SimpleNamespace(
+                id="fc_1", type="function_call", call_id="call_1", name="get_quote", arguments=""
+            ),
+        ),
         _text_delta("先查一下"),
         _evt("response.function_call_arguments.delta", item_id="fc_1", delta='{"sym'),
         _evt("response.function_call_arguments.delta", item_id="fc_1", delta='bol":"600519"}'),
-        _evt("response.output_item.done",
-             item=SimpleNamespace(id="fc_1", type="function_call", call_id="call_1",
-                                  name="get_quote", arguments='{"symbol":"600519"}')),
+        _evt(
+            "response.output_item.done",
+            item=SimpleNamespace(
+                id="fc_1",
+                type="function_call",
+                call_id="call_1",
+                name="get_quote",
+                arguments='{"symbol":"600519"}',
+            ),
+        ),
         _completed(output=[_call_item("call_1", "get_quote", '{"symbol":"600519"}')]),
     )
     client, _ = _fake_client(stream=stream)
     monkeypatch.setattr(ai_responses, "responses_client", lambda timeout: client)
     monkeypatch.setattr(secrets_store, "load", lambda: {})
 
-    events = [e async for e in ai_responses.stream_round(
-        [{"role": "user", "content": "查茅台"}],
-        [{"type": "function", "function": {"name": "get_quote"}}],
-        temperature=0.3, timeout=5,
-    )]
+    events = [
+        e
+        async for e in ai_responses.stream_round(
+            [{"role": "user", "content": "查茅台"}],
+            [{"type": "function", "function": {"name": "get_quote"}}],
+            temperature=0.3,
+            timeout=5,
+        )
+    ]
 
     assert events[0] == {"type": "text", "delta": "先查一下"}
     assert events[-1] == {
@@ -409,9 +489,12 @@ async def test_stream_round_accumulates_tool_calls_from_fragments(monkeypatch):
 async def test_stream_round_completed_output_is_authoritative(monkeypatch):
     """completed.response.output 优先于分片累积(网关乱序/缺 done 时兜底)。"""
     stream = _fake_stream(
-        _evt("response.output_item.added",
-             item=SimpleNamespace(id="fc_1", type="function_call", call_id="call_1",
-                                  name="", arguments="")),
+        _evt(
+            "response.output_item.added",
+            item=SimpleNamespace(
+                id="fc_1", type="function_call", call_id="call_1", name="", arguments=""
+            ),
+        ),
         _evt("response.function_call_arguments.delta", item_id="fc_1", delta="半截参数"),
         _completed(output=[_call_item("call_x", "get_kline", '{"days":5}')]),
     )
@@ -419,9 +502,15 @@ async def test_stream_round_completed_output_is_authoritative(monkeypatch):
     monkeypatch.setattr(ai_responses, "responses_client", lambda timeout: client)
     monkeypatch.setattr(secrets_store, "load", lambda: {})
 
-    events = [e async for e in ai_responses.stream_round(
-        [{"role": "user", "content": "查K线"}], [], temperature=None, timeout=5,
-    )]
+    events = [
+        e
+        async for e in ai_responses.stream_round(
+            [{"role": "user", "content": "查K线"}],
+            [],
+            temperature=None,
+            timeout=5,
+        )
+    ]
     assert events[-1]["tool_calls"] == [
         {"id": "call_x", "name": "get_kline", "arguments": '{"days":5}'},
     ]
@@ -437,9 +526,15 @@ async def test_stream_round_text_only_round_ends_empty(monkeypatch):
     monkeypatch.setattr(ai_responses, "responses_client", lambda timeout: client)
     monkeypatch.setattr(secrets_store, "load", lambda: {})
 
-    events = [e async for e in ai_responses.stream_round(
-        [{"role": "user", "content": "hi"}], [], temperature=None, timeout=5,
-    )]
+    events = [
+        e
+        async for e in ai_responses.stream_round(
+            [{"role": "user", "content": "hi"}],
+            [],
+            temperature=None,
+            timeout=5,
+        )
+    ]
     assert events == [
         {"type": "text", "delta": "回答完毕"},
         {"type": "round_end", "tool_calls": [], "finish_reason": "stop"},
@@ -458,7 +553,10 @@ async def test_stream_round_length_truncation_without_calls_raises(monkeypatch):
 
     with pytest.raises(RuntimeError, match="输出达到长度上限"):
         async for _ in ai_responses.stream_round(
-            [{"role": "user", "content": "hi"}], [], temperature=None, timeout=5,
+            [{"role": "user", "content": "hi"}],
+            [],
+            temperature=None,
+            timeout=5,
         ):
             pass
 
@@ -471,7 +569,10 @@ async def test_stream_round_empty_response_raises(monkeypatch):
 
     with pytest.raises(RuntimeError, match="未返回正文内容"):
         async for _ in ai_responses.stream_round(
-            [{"role": "user", "content": "hi"}], [], temperature=None, timeout=5,
+            [{"role": "user", "content": "hi"}],
+            [],
+            temperature=None,
+            timeout=5,
         ):
             pass
 
@@ -509,7 +610,10 @@ async def test_generate_ai_text_routes_to_responses(monkeypatch):
     monkeypatch.setattr(ai_responses, "run_text", fake_run_text)
 
     text = await ai_provider.generate_ai_text(
-        [{"role": "user", "content": "hi"}], temperature=0.3, max_tokens=100, timeout=5,
+        [{"role": "user", "content": "hi"}],
+        temperature=0.3,
+        max_tokens=100,
+        timeout=5,
     )
     assert text == "responses 回复"
 
@@ -523,9 +627,15 @@ async def test_stream_ai_text_routes_to_responses(monkeypatch):
     monkeypatch.setattr(secrets_store, "load", lambda: {"ai_protocol": "responses"})
     monkeypatch.setattr(ai_responses, "stream_text", fake_stream_text)
 
-    chunks = [c async for c in ai_provider.stream_ai_text(
-        [{"role": "user", "content": "hi"}], temperature=0.5, max_tokens=100, timeout=5,
-    )]
+    chunks = [
+        c
+        async for c in ai_provider.stream_ai_text(
+            [{"role": "user", "content": "hi"}],
+            temperature=0.5,
+            max_tokens=100,
+            timeout=5,
+        )
+    ]
     assert chunks == ["流式", "回复"]
 
 
@@ -541,9 +651,15 @@ async def test_assistant_round_routes_to_responses(monkeypatch):
     monkeypatch.setattr(streaming, "is_responses_protocol", lambda: True)
     monkeypatch.setattr(streaming.ai_responses, "stream_round", fake_stream_round)
 
-    events = [e async for e in streaming.stream_openai_round(
-        [{"role": "user", "content": "hi"}], [], temperature=0.3, timeout=5,
-    )]
+    events = [
+        e
+        async for e in streaming.stream_openai_round(
+            [{"role": "user", "content": "hi"}],
+            [],
+            temperature=0.3,
+            timeout=5,
+        )
+    ]
     assert events == [
         {"type": "text", "delta": "助手回复"},
         {"type": "round_end", "tool_calls": [], "finish_reason": "stop"},
@@ -573,9 +689,15 @@ async def test_stream_round_awaits_async_close(monkeypatch):
     monkeypatch.setattr(ai_responses, "responses_client", lambda timeout: client)
     monkeypatch.setattr(secrets_store, "load", lambda: {})
 
-    events = [e async for e in ai_responses.stream_round(
-        [{"role": "user", "content": "hi"}], [], temperature=None, timeout=5,
-    )]
+    events = [
+        e
+        async for e in ai_responses.stream_round(
+            [{"role": "user", "content": "hi"}],
+            [],
+            temperature=None,
+            timeout=5,
+        )
+    ]
     assert closed == [True]
     assert events[-1]["finish_reason"] == "stop"
 
@@ -586,13 +708,15 @@ def test_save_ai_settings_persists_protocol(monkeypatch):
     monkeypatch.setattr(settings_api.secrets_store, "load", lambda: saved)
     original = app_settings.ai_protocol
     try:
-        result = settings_api.save_ai_settings(settings_api.AiSettingsIn(
-            provider="openai_compat",
-            base_url="https://example.com/v1",
-            api_key="sk-test",
-            model="gpt-x",
-            protocol="responses",
-        ))
+        result = settings_api.save_ai_settings(
+            settings_api.AiSettingsIn(
+                provider="openai_compat",
+                base_url="https://example.com/v1",
+                api_key="sk-test",
+                model="gpt-x",
+                protocol="responses",
+            )
+        )
         assert saved["ai_protocol"] == "responses"
         assert result["ai_protocol"] == "responses"
         assert ai_provider.current_ai_protocol() == "responses"
@@ -606,8 +730,12 @@ def test_save_ai_settings_rejects_unknown_protocol(monkeypatch):
     monkeypatch.setattr(settings_api.secrets_store, "load", lambda: saved)
 
     from fastapi import HTTPException
+
     with pytest.raises(HTTPException):
-        settings_api.save_ai_settings(settings_api.AiSettingsIn(
-            provider="openai_compat", protocol="grpc",
-        ))
+        settings_api.save_ai_settings(
+            settings_api.AiSettingsIn(
+                provider="openai_compat",
+                protocol="grpc",
+            )
+        )
     assert "ai_protocol" not in saved

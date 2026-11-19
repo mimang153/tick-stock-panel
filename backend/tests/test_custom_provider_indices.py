@@ -19,6 +19,19 @@ from app.services import quote_service as qs
 from app.services.index_const import CORE_INDEX_SYMBOLS
 
 
+def _record_both(captured, replacements, records, replace_index_cache):
+    """同时记录全市场记录与索引缓存替换标志, 返回原实现的 (None, None)。"""
+    captured.append(records)
+    replacements.append(replace_index_cache)
+    return None, None
+
+
+def _record(result, log, *items):
+    """记录本次调用参数后返回既定结果(替代 append(x) or result 惯用法)。"""
+    log.extend(items)
+    return result
+
+
 class _FakeProvider:
     """带指数能力的假自定义源: 记录请求的 symbols, 返回预置 records。"""
 
@@ -52,7 +65,8 @@ def _index_rec(symbol: str) -> dict:
 
 
 def _service_with_provider(
-    monkeypatch, provider,
+    monkeypatch,
+    provider,
 ) -> tuple[qs.QuoteService, list[list[dict]], list[bool]]:
     """构造最小 QuoteService: 自定义源路由 + 捕获 _process_full_market_records 入参。"""
     from app.services import preferences as prefs_mod
@@ -63,13 +77,15 @@ def _service_with_provider(
     monkeypatch.setattr(prefs_mod, "get_realtime_data_provider", lambda: "fuyao")
     import app.data_providers.custom as custom_mod
 
-    monkeypatch.setattr(custom_mod, "provider_has_dataset", lambda name, dataset: dataset == "realtime")
+    monkeypatch.setattr(
+        custom_mod, "provider_has_dataset", lambda name, dataset: dataset == "realtime"
+    )
     monkeypatch.setattr(custom_mod, "get_provider", lambda name: provider)
     monkeypatch.setattr(
-        service, "_process_full_market_records",
+        service,
+        "_process_full_market_records",
         lambda records, *, t0, now_ts, replace_index_cache=True, final_boundary_ms=None: (
-            captured.append(records),
-            index_cache_replacements.append(replace_index_cache),
+            _record_both(captured, index_cache_replacements, records, replace_index_cache)
         ),
     )
     return service, captured, index_cache_replacements
@@ -95,15 +111,32 @@ def test_custom_provider_monitor_indices_join_fetch(monkeypatch):
 
     class _Engine:
         rules: ClassVar[dict] = {
-            "r1": {"enabled": True, "asset_type": "index", "scope": "symbols", "symbols": ["000300.SH"]},
-            "r2": {"enabled": False, "asset_type": "index", "scope": "symbols", "symbols": ["000016.SH"]},
-            "r3": {"enabled": True, "asset_type": "stock", "scope": "symbols", "symbols": ["600519.SH"]},
+            "r1": {
+                "enabled": True,
+                "asset_type": "index",
+                "scope": "symbols",
+                "symbols": ["000300.SH"],
+            },
+            "r2": {
+                "enabled": False,
+                "asset_type": "index",
+                "scope": "symbols",
+                "symbols": ["000016.SH"],
+            },
+            "r3": {
+                "enabled": True,
+                "asset_type": "stock",
+                "scope": "symbols",
+                "symbols": ["600519.SH"],
+            },
         }
 
     service._app_state = SimpleNamespace(monitor_engine=_Engine())
     service._fetch_full_market_quotes()
 
-    assert provider.index_calls == [sorted(set(CORE_INDEX_SYMBOLS) | BENCHMARK_INDEX_SYMBOLS | {"000300.SH"})]
+    assert provider.index_calls == [
+        sorted(set(CORE_INDEX_SYMBOLS) | BENCHMARK_INDEX_SYMBOLS | {"000300.SH"})
+    ]
 
 
 def test_custom_provider_without_indices_protocol_is_silent(monkeypatch):
@@ -116,6 +149,7 @@ def test_custom_provider_without_indices_protocol_is_silent(monkeypatch):
 
 def test_custom_provider_index_fetch_error_is_soft(monkeypatch):
     """指数补充失败软降级: 警告不抛出, 个股 records 仍然进入处理链。"""
+
     class _Boom:
         def get_realtime(self) -> list[dict]:
             return [_stock_rec()]
@@ -131,6 +165,7 @@ def test_custom_provider_index_fetch_error_is_soft(monkeypatch):
 
 def test_custom_provider_index_fetch_failure_preserves_cache(monkeypatch):
     """None 表示指数请求失败: 股票继续更新, 但不得替换上一轮指数缓存。"""
+
     class _Unavailable:
         def get_realtime(self) -> list[dict]:
             return [_stock_rec()]
@@ -148,7 +183,8 @@ def test_custom_provider_index_fetch_failure_preserves_cache(monkeypatch):
 def test_custom_provider_successful_empty_index_fetch_replaces_cache(monkeypatch):
     """空 list 是成功响应: 与失败 None 区分, 仍按现有语义替换缓存。"""
     service, captured, replacements = _service_with_provider(
-        monkeypatch, _FakeProvider([_stock_rec()], []),
+        monkeypatch,
+        _FakeProvider([_stock_rec()], []),
     )
     service._fetch_full_market_quotes()
 
@@ -214,23 +250,26 @@ def _injection_env(monkeypatch, *, healthy, local_df, asset_type="stock", symbol
     service._app_state = SimpleNamespace(minute_refresh=minute_svc)
 
     import app.services.quote_service as qsm
+
     api_calls: list[list[str]] = []
-    monkeypatch.setattr(
-        qsm, "_noop", qsm.__dict__.get("_noop", None), raising=False)  # 占位无操作
-    from app.services.kline_sync import intraday_monitor_support
-    monkeypatch.setattr(
-        "app.services.quote_service.logger", qsm.logger, raising=False)
+    monkeypatch.setattr(qsm, "_noop", qsm.__dict__.get("_noop", None), raising=False)  # 占位无操作
+    monkeypatch.setattr("app.services.quote_service.logger", qsm.logger, raising=False)
     # 打桩 API 拉取路径 (健康时不应被调)
     import app.services.kline_sync as ks
+
     monkeypatch.setattr(
-        ks, "fetch_intraday_monitor_batch",
-        lambda symbols, capset, *, now=None: (api_calls.append(list(symbols)), local_df)[1])
+        ks,
+        "fetch_intraday_monitor_batch",
+        lambda symbols, capset, *, now=None: _record(local_df, api_calls, list(symbols)),
+    )
     monkeypatch.setattr(
-        ks, "intraday_monitor_support",
-        lambda capset: {"available": True, "max_symbols": 200, "source": "minute_batch"})
+        ks,
+        "intraday_monitor_support",
+        lambda capset: {"available": True, "max_symbols": 200, "source": "minute_batch"},
+    )
 
     evaluator = SimpleNamespace(
-        evaluate=lambda minute_df, **kw: (captured.append(minute_df), [])[1],
+        evaluate=lambda minute_df, **kw: _record([], captured, minute_df),
         inject=lambda enriched, signals: enriched,
     )
     captured: list = []
@@ -241,21 +280,30 @@ def _injection_env(monkeypatch, *, healthy, local_df, asset_type="stock", symbol
 
 def test_intraday_signals_read_local_when_healthy(monkeypatch):
     """健康时股票读本地分区, 不触发 API 拉取。"""
-    local = pl.DataFrame({
-        "symbol": ["600519.SH"], "datetime": ["2026-01-15 09:31:00"],
-        "open": [100.0], "high": [101.0], "low": [99.0], "close": [100.5],
-        "volume": [1000.0], "amount": [100500.0],
-    })
+    local = pl.DataFrame(
+        {
+            "symbol": ["600519.SH"],
+            "datetime": ["2026-01-15 09:31:00"],
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.5],
+            "volume": [1000.0],
+            "amount": [100500.0],
+        }
+    )
     service, engine, api_calls, captured = _injection_env(monkeypatch, healthy=True, local_df=local)
     enriched = pl.DataFrame({"symbol": ["600519.SH"], "close": [100.5]})
     service._inject_intraday_signals(enriched, engine, asset_type="stock")
-    assert api_calls == []          # 未走 API
+    assert api_calls == []  # 未走 API
     assert captured and captured[0].height == 1  # evaluator 拿到本地数据
 
 
 def test_intraday_signals_fall_back_to_api_when_unhealthy(monkeypatch):
     """不健康 (服务关/挂) 时回落原 API 拉取路径。"""
-    service, engine, api_calls, captured = _injection_env(monkeypatch, healthy=False, local_df=pl.DataFrame())
+    service, engine, api_calls, captured = _injection_env(
+        monkeypatch, healthy=False, local_df=pl.DataFrame()
+    )
     enriched = pl.DataFrame({"symbol": ["600519.SH"], "close": [100.5]})
     service._inject_intraday_signals(enriched, engine, asset_type="stock")
     assert api_calls == [["600519.SH"]]  # 走了 API
@@ -264,7 +312,8 @@ def test_intraday_signals_fall_back_to_api_when_unhealthy(monkeypatch):
 def test_intraday_signals_etf_never_reads_local(monkeypatch):
     """ETF 不在全量分钟 universe: 即使健康也走 API 路径。"""
     service, engine, api_calls, captured = _injection_env(
-        monkeypatch, healthy=True, local_df=pl.DataFrame(), asset_type="etf", symbols={"510300.SH"})
+        monkeypatch, healthy=True, local_df=pl.DataFrame(), asset_type="etf", symbols={"510300.SH"}
+    )
     enriched = pl.DataFrame({"symbol": ["510300.SH"], "close": [4.0]})
     service._inject_intraday_signals(enriched, engine, asset_type="etf")
     assert api_calls == [["510300.SH"]]

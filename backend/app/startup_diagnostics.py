@@ -1,4 +1,5 @@
 """启动阶段计时，定位就绪前没有其他日志的阻塞调用。"""
+
 from __future__ import annotations
 
 import logging

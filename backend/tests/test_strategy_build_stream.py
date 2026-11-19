@@ -42,13 +42,19 @@ def filter(df: pl.DataFrame, params: dict) -> pl.Expr:
 
 @pytest.fixture
 def stream_request(tmp_path):
-    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
-    )))
+    return SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
+            )
+        )
+    )
 
 
 @pytest.mark.asyncio
-async def test_build_strategy_stream_yields_delta_and_normalized_result(monkeypatch, stream_request):
+async def test_build_strategy_stream_yields_delta_and_normalized_result(
+    monkeypatch, stream_request
+):
     async def fake_stream(self, prompt):
         yield STREAM_CODE[:40]
         yield STREAM_CODE[40:]
@@ -150,7 +156,9 @@ async def test_build_strategy_stream_heartbeat_does_not_swallow_events(monkeypat
 
     monkeypatch.setattr(AIStrategyGenerator, "stream", slow_stream)
     monkeypatch.setattr(AIStrategyGenerator, "repair_code", slow_repair)
-    monkeypatch.setattr(strategy_api, "with_heartbeat", functools.partial(with_heartbeat, interval=0.05))
+    monkeypatch.setattr(
+        strategy_api, "with_heartbeat", functools.partial(with_heartbeat, interval=0.05)
+    )
     req = BuildRequest(
         step=1,
         name="心跳策略",
@@ -179,7 +187,9 @@ async def test_build_strategy_stream_heartbeat_does_not_swallow_events(monkeypat
         (ValueError("boom"), "AI生成失败: boom"),
     ],
 )
-async def test_build_strategy_stream_error_event_is_own_line(monkeypatch, exc, message, stream_request):
+async def test_build_strategy_stream_error_event_is_own_line(
+    monkeypatch, exc, message, stream_request
+):
     async def failing_stream(self, prompt):
         raise exc
         yield  # pragma: no cover - 使其成为异步生成器

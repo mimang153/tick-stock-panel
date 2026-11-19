@@ -11,6 +11,7 @@
 /actions/{call_id}/decision 唤醒。决策超时视为拒绝(不执行), 注册表
 条目回收。无跨进程/持久化需求 — 对话流与决策端点在同一 uvicorn 进程。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -20,13 +21,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # 须确认才能执行的工具名(工具实现在 tools.py / tool_catalog)。
-ACTION_TOOLS: frozenset[str] = frozenset({
-    "create_signal_strategy",
-    "create_strategy",
-    "run_backtest",
-    "add_to_watchlist",
-    "sync_data",
-})
+ACTION_TOOLS: frozenset[str] = frozenset(
+    {
+        "create_signal_strategy",
+        "create_strategy",
+        "run_backtest",
+        "add_to_watchlist",
+        "sync_data",
+    }
+)
 
 # 确认卡展示元数据: label=动作名, risk=一句话影响说明。
 ACTION_META: dict[str, dict[str, str]] = {
@@ -79,7 +82,7 @@ class PendingRegistry:
         self._pending[call_id] = action
         # 挂起的确认卡超过上限时按最旧丢弃(视为拒绝), 防注册表无界增长
         overflow = len(self._pending) - _MAX_PENDING
-        for stale_id in list(self._pending)[:max(overflow, 0)]:
+        for stale_id in list(self._pending)[: max(overflow, 0)]:
             stale = self._pending.pop(stale_id)
             stale.decision = "expired"
             stale.event.set()
@@ -110,7 +113,9 @@ class PendingRegistry:
     def _sweep_expired(self) -> None:
         """register 时顺手回收早已超时但等待方已消失的条目(如客户端断连)。"""
         now = time.monotonic()
-        for stale_id in [k for k, v in self._pending.items() if now - v.created > self.timeout_s + 60]:
+        for stale_id in [
+            k for k, v in self._pending.items() if now - v.created > self.timeout_s + 60
+        ]:
             del self._pending[stale_id]
 
 

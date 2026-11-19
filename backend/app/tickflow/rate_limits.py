@@ -3,6 +3,7 @@
 This module centralizes the small pieces of batch/rpm resolution used by
 TickFlow-backed services. It intentionally does not manage custom data sources.
 """
+
 from __future__ import annotations
 
 import threading
@@ -94,7 +95,7 @@ def chunked(items: list[T], batch_size: int | None) -> list[list[T]]:
     """Split items by batch size, preserving the existing None-as-one-batch behavior."""
     if batch_size is None:
         return [items]
-    return [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
+    return [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
 
 
 def sleep_between_batches(index: int, rpm: int | None, *, default_interval: float = 0.0) -> None:

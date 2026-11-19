@@ -13,10 +13,12 @@ StrategyBacktestService.run() 的 minute_filter 分支:
 - 缺分钟分区的交易日显式跳过 (不回退最近分区);
 - 离场复用日K口径 (max_hold → 次日开盘)。
 """
+
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any, cast
 
 import polars as pl
 import pytest
@@ -28,7 +30,7 @@ from app.strategy.engine import StrategyEngine
 # ── 测试策略: 内置因果性守卫 ──────────────────────────────────────
 # 命中条件: 当日某分钟 close > T-1 close * 1.05, 触发分钟 = 首根满足条件的K。
 # daily 窗口的最后一个日期必须 < 触发日, 否则返回空 (回放器传错窗口时信号归零)。
-TEST_STRATEGY_SOURCE = '''
+TEST_STRATEGY_SOURCE = """
 import polars as pl
 
 META = {
@@ -67,7 +69,7 @@ def filter_minute_history(df, params, *, daily=None):
             pl.col("close"),
         )
     )
-'''
+"""
 
 
 # ── 合成数据 ─────────────────────────────────────────────────────
@@ -89,26 +91,32 @@ def _daily_panel(days: list[date], symbols: list[str]) -> pl.DataFrame:
         for t, day in enumerate(days):
             close = round(base * (1 + t * 0.002), 3)
             open_p = round(close - 0.05, 3)
-            rows.append({
-                "symbol": sym,
-                "date": day,
-                "open": open_p,
-                "high": round(close + 0.08, 3),
-                "low": round(open_p - 0.06, 3),
-                "close": close,
-                "raw_close": close,
-                # 成交额需过 DEFAULT_BASIC_FILTER.amount_min (2e8) — 命中行的
-                # amount 由 T-1 enriched 快照联表注入 (与实盘同路径)。
-                "volume": 2e7,
-                "amount": round(close * 2e7, 3),
-                "name": f"股票{sym_idx}",
-                "total_shares": 5e8,
-                "float_shares": 4e8,
-                "signal_limit_up": False,
-                "signal_limit_down": False,
-            })
-    return pl.DataFrame(rows).sort(["symbol", "date"]).with_columns(
-        pl.col("date").cast(pl.Date),
+            rows.append(
+                {
+                    "symbol": sym,
+                    "date": day,
+                    "open": open_p,
+                    "high": round(close + 0.08, 3),
+                    "low": round(open_p - 0.06, 3),
+                    "close": close,
+                    "raw_close": close,
+                    # 成交额需过 DEFAULT_BASIC_FILTER.amount_min (2e8) — 命中行的
+                    # amount 由 T-1 enriched 快照联表注入 (与实盘同路径)。
+                    "volume": 2e7,
+                    "amount": round(close * 2e7, 3),
+                    "name": f"股票{sym_idx}",
+                    "total_shares": 5e8,
+                    "float_shares": 4e8,
+                    "signal_limit_up": False,
+                    "signal_limit_down": False,
+                }
+            )
+    return (
+        pl.DataFrame(rows)
+        .sort(["symbol", "date"])
+        .with_columns(
+            pl.col("date").cast(pl.Date),
+        )
     )
 
 
@@ -117,18 +125,24 @@ def _minute_frame(day: date, bars: list[tuple[str, str, float]]) -> pl.DataFrame
     rows = []
     for sym, hm, close in bars:
         local = datetime(day.year, day.month, day.day, int(hm[:2]), int(hm[3:]))
-        rows.append({
-            "symbol": sym,
-            "datetime": local - timedelta(hours=8),
-            "open": close - 0.01,
-            "high": close + 0.01,
-            "low": close - 0.02,
-            "close": close,
-            "volume": 1000.0,
-            "amount": close * 1000.0,
-        })
-    return pl.DataFrame(rows).sort(["symbol", "datetime"]).with_columns(
-        pl.col("datetime").cast(pl.Datetime("us")),
+        rows.append(
+            {
+                "symbol": sym,
+                "datetime": local - timedelta(hours=8),
+                "open": close - 0.01,
+                "high": close + 0.01,
+                "low": close - 0.02,
+                "close": close,
+                "volume": 1000.0,
+                "amount": close * 1000.0,
+            }
+        )
+    return (
+        pl.DataFrame(rows)
+        .sort(["symbol", "datetime"])
+        .with_columns(
+            pl.col("datetime").cast(pl.Datetime("us")),
+        )
     )
 
 
@@ -146,9 +160,16 @@ class _FakeMinuteRepo:
         frames = [self.minute_frames[d] for d in dates if d in self.minute_frames]
         if not frames:
             return pl.DataFrame(
-                schema={"symbol": pl.Utf8, "datetime": pl.Datetime("us"),
-                        "open": pl.Float64, "high": pl.Float64, "low": pl.Float64,
-                        "close": pl.Float64, "volume": pl.Float64, "amount": pl.Float64},
+                schema={
+                    "symbol": pl.Utf8,
+                    "datetime": pl.Datetime("us"),
+                    "open": pl.Float64,
+                    "high": pl.Float64,
+                    "low": pl.Float64,
+                    "close": pl.Float64,
+                    "volume": pl.Float64,
+                    "amount": pl.Float64,
+                },
             )
         df = pl.concat(frames)
         if symbols:
@@ -163,7 +184,9 @@ class _FakeMinuteRepo:
 
 
 def _make_service(
-    tmp_path: Path, panel: pl.DataFrame, minute_frames: dict[date, pl.DataFrame],
+    tmp_path: Path,
+    panel: pl.DataFrame,
+    minute_frames: dict[date, pl.DataFrame],
 ) -> StrategyBacktestService:
     strat_dir = tmp_path / "strategies"
     strat_dir.mkdir(exist_ok=True)
@@ -171,23 +194,27 @@ def _make_service(
     strategy_engine = StrategyEngine(strategy_dirs=[strat_dir])
 
     repo = _FakeMinuteRepo(minute_frames)
-    bt_engine = BacktestEngine(repo)
+    bt_engine = BacktestEngine(cast(Any, repo))
 
     def _load_panel(self, symbols, start, end, feature_plan, asset_type="stock", **kw):
         df = panel.filter((pl.col("date") >= start) & (pl.col("date") <= end))
         if symbols:
             df = df.filter(pl.col("symbol").is_in(list(symbols)))
-        keep = set(feature_plan.base_columns) | set(feature_plan.instrument_columns) | {"symbol", "date"}
+        keep = (
+            set(feature_plan.base_columns)
+            | set(feature_plan.instrument_columns)
+            | {"symbol", "date"}
+        )
         # 与生产 _LIMIT_BASE_COLUMNS 注入对齐: 面板始终保留原始价列
         keep |= {"raw_close"} & set(df.columns)
         return df.select(sorted(c for c in df.columns if c in keep))
 
-    bt_engine.load_panel_for_backtest = _load_panel.__get__(bt_engine)
+    object.__setattr__(bt_engine, "load_panel_for_backtest", _load_panel.__get__(bt_engine))
     return StrategyBacktestService(bt_engine, strategy_engine)
 
 
 def _config(start: date, end: date, **kw) -> StrategyBacktestConfig:
-    defaults = dict(
+    defaults: dict[str, Any] = dict(
         strategy_id="test_minute_ping",
         symbols=None,
         start=start,
@@ -216,28 +243,39 @@ def scenario(tmp_path: Path):
     panel = _daily_panel(days, symbols)
 
     def _prev_close(sym: str, before: date) -> float:
-        return panel.filter(
-            (pl.col("symbol") == sym) & (pl.col("date") < before)
-        ).sort("date").get_column("close")[-1]
+        return (
+            panel.filter((pl.col("symbol") == sym) & (pl.col("date") < before))
+            .sort("date")
+            .get_column("close")[-1]
+        )
 
     minute_frames = {
-        t1: _minute_frame(t1, [
-            ("000001.SZ", "09:31", round(_prev_close("000001.SZ", t1) * 1.005, 3)),
-            ("000001.SZ", "09:35", round(_prev_close("000001.SZ", t1) * 1.07, 3)),  # 触发
-            ("000002.SZ", "09:31", round(_prev_close("000002.SZ", t1) * 1.01, 3)),
-            ("600000.SH", "09:31", round(_prev_close("600000.SH", t1) * 1.01, 3)),
-        ]),
-        t2: _minute_frame(t2, [
-            ("000001.SZ", "09:31", round(_prev_close("000001.SZ", t2) * 1.004, 3)),
-            ("000002.SZ", "09:31", round(_prev_close("000002.SZ", t2) * 1.01, 3)),
-            # 涨停拒买: 触发分钟收盘 = T-1收盘 * 1.10 (主板涨停价, 半进位后相等)
-            ("600000.SH", "09:40", round(_prev_close("600000.SH", t2) * 1.10, 3)),
-        ]),
-        t3: _minute_frame(t3, [
-            ("000001.SZ", "09:31", round(_prev_close("000001.SZ", t3) * 1.004, 3)),
-            ("000002.SZ", "09:31", round(_prev_close("000002.SZ", t3) * 1.01, 3)),
-            ("600000.SH", "09:50", round(_prev_close("600000.SH", t3) * 1.06, 3)),  # 触发
-        ]),
+        t1: _minute_frame(
+            t1,
+            [
+                ("000001.SZ", "09:31", round(_prev_close("000001.SZ", t1) * 1.005, 3)),
+                ("000001.SZ", "09:35", round(_prev_close("000001.SZ", t1) * 1.07, 3)),  # 触发
+                ("000002.SZ", "09:31", round(_prev_close("000002.SZ", t1) * 1.01, 3)),
+                ("600000.SH", "09:31", round(_prev_close("600000.SH", t1) * 1.01, 3)),
+            ],
+        ),
+        t2: _minute_frame(
+            t2,
+            [
+                ("000001.SZ", "09:31", round(_prev_close("000001.SZ", t2) * 1.004, 3)),
+                ("000002.SZ", "09:31", round(_prev_close("000002.SZ", t2) * 1.01, 3)),
+                # 涨停拒买: 触发分钟收盘 = T-1收盘 * 1.10 (主板涨停价, 半进位后相等)
+                ("600000.SH", "09:40", round(_prev_close("600000.SH", t2) * 1.10, 3)),
+            ],
+        ),
+        t3: _minute_frame(
+            t3,
+            [
+                ("000001.SZ", "09:31", round(_prev_close("000001.SZ", t3) * 1.004, 3)),
+                ("000002.SZ", "09:31", round(_prev_close("000002.SZ", t3) * 1.01, 3)),
+                ("600000.SH", "09:50", round(_prev_close("600000.SH", t3) * 1.06, 3)),  # 触发
+            ],
+        ),
     }
     service = _make_service(tmp_path, panel, minute_frames)
     return service, panel, {"t1": t1, "t2": t2, "t3": t3, "t4": days[-1]}, minute_frames
@@ -251,9 +289,11 @@ def test_entry_at_trigger_minute_price(scenario):
     assert len(entries) == 1
     trade = entries[0]
     # 入场价 = 触发分钟 (09:35) 收盘价, 入场时间戳精确到分钟
-    prev_close = panel.filter(
-        (pl.col("symbol") == "000001.SZ") & (pl.col("date") < days["t1"])
-    ).sort("date").get_column("close")[-1]
+    prev_close = (
+        panel.filter((pl.col("symbol") == "000001.SZ") & (pl.col("date") < days["t1"]))
+        .sort("date")
+        .get_column("close")[-1]
+    )
     expected_price = round(prev_close * 1.07, 3)
     assert trade["entry_price"] == pytest.approx(expected_price, abs=1e-6)
     assert trade["entry_date"].startswith(f"{days['t1']} 09:35")
@@ -287,9 +327,11 @@ def test_missing_partition_day_skipped(tmp_path):
     panel = _daily_panel(days, symbols)
 
     def _prev(before: date) -> float:
-        return panel.filter(
-            (pl.col("symbol") == "000001.SZ") & (pl.col("date") < before)
-        ).sort("date").get_column("close")[-1]
+        return (
+            panel.filter((pl.col("symbol") == "000001.SZ") & (pl.col("date") < before))
+            .sort("date")
+            .get_column("close")[-1]
+        )
 
     frames = {
         t1: _minute_frame(t1, [("000001.SZ", "09:35", round(_prev(t1) * 1.07, 3))]),
@@ -346,19 +388,26 @@ def test_adjusted_panel_entry_price_not_double_discounted(tmp_path):
     t1, t2 = days[-4], days[-3]
     f = 0.8
     panel = _daily_panel(days, ["000001.SZ"]).with_columns(
-        pl.col("open") * f, pl.col("high") * f, pl.col("low") * f, pl.col("close") * f,
+        pl.col("open") * f,
+        pl.col("high") * f,
+        pl.col("low") * f,
+        pl.col("close") * f,
         # raw_close 保留原始价 (enriched: close 前复权 / raw_close 不复权)
     )
 
     def _prev_qfq(before: date) -> float:
-        return panel.filter(
-            (pl.col("symbol") == "000001.SZ") & (pl.col("date") < before)
-        ).sort("date").get_column("close")[-1]
+        return (
+            panel.filter((pl.col("symbol") == "000001.SZ") & (pl.col("date") < before))
+            .sort("date")
+            .get_column("close")[-1]
+        )
 
     def _prev_raw(before: date) -> float:
-        return panel.filter(
-            (pl.col("symbol") == "000001.SZ") & (pl.col("date") < before)
-        ).sort("date").get_column("raw_close")[-1]
+        return (
+            panel.filter((pl.col("symbol") == "000001.SZ") & (pl.col("date") < before))
+            .sort("date")
+            .get_column("raw_close")[-1]
+        )
 
     # t2 触发分钟 qfq 收盘 = 涨停价(raw 口径) × f: 还原后恰为涨停 → 拒买
     limit_up_qfq = round(_prev_raw(t2) * 1.10, 3) * f
@@ -393,7 +442,10 @@ def test_ex_div_day_limit_up_uses_exchange_reference(tmp_path):
     t_ex, t_next, t_exit = days[-3], days[-2], days[-1]
     f_prev, f_today = 0.64, 0.8
     # T 前所有日 raw 10.00/qfq 6.40; T 除权 raw 8.80/qfq 7.04; 其后 f 保持 0.80
-    raw_map = {d: (8.80 if d == t_ex else (9.30 if d == t_next else (9.20 if d == t_exit else 10.0))) for d in days}
+    raw_map = {
+        d: (8.80 if d == t_ex else (9.30 if d == t_next else (9.20 if d == t_exit else 10.0)))
+        for d in days
+    }
 
     def _f(d: date) -> float:
         return f_today if d >= t_ex else f_prev
@@ -404,14 +456,24 @@ def test_ex_div_day_limit_up_uses_exchange_reference(tmp_path):
     for day in days:
         raw = raw_map[day]
         f = _f(day)
-        rows.append({
-            "symbol": "000001.SZ", "date": day,
-            "open": round((raw - 0.05) * f, 3), "high": round((raw + 0.08) * f, 3),
-            "low": round((raw - 0.11) * f, 3), "close": round(raw * f, 3),
-            "raw_close": raw, "volume": 3e7, "amount": raw * 3e7,
-            "name": "股票0", "total_shares": 5e8, "float_shares": 4e8,
-            "signal_limit_up": False, "signal_limit_down": False,
-        })
+        rows.append(
+            {
+                "symbol": "000001.SZ",
+                "date": day,
+                "open": round((raw - 0.05) * f, 3),
+                "high": round((raw + 0.08) * f, 3),
+                "low": round((raw - 0.11) * f, 3),
+                "close": round(raw * f, 3),
+                "raw_close": raw,
+                "volume": 3e7,
+                "amount": raw * 3e7,
+                "name": "股票0",
+                "total_shares": 5e8,
+                "float_shares": 4e8,
+                "signal_limit_up": False,
+                "signal_limit_down": False,
+            }
+        )
     panel = pl.DataFrame(rows).sort(["symbol", "date"])
 
     # T (除权日): 分钟 qfq 7.04 > prev 6.40 × 1.05 → 命中, 但 raw 8.80 恰为

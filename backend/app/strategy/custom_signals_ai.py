@@ -7,25 +7,42 @@
 
 不知道: API、AI 调用、持久化。纯函数，无副作用。
 """
+
 from __future__ import annotations
 
 import json
 import re
+from typing import Any
 
 from app.indicators.pipeline import ENRICHED_COLUMNS, ENRICHED_COLUMNS_BY_CATEGORY
 from app.strategy import custom_signals
 
 # 分类 → 中文标签（与 /api/custom-signals/options 的分组一致）
 _GROUP_LABELS = {
-    "basic": "基础", "ma": "均线 MA", "ema": "指数均线 EMA",
-    "macd": "MACD", "boll": "布林带 BOLL", "kdj": "KDJ",
-    "atr": "ATR", "volume": "量价", "extremes": "极值",
-    "momentum": "动量", "volatility": "波动率", "rsi": "RSI",
+    "basic": "基础",
+    "ma": "均线 MA",
+    "ema": "指数均线 EMA",
+    "macd": "MACD",
+    "boll": "布林带 BOLL",
+    "kdj": "KDJ",
+    "atr": "ATR",
+    "volume": "量价",
+    "extremes": "极值",
+    "momentum": "动量",
+    "volatility": "波动率",
+    "rsi": "RSI",
 }
 # 行情类字段不在 ENRICHED_COLUMNS_BY_CATEGORY 里, 单独归一组
 _QUOTE_FIELDS = {
-    "open", "high", "low", "close", "volume", "amount", "turnover_rate",
-    "consecutive_limit_ups", "consecutive_limit_downs",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "amount",
+    "turnover_rate",
+    "consecutive_limit_ups",
+    "consecutive_limit_downs",
 }
 
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL)
@@ -40,15 +57,12 @@ def _format_fields() -> str:
     allowed = custom_signals.allowed_fields()
     lines: list[str] = []
     quote = sorted(f for f in _QUOTE_FIELDS if f in allowed)
-    lines.append(
-        "行情: " + ", ".join(f"{f}({ENRICHED_COLUMNS.get(f, f)})" for f in quote)
-    )
+    lines.append("行情: " + ", ".join(f"{f}({ENRICHED_COLUMNS.get(f, f)})" for f in quote))
     for cat, label in _GROUP_LABELS.items():
         fields = [f for f in ENRICHED_COLUMNS_BY_CATEGORY.get(cat, []) if f in allowed]
         if fields:
             lines.append(
-                f"{label}: "
-                + ", ".join(f"{f}({ENRICHED_COLUMNS.get(f, f)})" for f in fields)
+                f"{label}: " + ", ".join(f"{f}({ENRICHED_COLUMNS.get(f, f)})" for f in fields)
             )
     from app.factors.registry import all_factors
 
@@ -155,7 +169,7 @@ def _normalize_condition(c: object) -> dict:
         raise ValueError("条件缺少右值 right")
     if isinstance(right, bool):
         raise ValueError("右值不能是布尔值")
-    if isinstance(right, (int, float)):
+    if isinstance(right, int | float):
         right = _num_to_str(right)
     if not isinstance(right, str) or not right.strip():
         raise ValueError(f"右值非法: {right!r}")
@@ -172,7 +186,7 @@ def _normalize_condition(c: object) -> dict:
     }
 
 
-def _norm_days(value: object) -> object:
+def _norm_days(value: Any) -> object:
     """归一化日期偏移为 int（缺省 0）；无法转换时原样返回，由 validate 报中文错误。"""
     if value is None:
         return 0
@@ -202,9 +216,7 @@ def _extract_json_object(text: str) -> object:
     stripped = source.strip()
     if stripped:
         candidates.append(stripped)
-    candidates.extend(
-        match.group(1).strip() for match in _FENCED_JSON_RE.finditer(source)
-    )
+    candidates.extend(match.group(1).strip() for match in _FENCED_JSON_RE.finditer(source))
     brace = _first_brace_block(source)
     if brace and brace.strip() not in candidates:
         candidates.append(brace)
@@ -225,7 +237,7 @@ def _try_parse_json(candidate: str) -> object | None:
     variants = [candidate.strip()]
     last = candidate.rfind("}")
     if last >= 0 and last < len(candidate) - 1:
-        variants.append(candidate[:last + 1].strip())
+        variants.append(candidate[: last + 1].strip())
     for v in variants:
         if not v:
             continue
@@ -255,5 +267,5 @@ def _first_brace_block(text: str) -> str:
         elif text[i] == "}":
             depth -= 1
             if depth == 0:
-                return text[start:i + 1]
+                return text[start : i + 1]
     return text[start:]

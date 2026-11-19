@@ -112,8 +112,7 @@ def test_all_sources_share_one_registry_and_run_path(tmp_path):
         current=pl.DataFrame({"symbol": ["000001.SZ"]}),
     )
     overrides = {
-        strategy_id: {"basic_filter": {"enabled": False}}
-        for strategy_id in strategy_ids.values()
+        strategy_id: {"basic_filter": {"enabled": False}} for strategy_id in strategy_ids.values()
     }
     results = engine.run_all(context, overrides_map=overrides)
     assert set(results) == set(strategy_ids.values())

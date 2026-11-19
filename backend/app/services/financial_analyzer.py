@@ -5,12 +5,13 @@
 
 不知道: HTTP、前端、配置持久化。
 """
+
 from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator
 
 import polars as pl
 
@@ -49,6 +50,7 @@ def _load_stock_financials(data_dir: Path, symbol: str) -> dict[str, list[dict]]
                     continue  # 不需要重复回传 symbol
                 if isinstance(v, float):
                     import math
+
                     clean[k] = None if not math.isfinite(v) else v
                 else:
                     clean[k] = v
@@ -137,6 +139,7 @@ def _build_user_prompt(fins: dict[str, list[dict]], symbol: str, focus: str) -> 
         "```",
     ]
     from app.services.ai_provider import build_focus_instruction
+
     focus_instruction = build_focus_instruction(focus, report_name="财务分析报告")
     if focus_instruction:
         lines.extend(["", focus_instruction])
@@ -159,16 +162,22 @@ async def analyze_financials_stream(
     fins = _load_stock_financials(data_dir, symbol)
     total_rows = sum(len(v) for v in fins.values())
     if total_rows == 0:
-        yield json.dumps({"type": "error", "message": f"标的 {symbol} 暂无任何财务数据,请先同步财务表"}, ensure_ascii=False)
+        yield json.dumps(
+            {"type": "error", "message": f"标的 {symbol} 暂无任何财务数据,请先同步财务表"},
+            ensure_ascii=False,
+        )
         return
 
     # 2. meta
-    yield json.dumps({
-        "type": "meta",
-        "symbol": symbol,
-        "summary": _summarize(fins),
-        "periods": total_rows,
-    }, ensure_ascii=False)
+    yield json.dumps(
+        {
+            "type": "meta",
+            "symbol": symbol,
+            "summary": _summarize(fins),
+            "periods": total_rows,
+        },
+        ensure_ascii=False,
+    )
 
     # 3. 调用 LLM 流式
     try:
@@ -189,13 +198,15 @@ async def analyze_financials_stream(
             got_content = True
             yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
 
-    except Exception as e:  # noqa: BLE001
-        logger.exception("AI financial analysis failed for %s: %s", symbol, e)
+    except Exception as e:
+        logger.exception("AI financial analysis failed for %s", symbol)
         yield json.dumps({"type": "error", "message": f"AI 分析失败: {e}"}, ensure_ascii=False)
         return
 
     if not got_content:
         logger.warning("AI financial analysis ended with empty content for %s", symbol)
-        yield json.dumps({"type": "error", "message": "AI 未返回正文(输出被截断), 请重试"}, ensure_ascii=False)
+        yield json.dumps(
+            {"type": "error", "message": "AI 未返回正文(输出被截断), 请重试"}, ensure_ascii=False
+        )
         return
     yield json.dumps({"type": "done"}, ensure_ascii=False)

@@ -3,6 +3,7 @@
 金标准路径一致性由 test_matrix_strategy.py::test_research_factor_catalog_matches_matrix_features
 覆盖; 这里用可手算的小样本验证公式本身。
 """
+
 from __future__ import annotations
 
 import math
@@ -21,7 +22,7 @@ def _panel(rows: list[dict]) -> pl.DataFrame:
 
 def _single_symbol_panel(n_days: int = 70) -> pl.DataFrame:
     start = date(2025, 1, 1)
-    rows = []
+    rows: list = []
     for offset in range(n_days):
         change = [0.0, 0.01, -0.02, 0.03, 0.05, -0.01, 0.02, -0.03, 0.04, 0.01][offset % 10]
         close = 10.0 if offset == 0 else rows[-1]["close"] * (1 + change)
@@ -29,18 +30,20 @@ def _single_symbol_panel(n_days: int = 70) -> pl.DataFrame:
         consecutive = 0
         if offset % 15 == 0:
             consecutive = 1 + (offset // 15) % 3 if offset % 30 == 0 else 1
-        rows.append({
-            "symbol": "000001.SZ",
-            "date": start + timedelta(days=offset),
-            "open": close * 0.99,
-            "high": close * 1.02,
-            "low": close * 0.97,
-            "close": close,
-            "volume": volume,
-            "amount": volume * 100.0 * close,
-            "turnover_rate": 1.0 + (offset % 7) * 0.3,
-            "consecutive_limit_ups": consecutive,
-        })
+        rows.append(
+            {
+                "symbol": "000001.SZ",
+                "date": start + timedelta(days=offset),
+                "open": close * 0.99,
+                "high": close * 1.02,
+                "low": close * 0.97,
+                "close": close,
+                "volume": volume,
+                "amount": volume * 100.0 * close,
+                "turnover_rate": 1.0 + (offset % 7) * 0.3,
+                "consecutive_limit_ups": consecutive,
+            }
+        )
     return _panel(rows)
 
 
@@ -50,15 +53,17 @@ def _tail_value(frame: pl.DataFrame, name: str) -> float:
 
 def test_max_ret_up_days_and_limit_up_counts():
     panel = _single_symbol_panel()
-    frame = materialize_scoring_columns(panel, {
-        "max_ret_20d", "up_days_20d",
-        "limit_up_count_20d", "limit_up_count_60d",
-    })
+    frame = materialize_scoring_columns(
+        panel,
+        {
+            "max_ret_20d",
+            "up_days_20d",
+            "limit_up_count_20d",
+            "limit_up_count_60d",
+        },
+    )
 
-    changes = [
-        panel["close"][i] / panel["close"][i - 1] - 1
-        for i in range(1, panel.height)
-    ]
+    changes = [panel["close"][i] / panel["close"][i - 1] - 1 for i in range(1, panel.height)]
     window = changes[-20:]
     assert math.isclose(_tail_value(frame, "max_ret_20d"), max(window), rel_tol=1e-9)
     assert math.isclose(
@@ -68,11 +73,14 @@ def test_max_ret_up_days_and_limit_up_counts():
     )
 
     hits = [
-        1 if (row["consecutive_limit_ups"] or 0) > 0 else 0
-        for row in panel.iter_rows(named=True)
+        1 if (row["consecutive_limit_ups"] or 0) > 0 else 0 for row in panel.iter_rows(named=True)
     ]
-    assert math.isclose(_tail_value(frame, "limit_up_count_20d"), float(sum(hits[-20:])), rel_tol=1e-9)
-    assert math.isclose(_tail_value(frame, "limit_up_count_60d"), float(sum(hits[-60:])), rel_tol=1e-9)
+    assert math.isclose(
+        _tail_value(frame, "limit_up_count_20d"), float(sum(hits[-20:])), rel_tol=1e-9
+    )
+    assert math.isclose(
+        _tail_value(frame, "limit_up_count_60d"), float(sum(hits[-60:])), rel_tol=1e-9
+    )
 
 
 def test_amihud_and_turnover_z():
@@ -89,7 +97,7 @@ def test_amihud_and_turnover_z():
     baseline = [rows[i]["turnover_rate"] for i in range(panel.height - 61, panel.height - 1)]
     mean = sum(baseline) / 60
     variance = sum((value - mean) ** 2 for value in baseline) / 59
-    std = variance ** 0.5
+    std = variance**0.5
     expected_z = (rows[-1]["turnover_rate"] - mean) / std
     assert math.isclose(_tail_value(frame, "turnover_z_60d"), expected_z, rel_tol=1e-6)
 
@@ -112,22 +120,24 @@ def test_ret_skew_matches_population_skew():
     # 周期夹具的 20 日窗口恰含两个完整周期, 偏度恒为 0; 用不对称收益验证公式。
     start = date(2025, 3, 1)
     changes = [0.01, -0.005, -0.004, 0.09, -0.006, 0.002, -0.003, -0.002, -0.005, 0.003] * 7
-    rows = []
+    rows: list = []
     close = 10.0
     for offset, change in enumerate(changes):
         close = close * (1 + change)
-        rows.append({
-            "symbol": "000001.SZ",
-            "date": start + timedelta(days=offset),
-            "open": close * 0.99,
-            "high": close * 1.02,
-            "low": close * 0.97,
-            "close": close,
-            "volume": 1000.0 + offset,
-            "amount": (1000.0 + offset) * close,
-            "turnover_rate": 1.0,
-            "consecutive_limit_ups": 0,
-        })
+        rows.append(
+            {
+                "symbol": "000001.SZ",
+                "date": start + timedelta(days=offset),
+                "open": close * 0.99,
+                "high": close * 1.02,
+                "low": close * 0.97,
+                "close": close,
+                "volume": 1000.0 + offset,
+                "amount": (1000.0 + offset) * close,
+                "turnover_rate": 1.0,
+                "consecutive_limit_ups": 0,
+            }
+        )
     panel = _panel(rows)
     frame = materialize_scoring_columns(panel, {"ret_skew_20d"})
 
@@ -135,7 +145,7 @@ def test_ret_skew_matches_population_skew():
     mean = sum(window) / 20
     central_second = sum((value - mean) ** 2 for value in window) / 20
     central_third = sum((value - mean) ** 3 for value in window) / 20
-    expected = central_third / central_second ** 1.5
+    expected = central_third / central_second**1.5
     assert abs(expected) > 0.1
     assert math.isclose(_tail_value(frame, "ret_skew_20d"), expected, rel_tol=1e-6)
 

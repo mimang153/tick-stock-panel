@@ -11,6 +11,7 @@ Linux 的 inode 交换语义无此限制。表现为个股分时"补齐数据"50
 .fetchone() 直连共享连接, 未消费结果集把首个分区句柄钉死在连接上,
 导致同步 os.replace 永久被拒 (修为 execute_one cursor+close)。
 """
+
 from __future__ import annotations
 
 import os
@@ -32,12 +33,18 @@ except ImportError:  # pragma: no cover
 
 
 def _minute_frame() -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": ["600519.SH"],
-        "datetime": [datetime(2026, 1, 15, 9, 30)],
-        "open": [10.0], "high": [10.5], "low": [9.5], "close": [10.2],
-        "volume": [100.0], "amount": [1020.0],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["600519.SH"],
+            "datetime": [datetime(2026, 1, 15, 9, 30)],
+            "open": [10.0],
+            "high": [10.5],
+            "low": [9.5],
+            "close": [10.2],
+            "volume": [100.0],
+            "amount": [1020.0],
+        }
+    )
 
 
 def _flaky_replace(monkeypatch, fail_times: int) -> dict:
@@ -57,6 +64,7 @@ def _flaky_replace(monkeypatch, fail_times: int) -> dict:
 
 # ---------- replace_with_retry 本体 ----------
 
+
 def test_retry_succeeds_after_transient_blocks(tmp_path, monkeypatch):
     out = tmp_path / "part.parquet"
     out.write_bytes(b"old")
@@ -72,7 +80,9 @@ def test_retry_succeeds_after_transient_blocks(tmp_path, monkeypatch):
 
 
 def test_retry_exhausted_raises_last_error(tmp_path, monkeypatch):
-    monkeypatch.setattr(os, "replace", lambda s, d: (_ for _ in ()).throw(PermissionError(5, "拒绝访问。")))
+    monkeypatch.setattr(
+        os, "replace", lambda s, d: (_ for _ in ()).throw(PermissionError(5, "拒绝访问。"))
+    )
     src = tmp_path / "a.tmp"
     src.write_bytes(b"x")
 
@@ -95,6 +105,7 @@ def test_retry_no_block_single_attempt(tmp_path, monkeypatch):
 
 
 # ---------- 两处 _atomic_write_parquet 接入 ----------
+
 
 def test_kline_sync_atomic_write_survives_transient_lock(tmp_path, monkeypatch):
     state = _flaky_replace(monkeypatch, fail_times=1)
@@ -135,6 +146,7 @@ def test_write_minute_partition_survives_reader_race(tmp_path, monkeypatch):
 
 # ---------- DuckDB 句柄泄漏回归 (Windows 实测语义) ----------
 
+
 @pytest.mark.skipif(sys.platform != "win32" or not _PSUTIL, reason="Windows 句柄语义 + psutil")
 def test_minute_date_queries_do_not_pin_partition_handles(tmp_path):
     """latest_minute_date 等查询后不得残留分区句柄。
@@ -145,8 +157,7 @@ def test_minute_date_queries_do_not_pin_partition_handles(tmp_path):
     from app.tickflow.repository import DataStore, KlineRepository
 
     minute_dir = tmp_path / "kline_minute"
-    kline_sync._write_minute_partition(
-        _minute_frame(), minute_dir)  # date=2026-01-15
+    kline_sync._write_minute_partition(_minute_frame(), minute_dir)  # date=2026-01-15
     repo = KlineRepository(DataStore(data_dir=tmp_path))
 
     assert repo.latest_minute_date("600519.SH") == date(2026, 1, 15)

@@ -11,6 +11,7 @@ ensure_utf8_csv 把 GBK 系 CSV 转成 UTF-8 再交给 Polars。转换本身用
 判据取“同一份内容的 UTF-8 版本”：它不经过转换，是这份数据本该被解析成的
 样子，转换后的 GBK 版本必须与它逐列一致。纯本地文件操作，不需要数据源。
 """
+
 from __future__ import annotations
 
 from pathlib import Path

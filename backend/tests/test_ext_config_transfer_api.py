@@ -19,11 +19,20 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr("app.services.ext_data.get_ext_api_key", lambda _id: "")
     refreshed = []
     monkeypatch.setattr(api, "_refresh_views", lambda _request: refreshed.append(tmp_path))
-    monkeypatch.setattr(api.pull_scheduler, "refresh", lambda _path: pytest.fail("导入禁用配置不应启动调度"))
-    ExtConfigStore(tmp_path).upsert(ExtConfig(
-        id="auction", label="集合竞价", mode="timeseries", fields=[ExtField("price", "float")],
-        pull=PullConfig(url="https://example.test", auth={"type": "header", "header": "X-API-Key"}),
-    ))
+    monkeypatch.setattr(
+        api.pull_scheduler, "refresh", lambda _path: pytest.fail("导入禁用配置不应启动调度")
+    )
+    ExtConfigStore(tmp_path).upsert(
+        ExtConfig(
+            id="auction",
+            label="集合竞价",
+            mode="timeseries",
+            fields=[ExtField("price", "float")],
+            pull=PullConfig(
+                url="https://example.test", auth={"type": "header", "header": "X-API-Key"}
+            ),
+        )
+    )
     app = FastAPI()
     app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     app.include_router(api.router)
@@ -42,7 +51,9 @@ def test_export_preview_and_import_keep_contract_and_refresh_consumers(client):
     assert preview.json()["conflict"]
     conflict = http.post("/api/ext-data/config/import", files=files)
     assert conflict.status_code == 409
-    imported = http.post("/api/ext-data/config/import", files=files, data={"config_id": "auction_shared"})
+    imported = http.post(
+        "/api/ext-data/config/import", files=files, data={"config_id": "auction_shared"}
+    )
     assert imported.status_code == 200 and imported.json()["id"] == "auction_shared"
     assert imported.json()["pull"]["enabled"] is False
     assert len(refreshed) == 1

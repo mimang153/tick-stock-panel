@@ -129,6 +129,13 @@ def _bare(col: str = "symbol") -> pl.Expr:
 
 
 def _latest_minute_partition(minute_dir: Path) -> str | None:
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is not None:
+        # CK-only 下分钟分区只存在 CK；本地目录可能为空。
+        latest = runtime.store.latest_minute_datetime("kline_minute")
+        return latest.date().isoformat() if latest is not None else None
     if not minute_dir.exists():
         return None
     parts = sorted(

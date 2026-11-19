@@ -1,7 +1,9 @@
 """Custom depth provider routing and failure-isolation tests."""
+
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock, call
 
 from app.services import depth_service as depth_module
@@ -11,10 +13,12 @@ from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
 def _service(*, batch: int = 2, rpm: int = 30) -> DepthService:
     service = DepthService()
-    service._app_state = SimpleNamespace(
-        capabilities=CapabilitySet({
-            Cap.DEPTH5_BATCH: CapabilityLimits(batch=batch, rpm=rpm),
-        }),
+    cast(Any, service)._app_state = SimpleNamespace(
+        capabilities=CapabilitySet(
+            {
+                Cap.DEPTH5_BATCH: CapabilityLimits(batch=batch, rpm=rpm),
+            }
+        ),
     )
     return service
 
@@ -138,23 +142,35 @@ def test_custom_depth_provider_maps_asks_and_bids(monkeypatch):
     from app.data_providers.custom.config import config_from_dict
     from app.data_providers.custom.provider import GenericHTTPProvider
 
-    provider = GenericHTTPProvider(config_from_dict({
-        "name": "eltdx",
-        "datasets": {
-            "depth5": {
-                "url": "http://example.test/depth5",
-                "response_path": "data",
-                "field_map": {
-                    "symbol": "symbol", "asks": "asks", "bids": "bids",
+    provider = GenericHTTPProvider(
+        config_from_dict(
+            {
+                "name": "eltdx",
+                "datasets": {
+                    "depth5": {
+                        "url": "http://example.test/depth5",
+                        "response_path": "data",
+                        "field_map": {
+                            "symbol": "symbol",
+                            "asks": "asks",
+                            "bids": "bids",
+                        },
+                    },
                 },
-            },
-        },
-    }))
-    monkeypatch.setattr(provider, "_request_rows", lambda cfg, **kwargs: [{
-        "symbol": "000001.SZ",
-        "asks": [[11.33, 1256]],
-        "bids": [[11.32, 857]],
-    }])
+            }
+        )
+    )
+    monkeypatch.setattr(
+        provider,
+        "_request_rows",
+        lambda cfg, **kwargs: [
+            {
+                "symbol": "000001.SZ",
+                "asks": [[11.33, 1256]],
+                "bids": [[11.32, 857]],
+            }
+        ],
+    )
 
     assert provider.get_depth_batch(["000001.SZ"]) == {
         "000001.SZ": {
@@ -170,15 +186,19 @@ def test_depth5_config_is_accepted_and_does_not_require_dates(monkeypatch):
     from app.data_providers.custom.config import config_from_dict
     from app.data_providers.custom.provider import GenericHTTPProvider
 
-    provider = GenericHTTPProvider(config_from_dict({
-        "name": "eltdx",
-        "datasets": {
-            "depth5": {
-                "url": "http://example.test/depth5",
-                "field_map": {"symbol": "symbol", "asks": "asks", "bids": "bids"},
-            },
-        },
-    }))
+    provider = GenericHTTPProvider(
+        config_from_dict(
+            {
+                "name": "eltdx",
+                "datasets": {
+                    "depth5": {
+                        "url": "http://example.test/depth5",
+                        "field_map": {"symbol": "symbol", "asks": "asks", "bids": "bids"},
+                    },
+                },
+            }
+        )
+    )
 
     assert provider.validate() == []
     monkeypatch.setattr(provider, "_request_rows", lambda cfg, **kwargs: [])

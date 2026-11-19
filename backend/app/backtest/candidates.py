@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import uuid
+from builtins import list as _list
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -224,9 +225,7 @@ class CandidateStore:
                         and item.get("data_as_of") == data_as_of
                     ):
                         return item
-                    raise CandidateValidationError(
-                        "相同挖掘溯源的候选内容冲突, 已停止覆盖"
-                    )
+                    raise CandidateValidationError("相同挖掘溯源的候选内容冲突, 已停止覆盖")
             if len(items) >= MAX_CANDIDATES:
                 raise CandidateValidationError(f"候选方案最多保存 {MAX_CANDIDATES} 个")
             now = datetime.now(UTC).isoformat()
@@ -275,7 +274,7 @@ class CandidateStore:
                 raise KeyError(candidate_id)
             self._write(remaining)
 
-    def _load(self) -> list[dict[str, Any]]:
+    def _load(self) -> _list[dict[str, Any]]:
         if not self.path.exists():
             return []
         try:
@@ -290,7 +289,7 @@ class CandidateStore:
             raise CandidateStoreError("候选方案文件格式无效, 未执行覆盖写入")
         return [item for value in raw if (item := self._normalize(value)) is not None]
 
-    def _write(self, items: list[dict[str, Any]]) -> None:
+    def _write(self, items: _list[dict[str, Any]]) -> None:
         payload = json.dumps(items, ensure_ascii=False, indent=2, allow_nan=False)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".json.tmp")
@@ -311,13 +310,15 @@ class CandidateStore:
         kind = value.get("kind")
         if kind not in _CONFIG_FIELDS or not isinstance(value.get("id"), str):
             return None
-        raw_config = value.get("config") if isinstance(value.get("config"), dict) else {}
+        config_value = value.get("config")
+        raw_config = config_value if isinstance(config_value, dict) else {}
         config = {key: item for key, item in raw_config.items() if key in _CONFIG_FIELDS[kind]}
-        raw_metrics = value.get("metrics") if isinstance(value.get("metrics"), dict) else {}
+        metrics_value = value.get("metrics")
+        raw_metrics = metrics_value if isinstance(metrics_value, dict) else {}
         metrics = {
             key: item
             for key, item in raw_metrics.items()
-            if key in _METRIC_FIELDS[kind] and not isinstance(item, (dict, list))
+            if key in _METRIC_FIELDS[kind] and not isinstance(item, dict | list)
         }
         source_id = value.get("source_id") or config.get(f"{kind}_name") or config.get(f"{kind}_id")
         if not isinstance(source_id, str) or not source_id:
@@ -364,7 +365,7 @@ class CandidateStore:
             raise CandidateValidationError(
                 f"候选指标包含不允许的字段: {', '.join(sorted(unknown))}"
             )
-        if any(isinstance(value, (dict, list)) for value in metrics.values()):
+        if any(isinstance(value, dict | list) for value in metrics.values()):
             raise CandidateValidationError("候选指标只允许保存标量摘要")
         CandidateStore._check_json_size(metrics)
         return metrics

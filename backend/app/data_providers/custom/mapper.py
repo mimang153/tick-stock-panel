@@ -1,4 +1,5 @@
 """Mapping helpers for custom data sources."""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -61,12 +62,18 @@ def apply_transforms(df: pl.DataFrame, transforms: dict[str, str]) -> pl.DataFra
         elif text.startswith("parse_date("):
             fmt = _extract_format(text) or "%Y-%m-%d"
             out = out.with_columns(
-                pl.col(col).cast(pl.Utf8, strict=False).str.strptime(pl.Date, format=fmt, strict=False).alias(col)
+                pl.col(col)
+                .cast(pl.Utf8, strict=False)
+                .str.strptime(pl.Date, format=fmt, strict=False)
+                .alias(col)
             )
         elif text.startswith("parse_datetime("):
             fmt = _extract_format(text) or "%Y-%m-%d %H:%M:%S"
             out = out.with_columns(
-                pl.col(col).cast(pl.Utf8, strict=False).str.strptime(pl.Datetime, format=fmt, strict=False).alias(col)
+                pl.col(col)
+                .cast(pl.Utf8, strict=False)
+                .str.strptime(pl.Datetime, format=fmt, strict=False)
+                .alias(col)
             )
     return out
 

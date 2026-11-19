@@ -10,11 +10,14 @@ secrets_store、auth、preferences、ExtConfigStore、策略 override、自定�
 字节就抛 OSError。裸写会把目标文件本身截断; 原子写截断的是 .tmp, `os.replace`
 不会执行, 目标文件原封不动。
 """
+
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -29,7 +32,7 @@ from app.strategy import custom_signals
 
 
 @pytest.fixture()
-def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     from app.config import settings
 
     monkeypatch.setattr(settings, "data_dir", tmp_path, raising=False)
@@ -116,7 +119,10 @@ def test_strategy_override_survives_a_torn_write(data_dir: Path, torn_write) -> 
 def test_custom_signal_survives_a_torn_write(data_dir: Path, torn_write) -> None:
     """custom_signals.load_all 跳过损坏文件 —— 半截文件会让该信号静默消失。"""
     sig = {
-        "id": "vol_up", "name": "放量", "kind": "entry", "enabled": True,
+        "id": "vol_up",
+        "name": "放量",
+        "kind": "entry",
+        "enabled": True,
         "conditions": [{"left": "volume", "op": ">", "right": "0", "leftDays": 0, "rightDays": 0}],
     }
     custom_signals.save_one(data_dir, sig)
@@ -144,15 +150,21 @@ def test_custom_factor_survives_a_torn_write(data_dir: Path, torn_write) -> None
 
 def test_analysis_menu_survives_a_torn_write(data_dir: Path, torn_write) -> None:
     """analysis._load_saved 遇到解析失败直接 continue —— 半截文件会让菜单静默消失。"""
-    request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(repo=SimpleNamespace(store=SimpleNamespace(data_dir=data_dir))))
+    request: Any = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(repo=SimpleNamespace(store=SimpleNamespace(data_dir=data_dir)))
+        )
     )
-    analysis._save(request, analysis.AnalysisMenu(id="limit_up", label="涨停分析", data_source="hot"))
+    analysis._save(
+        request, analysis.AnalysisMenu(id="limit_up", label="涨停分析", data_source="hot")
+    )
     assert [m.label for m in analysis._load_saved(request)] == ["涨停分析"]
 
     torn_write()
     with pytest.raises(OSError):
-        analysis._save(request, analysis.AnalysisMenu(id="limit_up", label="涨停复盘", data_source="hot"))
+        analysis._save(
+            request, analysis.AnalysisMenu(id="limit_up", label="涨停复盘", data_source="hot")
+        )
 
     assert [(m.id, m.label) for m in analysis._load_saved(request)] == [("limit_up", "涨停分析")]
 
@@ -188,9 +200,7 @@ def test_a_normal_save_still_writes_what_it_was_given(data_dir: Path) -> None:
     secrets_store.save({"b": "2"})
     assert secrets_store.load() == {"a": "1", "b": "2"}
 
-    written = json.loads(
-        (data_dir / "user_data" / "preferences.json").read_text(encoding="utf-8")
-    )
+    written = json.loads((data_dir / "user_data" / "preferences.json").read_text(encoding="utf-8"))
     assert written == {"theme": "dark", "kline_compress": True}
 
 

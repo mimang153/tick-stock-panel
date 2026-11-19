@@ -9,12 +9,14 @@
 - ScreenerService 1m context: 当日分区优先、缺失回退最近分区、空库报错、
   非股票资产拒绝
 """
+
 from __future__ import annotations
 
 import datetime as _dt
 import importlib.util
 from datetime import date, datetime
 from pathlib import Path
+from typing import Any, cast
 
 import polars as pl
 
@@ -27,24 +29,29 @@ STRATEGY_FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "strategie
 _spec = importlib.util.spec_from_file_location(
     "minute_red_streak_fixture", STRATEGY_FIXTURE_DIR / "minute_red_streak.py"
 )
+assert _spec is not None and _spec.loader is not None
 minute_red_streak = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(minute_red_streak)
 
 
-def _bars(symbol: str, candles: list[tuple[float, float, float]], start_hour: int = 9) -> pl.DataFrame:
+def _bars(
+    symbol: str, candles: list[tuple[float, float, float]], start_hour: int = 9
+) -> pl.DataFrame:
     """candles: (open, close, high) 序列, 时间从 start_hour:30 起每分钟一根。"""
     n = len(candles)
     base = datetime(2026, 8, 25, start_hour, 30)
-    return pl.DataFrame({
-        "symbol": [symbol] * n,
-        "datetime": [base + _dt.timedelta(minutes=i) for i in range(n)],
-        "open": [float(c[0]) for c in candles],
-        "high": [float(c[2]) for c in candles],
-        "low": [float(min(c[0], c[1])) for c in candles],
-        "close": [float(c[1]) for c in candles],
-        "volume": [100.0] * n,
-        "amount": [10000.0] * n,
-    })
+    return pl.DataFrame(
+        {
+            "symbol": [symbol] * n,
+            "datetime": [base + _dt.timedelta(minutes=i) for i in range(n)],
+            "open": [float(c[0]) for c in candles],
+            "high": [float(c[2]) for c in candles],
+            "low": [float(min(c[0], c[1])) for c in candles],
+            "close": [float(c[1]) for c in candles],
+            "volume": [100.0] * n,
+            "amount": [10000.0] * n,
+        }
+    )
 
 
 # ── 形态 ────────────────────────────────────────────────────────────
@@ -61,7 +68,9 @@ def test_pattern_hits_five_red_of_seven_with_red_top_two():
         (10.5, 10.7, 10.80),  # 红
         (10.7, 10.8, 10.90),  # 红 (最高)
     ]
-    out = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {"require_limit_up": False})
+    out = minute_red_streak.filter_minute_history(
+        _bars("600000.SH", candles), {"require_limit_up": False}
+    )
     assert out["symbol"].to_list() == ["600000.SH"]
     row = out.row(0, named=True)
     assert row["red_count"] == 5
@@ -70,7 +79,9 @@ def test_pattern_hits_five_red_of_seven_with_red_top_two():
 
 
 def test_pattern_insufficient_bars_never_triggers():
-    out = minute_red_streak.filter_minute_history(_bars("600000.SH", [(10.0, 10.2, 10.3)] * 6), {"require_limit_up": False})
+    out = minute_red_streak.filter_minute_history(
+        _bars("600000.SH", [(10.0, 10.2, 10.3)] * 6), {"require_limit_up": False}
+    )
     assert out.is_empty()
 
 
@@ -85,7 +96,9 @@ def test_pattern_green_at_top_blocks_hit():
         (11.5, 11.0, 12.00),  # 绿 (最高)
         (11.0, 11.4, 11.90),  # 红 (次高)
     ]
-    out = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {"require_limit_up": False})
+    out = minute_red_streak.filter_minute_history(
+        _bars("600000.SH", candles), {"require_limit_up": False}
+    )
     assert out.is_empty()
 
 
@@ -100,7 +113,9 @@ def test_pattern_rank_by_close_uses_close_not_high():
         (11.4, 11.1, 11.50),  # 绿 (high 最高, 并列)
         (11.1, 11.5, 11.55),  # 红 (close 最高)
     ]
-    by_high = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {"require_limit_up": False})
+    by_high = minute_red_streak.filter_minute_history(
+        _bars("600000.SH", candles), {"require_limit_up": False}
+    )
     by_close = minute_red_streak.filter_minute_history(
         _bars("600000.SH", candles), {"rank_by_close": True, "require_limit_up": False}
     )
@@ -109,13 +124,22 @@ def test_pattern_rank_by_close_uses_close_not_high():
 
 
 def test_pattern_sorts_unordered_input_by_datetime():
-    bars = pl.concat([
-        _bars("600000.SH", [(10.0, 10.2, 10.30)]),
-        _bars("600000.SH", [
-            (10.2, 10.1, 10.25), (10.1, 10.4, 10.50), (10.4, 10.6, 10.70),
-            (10.6, 10.5, 10.65), (10.5, 10.7, 10.80), (10.7, 10.8, 10.90),
-        ]),
-    ]).sample(fraction=1.0, shuffle=True, seed=7)
+    bars = pl.concat(
+        [
+            _bars("600000.SH", [(10.0, 10.2, 10.30)]),
+            _bars(
+                "600000.SH",
+                [
+                    (10.2, 10.1, 10.25),
+                    (10.1, 10.4, 10.50),
+                    (10.4, 10.6, 10.70),
+                    (10.6, 10.5, 10.65),
+                    (10.5, 10.7, 10.80),
+                    (10.7, 10.8, 10.90),
+                ],
+            ),
+        ]
+    ).sample(fraction=1.0, shuffle=True, seed=7)
     out = minute_red_streak.filter_minute_history(bars, {"require_limit_up": False})
     assert out["symbol"].to_list() == ["600000.SH"]
     assert out.row(0, named=True)["close"] == 10.8  # 最后一根(时间最大)的收盘
@@ -133,7 +157,9 @@ def test_pattern_three_way_high_tie_prefers_later_bars():
         (10.5, 10.6, 10.90),  # 红 (并列最高, 中间)
         (10.6, 10.8, 10.90),  # 红 (并列最高, 最晚)
     ]
-    out = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {"require_limit_up": False})
+    out = minute_red_streak.filter_minute_history(
+        _bars("600000.SH", candles), {"require_limit_up": False}
+    )
     assert out["symbol"].to_list() == ["600000.SH"]
     assert out.row(0, named=True)["top_red_count"] == 2
 
@@ -150,8 +176,12 @@ def test_pattern_min_red_threshold_respected():
         (10.5, 10.8, 10.90),  # 红
     ]
     bars = _bars("600000.SH", candles)
-    assert minute_red_streak.filter_minute_history(bars, {"min_red": 5, "require_limit_up": False}).is_empty()
-    assert not minute_red_streak.filter_minute_history(bars, {"min_red": 4, "require_limit_up": False}).is_empty()
+    assert minute_red_streak.filter_minute_history(
+        bars, {"min_red": 5, "require_limit_up": False}
+    ).is_empty()
+    assert not minute_red_streak.filter_minute_history(
+        bars, {"min_red": 4, "require_limit_up": False}
+    ).is_empty()
 
 
 def test_pattern_uses_opening_bars_even_if_day_turns_green():
@@ -166,9 +196,11 @@ def test_pattern_uses_opening_bars_even_if_day_turns_green():
         (10.5, 10.7, 10.80),  # 红
         (10.7, 10.8, 10.90),  # 红 (最高) ← 窗口末根
         (10.8, 10.0, 10.85),  # 开盘窗口外的绿
-        (10.0, 9.5, 10.05),   # 开盘窗口外的绿
+        (10.0, 9.5, 10.05),  # 开盘窗口外的绿
     ]
-    out = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {"require_limit_up": False})
+    out = minute_red_streak.filter_minute_history(
+        _bars("600000.SH", candles), {"require_limit_up": False}
+    )
     assert out["symbol"].to_list() == ["600000.SH"]
     row = out.row(0, named=True)
     assert row["red_count"] == 5
@@ -189,7 +221,9 @@ def test_pattern_opening_window_miss_not_rescued_by_late_reds():
         (10.8, 10.9, 11.00),  # 红 (窗口外)
         (10.9, 11.0, 11.10),  # 红 (窗口外)
     ]
-    out = minute_red_streak.filter_minute_history(_bars("600000.SH", candles), {"require_limit_up": False})
+    out = minute_red_streak.filter_minute_history(
+        _bars("600000.SH", candles), {"require_limit_up": False}
+    )
     assert out.is_empty()
 
 
@@ -217,25 +251,31 @@ def _daily(
     """days 个交易日的日线帧; flag_on 指定第几天 (0=最早) 触发涨停信号。"""
     flag_on = flag_on or set()
     base = date(2026, 8, 25)
-    return pl.DataFrame({
-        "symbol": [symbol] * days,
-        "date": [base - _dt.timedelta(days=days - i) for i in range(days)],
-        "signal_limit_up": [i in flag_on and not broken for i in range(days)],
-        "signal_broken_limit_up": [i in flag_on and broken for i in range(days)],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": [symbol] * days,
+            "date": [base - _dt.timedelta(days=days - i) for i in range(days)],
+            "signal_limit_up": [i in flag_on and not broken for i in range(days)],
+            "signal_broken_limit_up": [i in flag_on and broken for i in range(days)],
+        }
+    )
 
 
 def test_pattern_limit_up_condition_filters_by_daily_signals():
-    bars = pl.concat([
-        _bars("600001.SH", _HIT_CANDLES),
-        _bars("600002.SH", _HIT_CANDLES),
-        _bars("600003.SH", _HIT_CANDLES),
-    ])
-    daily = pl.concat([
-        _daily("600001.SH", 20, {3}),                 # 收盘涨停 → 过
-        _daily("600002.SH", 20, {15}, broken=True),   # 炸板触及 → 过
-        _daily("600003.SH", 20),                      # 无涨停 → 剔除
-    ])
+    bars = pl.concat(
+        [
+            _bars("600001.SH", _HIT_CANDLES),
+            _bars("600002.SH", _HIT_CANDLES),
+            _bars("600003.SH", _HIT_CANDLES),
+        ]
+    )
+    daily = pl.concat(
+        [
+            _daily("600001.SH", 20, {3}),  # 收盘涨停 → 过
+            _daily("600002.SH", 20, {15}, broken=True),  # 炸板触及 → 过
+            _daily("600003.SH", 20),  # 无涨停 → 剔除
+        ]
+    )
     out = minute_red_streak.filter_minute_history(bars, {}, daily=daily)
     assert sorted(out["symbol"].to_list()) == ["600001.SH", "600002.SH"]
     assert sorted(out["recent_limit_ups"].to_list()) == [1, 1]
@@ -247,9 +287,7 @@ def test_pattern_limit_up_lookback_window_boundary():
     bars = _bars("600000.SH", _HIT_CANDLES)
     daily = _daily("600000.SH", 25, {4})
     assert minute_red_streak.filter_minute_history(bars, {}, daily=daily).is_empty()
-    out = minute_red_streak.filter_minute_history(
-        bars, {"limit_up_days": 25}, daily=daily
-    )
+    out = minute_red_streak.filter_minute_history(bars, {"limit_up_days": 25}, daily=daily)
     assert out["symbol"].to_list() == ["600000.SH"]
 
 
@@ -311,27 +349,27 @@ def test_minute_filter_backend_validation(tmp_path):
 def test_minute_filter_daily_history_validation(tmp_path):
     # 声明 daily_history_bars: fn 必须接受 daily 关键字, 且范围 [0, 250]
     (tmp_path / "m_daily_ok.py").write_text(
-        'import polars as pl\n'
+        "import polars as pl\n"
         'META = {"id": "m_daily_ok", "name": "x", "asset_types": ["stock"], '
         '"timeframes": ["1m"], "daily_history_bars": 20}\n'
         'EXECUTION_BACKEND = "minute_filter"\n'
-        'def filter_minute_history(df, params, *, daily=None):\n'
+        "def filter_minute_history(df, params, *, daily=None):\n"
         '    return df.group_by("symbol").agg(close=pl.col("close").max())\n'
     )
     (tmp_path / "m_daily_kw.py").write_text(
-        'import polars as pl\n'
+        "import polars as pl\n"
         'META = {"id": "m_daily_kw", "name": "x", "asset_types": ["stock"], '
         '"timeframes": ["1m"], "daily_history_bars": 20}\n'
         'EXECUTION_BACKEND = "minute_filter"\n'
-        'def filter_minute_history(df, params):\n'
+        "def filter_minute_history(df, params):\n"
         '    return df.group_by("symbol").agg(close=pl.col("close").max())\n'
     )
     (tmp_path / "m_daily_range.py").write_text(
-        'import polars as pl\n'
+        "import polars as pl\n"
         'META = {"id": "m_daily_range", "name": "x", "asset_types": ["stock"], '
         '"timeframes": ["1m"], "daily_history_bars": 300}\n'
         'EXECUTION_BACKEND = "minute_filter"\n'
-        'def filter_minute_history(df, params, *, daily=None):\n'
+        "def filter_minute_history(df, params, *, daily=None):\n"
         '    return df.group_by("symbol").agg(close=pl.col("close").max())\n'
     )
     engine = StrategyEngine(strategy_dirs=[tmp_path])
@@ -346,12 +384,12 @@ def test_minute_filter_daily_history_validation(tmp_path):
 def test_minute_run_injects_daily_history(tmp_path):
     # fn 直接消费 daily (对涨停信号求和), 验证引擎把 context.daily_history 注入
     (tmp_path / "m_use_daily.py").write_text(
-        'import polars as pl\n'
+        "import polars as pl\n"
         'META = {"id": "m_use_daily", "name": "x", "asset_types": ["stock"], '
         '"timeframes": ["1m"], "daily_history_bars": 10}\n'
         'EXECUTION_BACKEND = "minute_filter"\n'
-        'def filter_minute_history(df, params, *, daily=None):\n'
-        '    if daily is None:\n'
+        "def filter_minute_history(df, params, *, daily=None):\n"
+        "    if daily is None:\n"
         '        return pl.DataFrame(schema={"symbol": pl.Utf8})\n'
         '    return daily.group_by("symbol").agg(\n'
         '        close=pl.col("signal_limit_up").sum() + 10.0)\n'
@@ -361,14 +399,16 @@ def test_minute_run_injects_daily_history(tmp_path):
         asset_type="stock",
         timeframe="1m",
         as_of=date(2026, 8, 25),
-        current=pl.DataFrame({
-            "symbol": ["600001.SH"],
-            "name": ["正常股"],
-            "total_shares": [1e8],
-            "float_shares": [5e7],
-            "amount": [3e8],
-            "change_pct": [0.01],
-        }),
+        current=pl.DataFrame(
+            {
+                "symbol": ["600001.SH"],
+                "name": ["正常股"],
+                "total_shares": [1e8],
+                "float_shares": [5e7],
+                "amount": [3e8],
+                "change_pct": [0.01],
+            }
+        ),
         history=_bars("600001.SH", [(10.0, 10.2, 10.3)] * 7),
         daily_history=_daily("600001.SH", 10, {2}),
     )
@@ -381,20 +421,24 @@ def test_minute_context_run_applies_enriched_basic_filter(tmp_path):
     (tmp_path / "m_basic.py").write_text(_minute_code("m_basic"))
     engine = StrategyEngine(strategy_dirs=[tmp_path])
 
-    hist = pl.concat([
-        _bars("600001.SH", [(10.0, 20.0, 25.0)] * 7),   # 命中, 收盘 20
-        _bars("600002.SH", [(10.0, 20.0, 25.0)] * 7),   # 命中但 ST → 剔除
-        _bars("600003.SH", [(10.0, 20.0, 25.0)] * 7),   # 命中
-        _bars("600004.SH", [(100.0, 200.0, 250.0)] * 7), # 命中但收盘 200 → 超上限剔除
-    ])
-    current = pl.DataFrame({
-        "symbol": ["600001.SH", "600002.SH", "600003.SH", "600004.SH"],
-        "name": ["正常股", "ST垃圾", "正常股2", "高价股"],
-        "total_shares": [1e8, 1e8, 1e8, 1e8],
-        "float_shares": [5e7, 5e7, 5e7, 5e7],
-        "amount": [3e8, 3e8, 3e8, 3e8],
-        "change_pct": [0.01, 0.01, 0.01, 0.01],
-    })
+    hist = pl.concat(
+        [
+            _bars("600001.SH", [(10.0, 20.0, 25.0)] * 7),  # 命中, 收盘 20
+            _bars("600002.SH", [(10.0, 20.0, 25.0)] * 7),  # 命中但 ST → 剔除
+            _bars("600003.SH", [(10.0, 20.0, 25.0)] * 7),  # 命中
+            _bars("600004.SH", [(100.0, 200.0, 250.0)] * 7),  # 命中但收盘 200 → 超上限剔除
+        ]
+    )
+    current = pl.DataFrame(
+        {
+            "symbol": ["600001.SH", "600002.SH", "600003.SH", "600004.SH"],
+            "name": ["正常股", "ST垃圾", "正常股2", "高价股"],
+            "total_shares": [1e8, 1e8, 1e8, 1e8],
+            "float_shares": [5e7, 5e7, 5e7, 5e7],
+            "amount": [3e8, 3e8, 3e8, 3e8],
+            "change_pct": [0.01, 0.01, 0.01, 0.01],
+        }
+    )
     context = StrategyDataContext(
         asset_type="stock",
         timeframe="1m",
@@ -402,9 +446,7 @@ def test_minute_context_run_applies_enriched_basic_filter(tmp_path):
         current=current,
         history=hist,
     )
-    result = engine.run(
-        "m_basic", context, overrides={"basic_filter": {"price_max": 150.0}}
-    )
+    result = engine.run("m_basic", context, overrides={"basic_filter": {"price_max": 150.0}})
     symbols = {r["symbol"] for r in result.rows}
     assert symbols == {"600001.SH", "600003.SH"}
     assert all("name" in r for r in result.rows)  # enriched 列已联表
@@ -450,12 +492,17 @@ def _svc(partitions: dict[date, pl.DataFrame], asset_type: str = "stock") -> Scr
 
 def test_minute_context_prefers_as_of_partition():
     d1, d2 = date(2026, 8, 24), date(2026, 8, 25)
-    svc = _svc({
-        d1: _bars("600001.SH", [(10.0, 10.2, 10.3)] * 3),
-        d2: _bars("600001.SH", [(10.0, 10.2, 10.3)] * 4),
-    })
+    svc = _svc(
+        {
+            d1: _bars("600001.SH", [(10.0, 10.2, 10.3)] * 3),
+            d2: _bars("600001.SH", [(10.0, 10.2, 10.3)] * 4),
+        }
+    )
     ctx = svc.build_strategy_context(
-        None, d1, [], timeframe="1m",
+        None,
+        d1,
+        [],
+        timeframe="1m",
         current=pl.DataFrame({"symbol": ["600001.SH"], "name": ["x"]}),
     )
     assert ctx.history.height == 3  # as_of 当日分区, 不取更新的 d2
@@ -464,12 +511,17 @@ def test_minute_context_prefers_as_of_partition():
 
 def test_minute_context_falls_back_to_latest_partition():
     d1, d2 = date(2026, 8, 24), date(2026, 8, 25)
-    svc = _svc({
-        d1: _bars("600001.SH", [(10.0, 10.2, 10.3)] * 3),
-        d2: _bars("600001.SH", [(10.0, 10.2, 10.3)] * 4),
-    })
+    svc = _svc(
+        {
+            d1: _bars("600001.SH", [(10.0, 10.2, 10.3)] * 3),
+            d2: _bars("600001.SH", [(10.0, 10.2, 10.3)] * 4),
+        }
+    )
     ctx = svc.build_strategy_context(
-        None, date(2026, 8, 20), [], timeframe="1m",
+        None,
+        date(2026, 8, 20),
+        [],
+        timeframe="1m",
         current=pl.DataFrame({"symbol": ["600001.SH"]}),
     )
     assert ctx.history.height == 4  # 回退到最近分区 d2
@@ -479,7 +531,10 @@ def test_minute_context_empty_store_raises_with_guidance():
     svc = _svc({})
     try:
         svc.build_strategy_context(
-            None, date(2026, 8, 25), [], timeframe="1m",
+            None,
+            date(2026, 8, 25),
+            [],
+            timeframe="1m",
             current=pl.DataFrame({"symbol": ["600001.SH"]}),
         )
         raise AssertionError("expected ValueError")
@@ -491,7 +546,10 @@ def test_minute_context_rejects_non_stock_asset():
     svc = _svc({date(2026, 8, 25): _bars("510300.SH", [(10.0, 10.2, 10.3)] * 3)}, asset_type="etf")
     try:
         svc.build_strategy_context(
-            None, date(2026, 8, 25), [], timeframe="1m",
+            None,
+            date(2026, 8, 25),
+            [],
+            timeframe="1m",
             current=pl.DataFrame({"symbol": ["510300.SH"]}),
         )
         raise AssertionError("expected ValueError")
@@ -506,11 +564,14 @@ def test_minute_context_loads_daily_history_for_declared_strategies():
 
     daily = _daily("600001.SH", 6, {1})
     repo = _FakeMinuteRepo({date(2026, 8, 25): _bars("600001.SH", [(10.0, 10.2, 10.3)] * 3)})
-    repo.get_enriched_history = lambda target_date, lookback_days: daily  # type: ignore[method-assign]
-    repo.get_instruments_asset = lambda asset_type: None  # type: ignore[method-assign]
+    cast(Any, repo).get_enriched_history = lambda target_date, lookback_days: daily
+    cast(Any, repo).get_instruments_asset = lambda asset_type: None
     svc = ScreenerService(repo, asset_type="stock")  # type: ignore[arg-type]
     ctx = svc.build_strategy_context(
-        _FakeEngine(), date(2026, 8, 25), ["m_x"], timeframe="1m",
+        _FakeEngine(),
+        date(2026, 8, 25),
+        ["m_x"],
+        timeframe="1m",
         current=pl.DataFrame({"symbol": ["600001.SH"], "name": ["x"]}),
     )
     assert ctx.daily_history is not None
@@ -520,7 +581,10 @@ def test_minute_context_loads_daily_history_for_declared_strategies():
 def test_minute_context_without_engine_skips_daily_history():
     svc = _svc({date(2026, 8, 25): _bars("600001.SH", [(10.0, 10.2, 10.3)] * 3)})
     ctx = svc.build_strategy_context(
-        None, date(2026, 8, 25), [], timeframe="1m",
+        None,
+        date(2026, 8, 25),
+        [],
+        timeframe="1m",
         current=pl.DataFrame({"symbol": ["600001.SH"]}),
     )
     assert ctx.daily_history is None  # 无引擎声明 → 不装配日线

@@ -3,10 +3,12 @@
 用户 bug 报告②: 旧实现用 min(drawdown, activate) 把用户填的回撤值静默改写为
 激活值, 配置"不生效"且无任何提示。修复后该组合直接报错, 用户需调整参数。
 """
+
 from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from typing import Any, cast
 
 from app.backtest.engine import BacktestEngine
 from app.backtest.strategy import StrategyBacktestConfig, StrategyBacktestService
@@ -17,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 def _service() -> StrategyBacktestService:
     return StrategyBacktestService(
-        BacktestEngine(repo=None),
+        BacktestEngine(repo=cast(Any, None)),
         StrategyEngine(strategy_dirs=[REPO_ROOT / "backend" / "tests" / "fixtures" / "strategies"]),
     )
 

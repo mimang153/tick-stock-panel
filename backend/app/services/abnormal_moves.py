@@ -35,7 +35,9 @@ def _is_closed_session() -> bool:
     """工作日休市 (国庆等): 探针确定休市才视为无「今日涨跌」可叠加。未知保持叠加。"""
     return trading_day.is_trading_day() is False
 
+
 # ── 规则表 ────────────────────────────────────────────────
+
 
 @dataclass(frozen=True)
 class AbnormalRule:
@@ -51,13 +53,25 @@ _GEM_STAR = {3: (0.30, 0.30), 10: (1.00, 0.50), 30: (2.00, 0.70)}
 _BSE = {3: (0.40, 0.40), 10: (1.00, 0.50), 30: (2.00, 0.70)}
 
 RULES_META: list[dict[str, Any]] = [
-    {"board": "主板", "st": False, "thresholds": {f"{k}d": {"up": u, "down": d} for k, (u, d) in _MAIN.items()},
-     "note": "3日±20% 异常波动; 严重异常波动 10日+100%(-50%) / 30日+200%(-70%), "
-             "负向更严; 2026-07-06 起风险警示(ST)股票同口径 (原±15%特别规定已废止)"},
-    {"board": "创业板/科创板", "st": False, "thresholds": {f"{k}d": {"up": u, "down": d} for k, (u, d) in _GEM_STAR.items()},
-     "note": "20%涨跌幅板块, 3日±30%"},
-    {"board": "北交所", "st": False, "thresholds": {f"{k}d": {"up": u, "down": d} for k, (u, d) in _BSE.items()},
-     "note": "30%涨跌幅板块, 3日±40%"},
+    {
+        "board": "主板",
+        "st": False,
+        "thresholds": {f"{k}d": {"up": u, "down": d} for k, (u, d) in _MAIN.items()},
+        "note": "3日±20% 异常波动; 严重异常波动 10日+100%(-50%) / 30日+200%(-70%), "
+        "负向更严; 2026-07-06 起风险警示(ST)股票同口径 (原±15%特别规定已废止)",
+    },
+    {
+        "board": "创业板/科创板",
+        "st": False,
+        "thresholds": {f"{k}d": {"up": u, "down": d} for k, (u, d) in _GEM_STAR.items()},
+        "note": "20%涨跌幅板块, 3日±30%",
+    },
+    {
+        "board": "北交所",
+        "st": False,
+        "thresholds": {f"{k}d": {"up": u, "down": d} for k, (u, d) in _BSE.items()},
+        "note": "30%涨跌幅板块, 3日±40%",
+    },
 ]
 
 _BENCH_RT_CANDIDATES = ["000002.SH", "000001.SH", "399107.SZ", "399001.SZ", "899050.BJ"]
@@ -133,8 +147,14 @@ def _hist_snapshot(repo: Any) -> dict[str, Any]:
     df, cache_date = repo.get_enriched_latest()
     rows: dict[str, dict[str, Any]] = {}
     if not df.is_empty() and "symbol" in df.columns:
-        cols = ["symbol", *[c for c in ("name", "close", "change_pct",
-                                        "deviate_3d", "deviate_10d", "deviate_30d") if c in df.columns]]
+        cols = [
+            "symbol",
+            *[
+                c
+                for c in ("name", "close", "change_pct", "deviate_3d", "deviate_10d", "deviate_30d")
+                if c in df.columns
+            ],
+        ]
         df = df.select(cols)
         for r in df.iter_rows(named=True):
             rows[str(r["symbol"])] = {
@@ -145,7 +165,11 @@ def _hist_snapshot(repo: Any) -> dict[str, Any]:
                 "deviate_10d": r.get("deviate_10d"),
                 "deviate_30d": r.get("deviate_30d"),
             }
-    payload = {"_ts": now, "rows": rows, "cache_date": cache_date.isoformat() if cache_date else None}
+    payload = {
+        "_ts": now,
+        "rows": rows,
+        "cache_date": cache_date.isoformat() if cache_date else None,
+    }
     with _hist_cache_lock:
         _hist_cache["data"] = payload
     return payload
@@ -160,7 +184,7 @@ def _bench_rt_pct(quote_service: Any) -> float:
     """
     try:
         df = quote_service.get_index_quotes()
-    except Exception:
+    except Exception:  # noqa: BLE001 - 指数行情不可用时降级为 0.0,不阻断个股异动判定
         return 0.0
     if df is None or df.is_empty():
         return 0.0
@@ -177,6 +201,34 @@ def _bench_rt_pct(quote_service: Any) -> float:
         if sub.height > 0:
             return float((sub["close"] / sub["prev_close"] - 1).mean())
     return 0.0
+
+
+def _windows_for_row(
+    base: dict[str, Any],
+    rt_delta: float,
+    rule: Any,
+    min_closeness: float,
+) -> tuple[dict[str, dict[str, Any]], float]:
+    """按规则阈值计算单标的 deviation 窗口；低于门槛时返回空结果。"""
+    windows: dict[str, dict[str, Any]] = {}
+    max_closeness = 0.0
+    for n in DEVIATION_WINDOWS:
+        hist_dev = base.get(f"deviate_{n}d")
+        if hist_dev is None:
+            continue
+        live = hist_dev + rt_delta
+        up_t, down_t = rule.thresholds[n]
+        threshold = up_t if live >= 0 else down_t
+        closeness = abs(live) / threshold if threshold > 0 else 0.0
+        windows[f"{n}d"] = {
+            "value": round(live, 4),
+            "threshold": threshold,
+            "closeness": round(closeness, 4),
+        }
+        max_closeness = max(max_closeness, closeness)
+    if not windows or max_closeness < min_closeness:
+        return {}, 0.0
+    return windows, max_closeness
 
 
 def build_overview(
@@ -197,7 +249,7 @@ def build_overview(
     if quote_service is not None:
         try:
             index_quotes = quote_service.get_index_quotes()
-        except Exception:
+        except Exception:  # noqa: BLE001 - 指数行情不可用时置空,按无基准继续计算
             index_quotes = None
         for k in BENCH_KEYS:
             bench_by_key[k] = bench_rt_pct_for(index_quotes, k)
@@ -213,39 +265,28 @@ def build_overview(
     for symbol, base in hist_rows.items():
         rule = rule_for(symbol, base.get("name"))
         rt_pct = base.get("rt_pct")
-        rt_delta = 0.0 if includes_today else (
-            (rt_pct or 0.0) - bench_by_key.get(_bench_key_of(symbol), 0.0)
+        rt_delta = (
+            0.0
+            if includes_today
+            else ((rt_pct or 0.0) - bench_by_key.get(_bench_key_of(symbol), 0.0))
         )
 
-        windows: dict[str, dict[str, Any]] = {}
-        max_closeness = 0.0
-        for n in DEVIATION_WINDOWS:
-            hist_dev = base.get(f"deviate_{n}d")
-            if hist_dev is None:
-                continue
-            live = hist_dev + rt_delta
-            up_t, down_t = rule.thresholds[n]
-            threshold = up_t if live >= 0 else down_t
-            closeness = abs(live) / threshold if threshold > 0 else 0.0
-            windows[f"{n}d"] = {
-                "value": round(live, 4),
-                "threshold": threshold,
-                "closeness": round(closeness, 4),
-            }
-            max_closeness = max(max_closeness, closeness)
-        if not windows or max_closeness < min_closeness:
+        windows, max_closeness = _windows_for_row(base, rt_delta, rule, min_closeness)
+        if not windows:
             continue
-        out_rows.append({
-            "symbol": symbol,
-            "name": base.get("name"),
-            "board": rule.board,
-            "st": rule.st,
-            "close": base.get("close"),
-            "rt_pct": rt_pct,
-            "windows": windows,
-            "max_closeness": round(max_closeness, 4),
-            "status": _status_of(max_closeness),
-        })
+        out_rows.append(
+            {
+                "symbol": symbol,
+                "name": base.get("name"),
+                "board": rule.board,
+                "st": rule.st,
+                "close": base.get("close"),
+                "rt_pct": rt_pct,
+                "windows": windows,
+                "max_closeness": round(max_closeness, 4),
+                "status": _status_of(max_closeness),
+            }
+        )
 
     out_rows.sort(key=lambda r: r["max_closeness"], reverse=True)
     counts = {
@@ -283,15 +324,26 @@ _INTRADAY_SIGNALS: tuple[tuple[str, str], ...] = (
     ("signal_volume_surge", "volume_surge"),
 )
 _INTRADAY_PRIORITY = {key: i for i, (_, key) in enumerate(_INTRADAY_SIGNALS)}
-_INTRADAY_COLS = ("symbol", "name", "close", "change_pct", "amplitude",
-                  "vol_ratio_5d", "turnover_rate", "consecutive_limit_ups")
+_INTRADAY_COLS = (
+    "symbol",
+    "name",
+    "close",
+    "change_pct",
+    "amplitude",
+    "vol_ratio_5d",
+    "turnover_rate",
+    "consecutive_limit_ups",
+)
 
 
 def build_intraday(repo: Any, limit: int = 500) -> dict[str, Any]:
     """enriched 最新快照 → 当日异动信号命中行 (含各类型计数)。"""
     df, cache_date = repo.get_enriched_latest()
-    empty = {"cache_date": cache_date.isoformat() if cache_date else None,
-             "counts": {}, "rows": []}
+    empty: dict[str, Any] = {
+        "cache_date": cache_date.isoformat() if cache_date else None,
+        "counts": {},
+        "rows": [],
+    }
     if df.is_empty() or "symbol" not in df.columns:
         return empty
     present = [(c, k) for c, k in _INTRADAY_SIGNALS if c in df.columns]
@@ -309,13 +361,18 @@ def build_intraday(repo: Any, limit: int = 500) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     for i, r in enumerate(base):
         signals = [k for k, flags in sig_cols.items() if flags[i]]
-        rows.append({
-            **{c: r.get(c) for c in base_cols},
-            "signals": signals,
-            "_prio": min((_INTRADAY_PRIORITY[s] for s in signals), default=99),
-        })
+        rows.append(
+            {
+                **{c: r.get(c) for c in base_cols},
+                "signals": signals,
+                "_prio": min((_INTRADAY_PRIORITY[s] for s in signals), default=99),
+            }
+        )
     rows.sort(key=lambda r: (r["_prio"], -abs(r.get("change_pct") or 0.0)))
     for r in rows:
         r.pop("_prio", None)
-    return {"cache_date": cache_date.isoformat() if cache_date else None,
-            "counts": counts, "rows": rows[:limit]}
+    return {
+        "cache_date": cache_date.isoformat() if cache_date else None,
+        "counts": counts,
+        "rows": rows[:limit],
+    }

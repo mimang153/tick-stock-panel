@@ -4,6 +4,7 @@
 如复合因子的成员已被强制删除)。此时 get_factor() 为 None, 端点的 404 守卫会走到
 第二个分支, 而那个分支本身就会把文件删掉。
 """
+
 from __future__ import annotations
 
 import json
@@ -26,14 +27,17 @@ def env(tmp_path):
     factor_dir.mkdir(parents=True)
     factor_path = factor_dir / f"{FACTOR_ID}.json"
     factor_path.write_text(
-        json.dumps({
-            "id": FACTOR_ID,
-            "kind": "custom",
-            "label": "孤儿因子",
-            "formula": "rank(-ts_sum(change_pct, 5))",
-            "version": 1,
-            "status": "draft",
-        }, ensure_ascii=False),
+        json.dumps(
+            {
+                "id": FACTOR_ID,
+                "kind": "custom",
+                "label": "孤儿因子",
+                "formula": "rank(-ts_sum(change_pct, 5))",
+                "version": 1,
+                "status": "draft",
+            },
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
     strategies_dir = tmp_path / "strategies"

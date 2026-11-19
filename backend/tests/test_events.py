@@ -1,4 +1,5 @@
 """开放事件流测试 — 票据生命周期 / 事件总线 / SSE 端点。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -12,6 +13,7 @@ from app.services import alert_store, event_tickets
 from app.services.events import EventBus, bus, sse_format
 
 # ── 票据 ──────────────────────────────────────────────
+
 
 def test_ticket_roundtrip_single_use():
     ticket, ttl = event_tickets.issue(["read:analysis"])
@@ -42,6 +44,7 @@ def test_ticket_overflow_guard(monkeypatch: pytest.MonkeyPatch):
 
 
 # ── 总线 ──────────────────────────────────────────────
+
 
 def test_bus_pubsub_and_scope_tag():
     b = EventBus()
@@ -85,7 +88,9 @@ def test_bus_event_ids_distinct_within_one_millisecond(monkeypatch: pytest.Monke
 
 
 def test_sse_format_frame():
-    frame = sse_format({"type": "alert", "scope": "read:analysis", "data": {"a": 1}, "ts": 1700000000.123})
+    frame = sse_format(
+        {"type": "alert", "scope": "read:analysis", "data": {"a": 1}, "ts": 1700000000.123}
+    )
     lines = frame.splitlines()
     assert lines[0] == "id: 1700000000123"
     assert lines[1] == "event: alert"
@@ -94,6 +99,7 @@ def test_sse_format_frame():
 
 
 # ── 告警落盘 → 总线联动 ────────────────────────────────
+
 
 def test_alert_append_publishes_to_bus(tmp_path: Path):
     q = bus.subscribe()
@@ -110,9 +116,13 @@ def test_alert_append_publishes_to_bus(tmp_path: Path):
 def test_alert_append_many_publishes_each(tmp_path: Path):
     q = bus.subscribe()
     try:
-        alert_store.append_many(tmp_path, [
-            {"ts": 1, "rule_id": "a"}, {"ts": 2, "rule_id": "b"},
-        ])
+        alert_store.append_many(
+            tmp_path,
+            [
+                {"ts": 1, "rule_id": "a"},
+                {"ts": 2, "rule_id": "b"},
+            ],
+        )
         assert q.get_nowait()["data"]["rule_id"] == "a"
         assert q.get_nowait()["data"]["rule_id"] == "b"
     finally:
@@ -120,6 +130,7 @@ def test_alert_append_many_publishes_each(tmp_path: Path):
 
 
 # ── SSE 端点 (直接调函数, 消费前两帧后关闭) ────────────
+
 
 @pytest.mark.asyncio
 async def test_event_stream_endpoint_frames(tmp_path: Path):

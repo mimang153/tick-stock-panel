@@ -1,4 +1,5 @@
 """监控 name_map 测试 — 走 repo.get_name_map() memo, 过滤空名称与旧行为一致。"""
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -7,22 +8,24 @@ from app.services.quote_service import _monitor_name_map
 
 
 class _FakeRepo:
-    def __init__(self, mapping: dict[str, str]) -> None:
+    def __init__(self, mapping: dict[str, str | None]) -> None:
         self._mapping = mapping
         self.calls = 0
 
-    def get_name_map(self) -> dict[str, str]:
+    def get_name_map(self) -> dict[str, str | None]:
         self.calls += 1
         return dict(self._mapping)
 
 
 def test_filters_falsy_names_like_legacy_build():
-    repo = _FakeRepo({
-        "600000.SH": "浦发银行",
-        "000001.SZ": "",          # 空名称: 旧 iter_rows 构建会跳过
-        "399001.SZ": None,        # None 名称: 同上
-        "510300.SH": "沪深300ETF",
-    })
+    repo = _FakeRepo(
+        {
+            "600000.SH": "浦发银行",
+            "000001.SZ": "",  # 空名称: 旧 iter_rows 构建会跳过
+            "399001.SZ": None,  # None 名称: 同上
+            "510300.SH": "沪深300ETF",
+        }
+    )
     assert _monitor_name_map(repo) == {
         "600000.SH": "浦发银行",
         "510300.SH": "沪深300ETF",

@@ -7,13 +7,14 @@ heavy 槽 (避免两份全市场矩阵并发)。
 数据流纪律 (docs/auto-strategy-lab-plan.md §二): 本运行时的任何结果都
 不反馈进取参加权 — 复验只做验证与退役判定。
 """
+
 from __future__ import annotations
 
 import itertools
 import logging
 import math
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -53,7 +54,6 @@ _COMBINATION_MAX_CORR = 0.70
 _SKIPPED_CAP = 200  # 结果里 skipped 明细上限, 防止极端数量策略撑爆事件载荷
 
 
-
 class GuardianRuntimeCancelledError(RuntimeError):
     pass
 
@@ -91,51 +91,18 @@ def _result_policy(objective: str):
     )
 
 
-def run_guardian_runtime(
-    config: Mapping[str, Any],
+def _check_guardian_profiles(
+    runnable: list[dict[str, Any]],
     *,
+    config: Mapping[str, Any],
     data_dir: Path,
     service: Any,
     strategy_engine: Any,
-    progress_cb: ProgressCallback | None = None,
-    cancel_check: CancelCheck | None = None,
-) -> dict[str, Any]:
-    """遍历守护档案执行一轮复验; 单策略失败隔离, 不中断整体。"""
-    t0 = time.perf_counter()
-    raw_thresholds = config.get("thresholds") or {}
-    thresholds = GuardianThresholds(
-        **{
-            key: raw_thresholds[key]
-            for key in (
-                "watch_pct",
-                "retire_pct",
-                "max_soft_drawdown",
-                "k_max",
-                "min_new_trading_days",
-            )
-            if key in raw_thresholds
-        }
-    )
-    store = GuardianStore(data_dir)
-    if config.get("mode") == "combinations":
-        return _run_combination_scan(
-            config, data_dir=data_dir, service=service,
-            strategy_engine=strategy_engine, store=store,
-            cancel_check=cancel_check, t0=t0,
-        )
-    selected = config.get("strategy_ids")
-    if selected is not None and not isinstance(selected, list):
-        raise ValueError("guardian strategy_ids must be a list when provided")
-
-    profiles = store.list_profiles()
-    if selected is not None:
-        wanted = {str(item) for item in selected}
-        profiles = [p for p in profiles if str(p.get("strategy_id")) in wanted]
-
-    # retired 档案不再自动复验 (设计: 退役不自动回场); 重新守护 = drop 后重新入护。
-    runnable = [p for p in profiles if p.get("status") != "retired"]
-    skipped_retired = len(profiles) - len(runnable)
-
+    store: GuardianStore,
+    thresholds: GuardianThresholds,
+    progress_cb: ProgressCallback | None,
+    cancel_check: CancelCheck | None,
+) -> tuple[list[dict[str, Any]], int, int, int]:
     results: list[dict[str, Any]] = []
     checked = skipped = errors = 0
     for index, profile in enumerate(runnable):
@@ -170,6 +137,69 @@ def run_guardian_runtime(
                     "verdict": outcome.get("verdict"),
                 }
             )
+    return results, checked, skipped, errors
+
+
+def run_guardian_runtime(
+    config: Mapping[str, Any],
+    *,
+    data_dir: Path,
+    service: Any,
+    strategy_engine: Any,
+    progress_cb: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+) -> dict[str, Any]:
+    """遍历守护档案执行一轮复验; 单策略失败隔离, 不中断整体。"""
+    t0 = time.perf_counter()
+    raw_thresholds = config.get("thresholds") or {}
+    thresholds = GuardianThresholds(
+        **{
+            key: raw_thresholds[key]
+            for key in (
+                "watch_pct",
+                "retire_pct",
+                "max_soft_drawdown",
+                "k_max",
+                "min_new_trading_days",
+            )
+            if key in raw_thresholds
+        }
+    )
+    store = GuardianStore(data_dir)
+    if config.get("mode") == "combinations":
+        return _run_combination_scan(
+            config,
+            data_dir=data_dir,
+            service=service,
+            strategy_engine=strategy_engine,
+            store=store,
+            cancel_check=cancel_check,
+            t0=t0,
+        )
+    selected = config.get("strategy_ids")
+    if selected is not None and not isinstance(selected, list):
+        raise ValueError("guardian strategy_ids must be a list when provided")
+
+    profiles = store.list_profiles()
+    if selected is not None:
+        wanted = {str(item) for item in selected}
+        profiles = [p for p in profiles if str(p.get("strategy_id")) in wanted]
+
+    # retired 档案不再自动复验 (设计: 退役不自动回场); 重新守护 = drop 后重新入护。
+    runnable = [p for p in profiles if p.get("status") != "retired"]
+    skipped_retired = len(profiles) - len(runnable)
+
+    results, checked, skipped, errors = _check_guardian_profiles(
+        runnable,
+        config=config,
+        data_dir=data_dir,
+        service=service,
+        strategy_engine=strategy_engine,
+        store=store,
+        thresholds=thresholds,
+        progress_cb=progress_cb,
+        cancel_check=cancel_check,
+    )
 
     return {
         "status": "succeeded",
@@ -183,47 +213,39 @@ def run_guardian_runtime(
     }
 
 
-def _run_combination_scan(
-    config: Mapping[str, Any],
+def _combination_scan_summary(
+    healthy_count: int,
+    t0: float,
     *,
+    pairs_evaluated: int = 0,
+    suggestions: int = 0,
+    results: list[dict[str, str]] | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "status": "succeeded",
+        "mode": "combinations",
+        "healthy_count": healthy_count,
+        "pairs_evaluated": pairs_evaluated,
+        "suggestions": suggestions,
+        "results": results or [],
+        "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
+    }
+    if error is not None:
+        summary["error"] = error
+    return summary
+
+
+def _collect_combination_returns(
+    healthy: Sequence[Mapping[str, Any]],
     data_dir: Path,
     service: Any,
     strategy_engine: Any,
-    store: GuardianStore,
+    window: list[Any],
     cancel_check: CancelCheck | None,
-    t0: float,
-) -> dict[str, Any]:
-    """P2d: 健康守护冠军间的日收益相关性扫描, 低相关对写入组合建议。
-
-    每策略一次近窗回测 (include_curves), 提取日收益做 Pearson 相关;
-    只产出建议, 组合策略的创建始终由用户在页面上确认。
-    """
+) -> tuple[dict[str, dict[str, float]], list[dict[str, str]]]:
     from app.backtest.strategy import StrategyBacktestConfig
     from app.strategy import config as strategy_config
-
-    _raise_if_cancelled(cancel_check)
-    healthy = [
-        profile for profile in store.list_profiles()
-        if profile.get("status") == "healthy"
-    ]
-    if len(healthy) < 2:
-        return {
-            "status": "succeeded", "mode": "combinations",
-            "healthy_count": len(healthy), "pairs_evaluated": 0,
-            "suggestions": 0, "results": [],
-            "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
-        }
-
-    partitions = enriched_partition_dates(data_dir, "stock")
-    window = partitions[-_COMBINATION_WINDOW_TRADING_DAYS:]
-    if len(window) < _COMBINATION_MIN_COMMON_DAYS:
-        return {
-            "status": "succeeded", "mode": "combinations",
-            "healthy_count": len(healthy), "pairs_evaluated": 0,
-            "suggestions": 0, "results": [],
-            "error": f"enriched 数据不足 ({len(window)} 个交易日)",
-            "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
-        }
 
     returns_by_strategy: dict[str, dict[str, float]] = {}
     errors: list[dict[str, str]] = []
@@ -252,31 +274,70 @@ def _run_combination_scan(
         )
         series = _daily_returns(result)
         if series is None:
-            errors.append({
-                "strategy_id": strategy_id,
-                "error": result.error or "未产出可用净值曲线",
-            })
+            errors.append(
+                {"strategy_id": strategy_id, "error": result.error or "未产出可用净值曲线"}
+            )
             continue
         returns_by_strategy[strategy_id] = series
+    return returns_by_strategy, errors
 
+
+def _build_combination_suggestions(
+    returns_by_strategy: dict[str, dict[str, float]],
+) -> tuple[list[dict[str, Any]], int]:
     suggestions: list[dict[str, Any]] = []
     pairs_evaluated = 0
     ids = sorted(returns_by_strategy)
     for i, left in enumerate(ids):
-        for right in ids[i + 1:]:
-            corr = _pearson_on_common_dates(
-                returns_by_strategy[left], returns_by_strategy[right]
-            )
+        for right in ids[i + 1 :]:
+            corr = _pearson_on_common_dates(returns_by_strategy[left], returns_by_strategy[right])
             pairs_evaluated += 1
             if corr is not None and corr <= _COMBINATION_MAX_CORR:
-                suggestions.append({
-                    "a": left, "b": right,
-                    "corr": round(corr, 4),
-                    "common_days": _common_day_count(
-                        returns_by_strategy[left], returns_by_strategy[right]
-                    ),
-                })
+                suggestions.append(
+                    {
+                        "a": left,
+                        "b": right,
+                        "corr": round(corr, 4),
+                        "common_days": _common_day_count(
+                            returns_by_strategy[left], returns_by_strategy[right]
+                        ),
+                    }
+                )
     suggestions.sort(key=lambda item: item["corr"])
+    return suggestions, pairs_evaluated
+
+
+def _run_combination_scan(
+    config: Mapping[str, Any],
+    *,
+    data_dir: Path,
+    service: Any,
+    strategy_engine: Any,
+    store: GuardianStore,
+    cancel_check: CancelCheck | None,
+    t0: float,
+) -> dict[str, Any]:
+    """P2d: 健康守护冠军间的日收益相关性扫描, 低相关对写入组合建议。
+
+    每策略一次近窗回测 (include_curves), 提取日收益做 Pearson 相关;
+    只产出建议, 组合策略的创建始终由用户在页面上确认。
+    """
+    _raise_if_cancelled(cancel_check)
+    healthy = [profile for profile in store.list_profiles() if profile.get("status") == "healthy"]
+    if len(healthy) < 2:
+        return _combination_scan_summary(len(healthy), t0)
+
+    partitions = enriched_partition_dates(data_dir, "stock")
+    window = partitions[-_COMBINATION_WINDOW_TRADING_DAYS:]
+    if len(window) < _COMBINATION_MIN_COMMON_DAYS:
+        return _combination_scan_summary(
+            len(healthy), t0, error=f"enriched 数据不足 ({len(window)} 个交易日)"
+        )
+
+    returns_by_strategy, errors = _collect_combination_returns(
+        healthy, data_dir, service, strategy_engine, window, cancel_check
+    )
+    suggestions, pairs_evaluated = _build_combination_suggestions(returns_by_strategy)
     write_combinations(
         data_dir,
         window_start=window[0].isoformat(),
@@ -284,13 +345,13 @@ def _run_combination_scan(
         suggestions=suggestions,
         pairs_evaluated=pairs_evaluated,
     )
-    return {
-        "status": "succeeded", "mode": "combinations",
-        "healthy_count": len(healthy), "pairs_evaluated": pairs_evaluated,
-        "suggestions": len(suggestions),
-        "results": errors[:20],
-        "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
-    }
+    return _combination_scan_summary(
+        len(healthy),
+        t0,
+        pairs_evaluated=pairs_evaluated,
+        suggestions=len(suggestions),
+        results=errors[:20],
+    )
 
 
 def _daily_returns(result: Any) -> dict[str, float] | None:
@@ -312,9 +373,7 @@ def _daily_returns(result: Any) -> dict[str, float] | None:
     return returns if len(returns) >= _COMBINATION_MIN_COMMON_DAYS else None
 
 
-def _pearson_on_common_dates(
-    left: dict[str, float], right: dict[str, float]
-) -> float | None:
+def _pearson_on_common_dates(left: dict[str, float], right: dict[str, float]) -> float | None:
     common = sorted(set(left) & set(right))
     if len(common) < _COMBINATION_MIN_COMMON_DAYS:
         return None
@@ -334,7 +393,7 @@ def _common_day_count(left: dict[str, float], right: dict[str, float]) -> int:
     return len(set(left) & set(right))
 
 
-def _check_one(
+def _load_check_context(
     strategy_id: str,
     profile: Mapping[str, Any],
     *,
@@ -342,10 +401,9 @@ def _check_one(
     data_dir: Path,
     service: Any,
     strategy_engine: Any,
-    thresholds: GuardianThresholds,
     run_id: str,
     cancel_check: CancelCheck | None,
-) -> dict[str, Any]:
+) -> tuple[Any, str, str, list[Any], date, dict[str, Any]] | dict[str, Any]:
     try:
         strategy = strategy_engine.get(strategy_id)
     except ValueError:
@@ -363,22 +421,18 @@ def _check_one(
         _record_simple_check(store, strategy_id, run_id, error=str(exc))
         return {"outcome": "error", "error": str(exc)}
 
-    asset_type = str(
-        (strategy.meta.get("asset_types") or ["stock"])[0]
-    )
+    asset_type = str((strategy.meta.get("asset_types") or ["stock"])[0])
     partitions = enriched_partition_dates(data_dir, asset_type)
     if not partitions:
-        _record_simple_check(
-            store, strategy_id, run_id, error=f"{asset_type} enriched 数据不可用"
-        )
+        _record_simple_check(store, strategy_id, run_id, error=f"{asset_type} enriched 数据不可用")
         return {"outcome": "error", "error": "enriched_unavailable"}
     data_as_of = date.fromisoformat(str(baseline["data_as_of"]))
 
-    # trailing_reference 且尚无分数: 先用尾随窗口标定基线 (只此一次)。
     metrics = baseline.get("metrics") or {}
-    if baseline.get("kind") == "trailing_reference" and _finite_or_none(
-        metrics.get("score")
-    ) is None:
+    if (
+        baseline.get("kind") == "trailing_reference"
+        and _finite_or_none(metrics.get("score")) is None
+    ):
         calibrate_error = _calibrate_baseline(
             strategy_id,
             strategy,
@@ -395,12 +449,23 @@ def _check_one(
             _record_simple_check(store, strategy_id, run_id, error=calibrate_error)
             return {"outcome": "error", "error": "calibration_failed"}
         metrics = (store.get(strategy_id) or {}).get("baseline", {}).get("metrics") or {}
+    return strategy, objective, asset_type, partitions, data_as_of, metrics
 
+
+def _plan_check_window(
+    strategy_id: str,
+    run_id: str,
+    store: GuardianStore,
+    partitions: list[Any],
+    data_as_of: date,
+    metrics: Mapping[str, Any],
+    thresholds: GuardianThresholds,
+) -> tuple[date, date, int, float, int] | dict[str, Any]:
     baseline_score = _finite_or_none(metrics.get("score"))
     baseline_n_trades = metrics.get("n_trades")
     baseline_n_trades = (
         int(baseline_n_trades)
-        if isinstance(baseline_n_trades, (int, float)) and not isinstance(baseline_n_trades, bool)
+        if isinstance(baseline_n_trades, int | float) and not isinstance(baseline_n_trades, bool)
         else 0
     )
     if baseline_score is None:
@@ -439,18 +504,24 @@ def _check_one(
             },
         )
         return {"outcome": "skipped", "reason": "window_too_short"}
+    return window_start, window_end, k, baseline_score, baseline_n_trades
 
-    summary = _evaluate_windows(
-        strategy_id,
-        strategy,
-        service=service,
-        strategy_engine=strategy_engine,
-        data_dir=data_dir,
-        windows=split_windows(window_start, window_end, k),
-        objective=objective,
-        asset_type=asset_type,
-        cancel_check=cancel_check,
-    )
+
+def _record_check_verdict(
+    strategy_id: str,
+    profile: Mapping[str, Any],
+    store: GuardianStore,
+    *,
+    run_id: str,
+    objective: str,
+    window_start: date,
+    window_end: date,
+    k: int,
+    baseline_score: float,
+    baseline_n_trades: int,
+    summary: Any,
+    thresholds: GuardianThresholds,
+) -> dict[str, Any]:
     missing = sum(1 for value in summary.segment_scores if value is None)
     if missing == len(summary.segment_scores):
         store.append_check(
@@ -501,16 +572,162 @@ def _check_one(
         },
     )
     if verdict.status != "healthy" or profile.get("status") != verdict.status:
-        store.set_status(
-            strategy_id,
-            verdict.status,
-            reason="; ".join(verdict.reasons) or None,
-        )
+        store.set_status(strategy_id, verdict.status, reason="; ".join(verdict.reasons) or None)
     return {
         "outcome": "checked",
         "verdict": verdict.status,
         "degradation_pct": verdict.degradation_pct,
     }
+
+
+def _check_one(
+    strategy_id: str,
+    profile: Mapping[str, Any],
+    *,
+    store: GuardianStore,
+    data_dir: Path,
+    service: Any,
+    strategy_engine: Any,
+    thresholds: GuardianThresholds,
+    run_id: str,
+    cancel_check: CancelCheck | None,
+) -> dict[str, Any]:
+    context = _load_check_context(
+        strategy_id,
+        profile,
+        store=store,
+        data_dir=data_dir,
+        service=service,
+        strategy_engine=strategy_engine,
+        run_id=run_id,
+        cancel_check=cancel_check,
+    )
+    if isinstance(context, dict):
+        return context
+    strategy, objective, asset_type, partitions, data_as_of, metrics = context
+
+    planned = _plan_check_window(
+        strategy_id, run_id, store, partitions, data_as_of, metrics, thresholds
+    )
+    if isinstance(planned, dict):
+        return planned
+    window_start, window_end, k, baseline_score, baseline_n_trades = planned
+
+    summary = _evaluate_windows(
+        strategy_id,
+        strategy,
+        service=service,
+        strategy_engine=strategy_engine,
+        data_dir=data_dir,
+        windows=split_windows(window_start, window_end, k),
+        objective=objective,
+        asset_type=asset_type,
+        cancel_check=cancel_check,
+    )
+    return _record_check_verdict(
+        strategy_id,
+        profile,
+        store,
+        run_id=run_id,
+        objective=objective,
+        window_start=window_start,
+        window_end=window_end,
+        k=k,
+        baseline_score=baseline_score,
+        baseline_n_trades=baseline_n_trades,
+        summary=summary,
+        thresholds=thresholds,
+    )
+
+
+def _prepare_guardian_matrix_views(
+    config_for: Callable[[date, date], Any],
+    windows: list[tuple[date, date]],
+    service: Any,
+    strategy: Any,
+    strategy_id: str,
+) -> tuple[Any | None, list[Any]]:
+    if getattr(strategy, "execution_backend", "") != "matrix_native":
+        return None, []
+    full_start, full_end = windows[0][0], windows[-1][1]
+    try:
+        prepared = service.prepare_matrix_optimization(
+            [config_for(full_start, full_end)],
+            matrix_cache_max_bytes=_GUARDIAN_MATRIX_CACHE_BYTES,
+        )
+        seg_views: list[Any] = []
+        for seg_start, seg_end in windows:
+            try:
+                seg_views.append(
+                    service.prepare_matrix_optimization(
+                        [config_for(seg_start, seg_end)],
+                        matrix_cache_max_bytes=_GUARDIAN_MATRIX_CACHE_BYTES,
+                        market_data_override=prepared.market_data,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - 复验视图准备失败走通用路径, 不阻断守护扫描
+                logger.warning(
+                    "守护复验 %s 段 %s 视图准备失败, 走通用路径",
+                    strategy_id,
+                    seg_start,
+                    exc_info=True,
+                )
+                seg_views.append(None)
+        return prepared, seg_views
+    except Exception as exc:  # noqa: BLE001 — 矩阵准备失败整体走通用路径
+        logger.warning("守护复验 %s 矩阵准备失败, 走通用路径: %r", strategy_id, exc)
+        return None, []
+
+
+def _run_guardian_segments(
+    config_for: Callable[[date, date], Any],
+    windows: list[tuple[date, date]],
+    service: Any,
+    policy: Any,
+    objective: str,
+    prepared: Any | None,
+    seg_views: list[Any],
+    cancel_check: CancelCheck | None,
+) -> tuple[list[float | None], list[int | None], list[float | None], str | None]:
+    scores: list[float | None] = []
+    trades: list[int | None] = []
+    drawdowns: list[float | None] = []
+    first_error: str | None = None
+    try:
+        for index, (seg_start, seg_end) in enumerate(windows):
+            _raise_if_cancelled(cancel_check)
+            kwargs: dict[str, Any] = {"result_policy": policy}
+            if prepared is not None and index < len(seg_views):
+                view = seg_views[index]
+                if view is not None:
+                    kwargs["prepared"] = view
+            elif prepared is not None:
+                kwargs["prepared"] = prepared
+            result = service.run(
+                config_for(seg_start, seg_end), cancel_event=cancel_check, **kwargs
+            )
+            if result.error:
+                scores.append(None)
+                trades.append(None)
+                drawdowns.append(None)
+                first_error = first_error or str(result.error)
+                continue
+            stats = result.stats or {}
+            scores.append(_finite_or_none(stats.get(objective)))
+            n_trades = stats.get("n_trades")
+            trades.append(
+                int(n_trades)
+                if isinstance(n_trades, int | float) and not isinstance(n_trades, bool)
+                else None
+            )
+            drawdowns.append(_finite_or_none(stats.get("max_drawdown")))
+    finally:
+        for view in seg_views:
+            if view is not None:
+                view.compute_cache.close()
+        if prepared is not None:
+            prepared.compute_cache.close()
+    return scores, trades, drawdowns, first_error
 
 
 def _evaluate_windows(
@@ -543,83 +760,19 @@ def _evaluate_windows(
             asset_type=asset_type,
         )
 
-    full_start, full_end = windows[0][0], windows[-1][1]
-    prepared = None
-    seg_views: list[Any] = []
-    if getattr(strategy, "execution_backend", "") == "matrix_native":
-        try:
-            prepared = service.prepare_matrix_optimization(
-                [_config(full_start, full_end)],
-                matrix_cache_max_bytes=_GUARDIAN_MATRIX_CACHE_BYTES,
-            )
-            for seg_start, seg_end in windows:
-                try:
-                    seg_views.append(
-                        service.prepare_matrix_optimization(
-                            [_config(seg_start, seg_end)],
-                            matrix_cache_max_bytes=_GUARDIAN_MATRIX_CACHE_BYTES,
-                            market_data_override=prepared.market_data,
-                        )
-                    )
-                except Exception:  # noqa: BLE001 — 单段视图失败走通用路径
-                    logger.warning(
-                        "守护复验 %s 段 %s 视图准备失败, 走通用路径",
-                        strategy_id,
-                        seg_start,
-                        exc_info=True,
-                    )
-                    seg_views.append(None)
-        except Exception as exc:  # noqa: BLE001 — 矩阵准备失败整体走通用路径
-            logger.warning("守护复验 %s 矩阵准备失败, 走通用路径: %r", strategy_id, exc)
-            prepared = None
-            seg_views = []
-
-    scores: list[float | None] = []
-    trades: list[int | None] = []
-    drawdowns: list[float | None] = []
-    first_error: str | None = None
-    try:
-        for index, (seg_start, seg_end) in enumerate(windows):
-            _raise_if_cancelled(cancel_check)
-            config = _config(seg_start, seg_end)
-            kwargs: dict[str, Any] = {"result_policy": policy}
-            if prepared is not None and index < len(seg_views):
-                view = seg_views[index]
-                if view is not None:
-                    kwargs["prepared"] = view
-            elif prepared is not None:
-                kwargs["prepared"] = prepared
-            result = service.run(config, cancel_event=cancel_check, **kwargs)
-            if result.error:
-                scores.append(None)
-                trades.append(None)
-                drawdowns.append(None)
-                first_error = first_error or str(result.error)
-                continue
-            stats = result.stats or {}
-            scores.append(_finite_or_none(stats.get(objective)))
-            n_trades = stats.get("n_trades")
-            trades.append(
-                int(n_trades)
-                if isinstance(n_trades, (int, float)) and not isinstance(n_trades, bool)
-                else None
-            )
-            drawdowns.append(_finite_or_none(stats.get("max_drawdown")))
-    finally:
-        for view in seg_views:
-            if view is not None:
-                view.compute_cache.close()
-        if prepared is not None:
-            prepared.compute_cache.close()
-
+    prepared, seg_views = _prepare_guardian_matrix_views(
+        _config, windows, service, strategy, strategy_id
+    )
+    scores, trades, drawdowns, first_error = _run_guardian_segments(
+        _config, windows, service, policy, objective, prepared, seg_views, cancel_check
+    )
     valid_drawdowns = [value for value in drawdowns if value is not None]
-    n_total = sum(value for value in trades if value is not None)
     return CheckSummary(
         objective=objective,
         segment_scores=scores,
         segment_trades=trades,
         robust=robust_score(scores),
-        n_trades_total=n_total,
+        n_trades_total=sum(value for value in trades if value is not None),
         worst_drawdown=min(valid_drawdowns) if valid_drawdowns else None,
         incomplete_data=any(value is None for value in scores),
         error=first_error,
@@ -676,7 +829,7 @@ def _calibrate_baseline(
         {
             "score": score,
             "n_trades": int(n_trades)
-            if isinstance(n_trades, (int, float)) and not isinstance(n_trades, bool)
+            if isinstance(n_trades, int | float) and not isinstance(n_trades, bool)
             else 0,
             "max_drawdown": _finite_or_none(result.stats.get("max_drawdown")),
             "window_start": window[0].isoformat(),

@@ -4,6 +4,7 @@
 同类未报告逃逸 (模块命名空间句柄 pl.os / np.lib、文件读写原语、通配导入),
 以及合法策略代码不被误伤。
 """
+
 from __future__ import annotations
 
 import textwrap
@@ -21,7 +22,7 @@ def _validate(code: str, **kwargs) -> None:
 # 已报告逃逸 (GH #475 PoC 与最小变体): 必须全部拦截
 # ================================================================
 REPORTED_ESCAPES = {
-    "issue_poc_alias_and_concat": '''
+    "issue_poc_alias_and_concat": """
         import datetime
 
         g = getattr
@@ -35,7 +36,7 @@ REPORTED_ESCAPES = {
 
         META = {"id": "custom_poc_rce", "name": "poc", "description": "poc",
                 "scoring": {"close": 1.0}}
-    ''',
+    """,
     "alias_getattr_assignment": "g = getattr",
     "alias_globals_then_call": "gg = globals\nv = gg()",
     "concat_subscript_import": 'imp = __builtins__["__imp" + "ort__"]',
@@ -69,15 +70,13 @@ NAMESPACE_ESCAPES = {
 }
 
 
-@pytest.mark.parametrize("code", list(REPORTED_ESCAPES.values()),
-                         ids=list(REPORTED_ESCAPES))
+@pytest.mark.parametrize("code", list(REPORTED_ESCAPES.values()), ids=list(REPORTED_ESCAPES))
 def test_reported_escapes_are_blocked(code):
     with pytest.raises(ValueError):
         _validate(code)
 
 
-@pytest.mark.parametrize("code", list(NAMESPACE_ESCAPES.values()),
-                         ids=list(NAMESPACE_ESCAPES))
+@pytest.mark.parametrize("code", list(NAMESPACE_ESCAPES.values()), ids=list(NAMESPACE_ESCAPES))
 def test_namespace_and_file_primitive_escapes_are_blocked(code):
     with pytest.raises(ValueError):
         _validate(code)
@@ -97,7 +96,7 @@ def test_namespace_package_import_is_blocked():
 # 合法策略不被误伤
 # ================================================================
 LEGITIMATE_SNIPPETS = {
-    "polars_matrix_strategy": '''
+    "polars_matrix_strategy": """
         import datetime
 
         import numpy as np
@@ -110,7 +109,7 @@ LEGITIMATE_SNIPPETS = {
 
         META = {"id": "custom_x", "name": "x", "description": "x",
                 "scoring": {"close": 1.0}}
-    ''',
+    """,
     "market_open_column": "entry = market.open > market.close",
     "market_volume_column": "v = market.volume.rolling_mean(5)",
     "dynamic_index_by_loop_var": "for i in range(3):\n    v = arr[i]",
@@ -131,8 +130,7 @@ LEGITIMATE_SNIPPETS = {
 }
 
 
-@pytest.mark.parametrize("code", list(LEGITIMATE_SNIPPETS.values()),
-                         ids=list(LEGITIMATE_SNIPPETS))
+@pytest.mark.parametrize("code", list(LEGITIMATE_SNIPPETS.values()), ids=list(LEGITIMATE_SNIPPETS))
 def test_legitimate_code_still_passes(code):
     _validate(code)
 
@@ -162,7 +160,7 @@ def test_existing_strategies_in_repo_all_pass():
 # ================================================================
 # 纵深防御: 引擎加载层必须同样拦截 (文件被直接投放磁盘的场景)
 # ================================================================
-_POC_FILE = '''
+_POC_FILE = """
 import datetime
 
 g = getattr
@@ -176,7 +174,7 @@ def filter(df):
 
 META = {"id": "custom_poc_rce", "name": "poc", "description": "poc",
         "scoring": {"close": 1.0}}
-'''
+"""
 
 
 def test_engine_load_file_rejects_bypass_payload(tmp_path):
@@ -197,7 +195,8 @@ def test_engine_load_file_rejects_dependency_using_vars(tmp_path):
     from app.strategy.engine import StrategyEngine
 
     (tmp_path / "_helpers.py").write_text(
-        "def f(obj):\n    return vars(obj)\n", encoding="utf-8",
+        "def f(obj):\n    return vars(obj)\n",
+        encoding="utf-8",
     )
     main = tmp_path / "custom_dep.py"
     main.write_text(

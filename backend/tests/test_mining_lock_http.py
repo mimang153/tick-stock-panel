@@ -1,4 +1,5 @@
 """Opening the workbench must leave the real HTTP backend alive on Windows too."""
+
 from __future__ import annotations
 
 import json
@@ -71,9 +72,10 @@ def test_workbench_status_polling_keeps_http_backend_alive(tmp_path, metadata):
             [sys.executable, "-c", _SERVER_SCRIPT, str(tmp_path), metadata],
             cwd=_BACKEND_ROOT,
             env={**os.environ, "PYTHONPATH": str(_BACKEND_ROOT), "PYTHONUTF8": "1"},
-            stdout=output, stderr=subprocess.STDOUT,
+            stdout=output,
+            stderr=subprocess.STDOUT,
             # A regressed console signal must not reach the pytest runner's console.
-            creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0,
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0) if os.name == "nt" else 0,
         )
         try:
             with httpx.Client(timeout=2, trust_env=False) as client:

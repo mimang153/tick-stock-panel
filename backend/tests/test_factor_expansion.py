@@ -3,9 +3,11 @@
 合成单标的日频面板, 黄金值由 numpy 独立重算 (不复制实现),
 覆盖: 公式口径 / 无前视 (min_samples) / 除零 fail-closed / 列代数型因子。
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import Any, cast
 
 import numpy as np
 import polars as pl
@@ -24,8 +26,8 @@ OPEN = np.roll(CLOSE, 1) * 1.005
 OPEN[0] = 99.0 * 1.005  # 隔夜跳空 +0.5%
 PREV_CLOSE = np.roll(CLOSE, 1)
 PREV_CLOSE[0] = 99.0
-VOLUME = 1_000_000 + 500.0 * T                           # 量能缓增
-TURNOVER = VOLUME / 200_000_000.0                        # 流通股本 2 亿股
+VOLUME = 1_000_000 + 500.0 * T  # 量能缓增
+TURNOVER = VOLUME / 200_000_000.0  # 流通股本 2 亿股
 RET = np.concatenate([[np.nan], CLOSE[1:] / CLOSE[:-1] - 1.0])
 
 # 列代数型因子的依赖列直接给黄金友好值
@@ -38,24 +40,26 @@ AMPLITUDE = 0.02 + 0.0001 * T
 
 
 def _panel() -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": ["TEST"] * N_DAYS,
-        "date": DATES,
-        "open": OPEN,
-        "high": np.maximum(OPEN, CLOSE) * 1.01,
-        "low": np.minimum(OPEN, CLOSE) * 0.99,
-        "close": CLOSE,
-        "prev_close": PREV_CLOSE,
-        "volume": VOLUME,
-        "amount": VOLUME * CLOSE * 100.0,
-        "turnover_rate": TURNOVER,
-        "rsi_14": RSI,
-        "momentum_20d": MOM20,
-        "momentum_60d": MOM60,
-        "kdj_k": KDJ_K,
-        "kdj_d": KDJ_D,
-        "amplitude": AMPLITUDE,
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["TEST"] * N_DAYS,
+            "date": DATES,
+            "open": OPEN,
+            "high": np.maximum(OPEN, CLOSE) * 1.01,
+            "low": np.minimum(OPEN, CLOSE) * 0.99,
+            "close": CLOSE,
+            "prev_close": PREV_CLOSE,
+            "volume": VOLUME,
+            "amount": VOLUME * CLOSE * 100.0,
+            "turnover_rate": TURNOVER,
+            "rsi_14": RSI,
+            "momentum_20d": MOM20,
+            "momentum_60d": MOM60,
+            "kdj_k": KDJ_K,
+            "kdj_d": KDJ_D,
+            "amplitude": AMPLITUDE,
+        }
+    )
 
 
 def _col(frame: pl.DataFrame, name: str) -> np.ndarray:
@@ -107,8 +111,8 @@ def test_downside_vol_only_counts_negative_side() -> None:
     frame = _materialize(["downside_vol_20d"])
     got = _col(frame, "downside_vol_20d")[21:]
     for i, day in enumerate(range(21, N_DAYS)):
-        window = np.minimum(RET[day - 19: day + 1], 0.0)
-        golden = np.sqrt(np.mean(window ** 2))
+        window = np.minimum(RET[day - 19 : day + 1], 0.0)
+        golden = np.sqrt(np.mean(window**2))
         assert got[i] == pytest.approx(golden, abs=1e-12), f"day index {day}"
 
 
@@ -116,8 +120,8 @@ def test_obv_trend_bounded_and_golden() -> None:
     frame = _materialize(["obv_trend_20d"])
     got = _col(frame, "obv_trend_20d")
     for day in range(21, N_DAYS, 25):
-        window_ret = RET[day - 19: day + 1]
-        window_vol = VOLUME[day - 19: day + 1]
+        window_ret = RET[day - 19 : day + 1]
+        window_vol = VOLUME[day - 19 : day + 1]
         signed = np.sign(window_ret) * window_vol
         golden = signed.sum() / (window_vol.mean() * 20.0)
         assert got[day] == pytest.approx(golden, abs=1e-9), f"day index {day}"
@@ -141,27 +145,31 @@ def test_position_240d_and_distance_to_high() -> None:
     pos = _col(frame, "position_240d")
     dist = _col(frame, "distance_to_high_240d")
     for day in (241, 245, N_DAYS - 1):
-        window = CLOSE[day - 239: day + 1]
-        golden_pos = (CLOSE[day] - window.min()) / (window.max() - window.min())
+        window = CLOSE[day - 239 : day + 1]
+        golden_pos = (CLOSE[day] - cast(Any, window).min()) / (
+            cast(Any, window).max() - cast(Any, window).min()
+        )
         assert pos[day] == pytest.approx(golden_pos, abs=1e-12), f"pos day {day}"
-        assert dist[day] == pytest.approx(CLOSE[day] / window.max() - 1.0, abs=1e-12)
+        assert dist[day] == pytest.approx(CLOSE[day] / cast(Any, window).max() - 1.0, abs=1e-12)
     assert np.isnan(pos[:239]).all()  # 无前视: 240 日窗在索引 239 才首次有效
 
 
 def test_vol_regime_amplitude_trend_turnover_stats() -> None:
-    frame = _materialize(["vol_regime_5_60", "amplitude_trend_20_60", "turnover_mean_20d", "turnover_std_20d"])
+    frame = _materialize(
+        ["vol_regime_5_60", "amplitude_trend_20_60", "turnover_mean_20d", "turnover_std_20d"]
+    )
     vr = _col(frame, "vol_regime_5_60")
     at = _col(frame, "amplitude_trend_20_60")
     tm = _col(frame, "turnover_mean_20d")
     ts = _col(frame, "turnover_std_20d")
     for day in (61, 120, N_DAYS - 1):
-        fast = np.std(RET[day - 4: day + 1], ddof=1)
-        slow = np.std(RET[day - 59: day + 1], ddof=1)
+        fast = np.std(RET[day - 4 : day + 1], ddof=1)
+        slow = np.std(RET[day - 59 : day + 1], ddof=1)
         assert vr[day] == pytest.approx(fast / slow, rel=1e-9, abs=1e-12), f"vr day {day}"
-        a_fast = AMPLITUDE[day - 19: day + 1].mean()
-        a_slow = AMPLITUDE[day - 59: day + 1].mean()
+        a_fast = AMPLITUDE[day - 19 : day + 1].mean()
+        a_slow = AMPLITUDE[day - 59 : day + 1].mean()
         assert at[day] == pytest.approx(a_fast / a_slow - 1.0, rel=1e-9, abs=1e-12)
-        t_window = TURNOVER[day - 19: day + 1]
+        t_window = TURNOVER[day - 19 : day + 1]
         assert tm[day] == pytest.approx(t_window.mean(), rel=1e-12)
         assert ts[day] == pytest.approx(t_window.std(ddof=1) / t_window.mean(), rel=1e-9)
 
@@ -170,5 +178,5 @@ def test_amount_mean_20d_unit_is_yi() -> None:
     frame = _materialize(["amount_mean_20d"])
     got = _col(frame, "amount_mean_20d")
     day = N_DAYS - 1
-    golden = (VOLUME[day - 19: day + 1] * CLOSE[day - 19: day + 1] * 100.0).mean() / 1e8
+    golden = (VOLUME[day - 19 : day + 1] * CLOSE[day - 19 : day + 1] * 100.0).mean() / 1e8
     assert got[day] == pytest.approx(golden, rel=1e-12)

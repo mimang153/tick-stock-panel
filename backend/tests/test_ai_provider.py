@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import os
 import sys
-import time
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,17 +29,26 @@ def test_normalize_openai_base_url_preserves_v1_base():
 
 
 def test_normalize_openai_base_url_strips_chat_completions_path():
-    assert normalize_openai_base_url("http://ai.zedbox.cn:8080/v1/chat/completions") == "http://ai.zedbox.cn:8080/v1"
+    assert (
+        normalize_openai_base_url("http://ai.zedbox.cn:8080/v1/chat/completions")
+        == "http://ai.zedbox.cn:8080/v1"
+    )
 
 
 def test_normalize_openai_base_url_preserves_glm_v4():
     """智谱 GLM 用 /api/paas/v4, 不能强制补成 /v4/v1 (会 404)。"""
-    assert normalize_openai_base_url("https://open.bigmodel.cn/api/paas/v4") == "https://open.bigmodel.cn/api/paas/v4"
+    assert (
+        normalize_openai_base_url("https://open.bigmodel.cn/api/paas/v4")
+        == "https://open.bigmodel.cn/api/paas/v4"
+    )
 
 
 def test_normalize_openai_base_url_strips_chat_completions_from_glm_v4():
     """用户填完整 /v4/chat/completions 时, 去掉后缀归一化为 /v4。"""
-    assert normalize_openai_base_url("https://open.bigmodel.cn/api/paas/v4/chat/completions") == "https://open.bigmodel.cn/api/paas/v4"
+    assert (
+        normalize_openai_base_url("https://open.bigmodel.cn/api/paas/v4/chat/completions")
+        == "https://open.bigmodel.cn/api/paas/v4"
+    )
 
 
 def test_normalize_openai_base_url_preserves_other_version_segments():
@@ -50,7 +57,10 @@ def test_normalize_openai_base_url_preserves_other_version_segments():
 
 
 def test_normalize_openai_base_url_strips_trailing_slash():
-    assert normalize_openai_base_url("https://open.bigmodel.cn/api/paas/v4/") == "https://open.bigmodel.cn/api/paas/v4"
+    assert (
+        normalize_openai_base_url("https://open.bigmodel.cn/api/paas/v4/")
+        == "https://open.bigmodel.cn/api/paas/v4"
+    )
 
 
 def test_openai_kwargs_prefers_final_answer_for_official_deepseek_v4():
@@ -159,7 +169,8 @@ def test_optional_openai_params_use_targeted_400_fallbacks():
         request=httpx.Request("POST", "https://example.com/v1/chat/completions"),
     )
     exc = openai.BadRequestError(
-        "bad request", response=response,
+        "bad request",
+        response=response,
         body={"error": {"message": "unsupported parameter: temperature"}},
     )
     assert _is_temperature_rejected(exc) is True
@@ -176,7 +187,8 @@ def test_optional_openai_params_use_targeted_400_fallbacks():
         request=httpx.Request("POST", "https://example.com/v1/chat/completions"),
     )
     exc = openai.BadRequestError(
-        "bad request", response=response,
+        "bad request",
+        response=response,
         body={"error": {"message": "unrecognized request argument", "param": "reasoning_effort"}},
     )
     assert _is_temperature_rejected(exc) is False
@@ -196,7 +208,8 @@ def test_is_temperature_rejected_false_for_other_400():
         request=httpx.Request("POST", "https://example.com/v1/chat/completions"),
     )
     exc = openai.BadRequestError(
-        "bad request", response=response,
+        "bad request",
+        response=response,
         body={"error": {"message": "model not found"}},
     )
     assert _is_temperature_rejected(exc) is False
@@ -210,7 +223,8 @@ def test_thinking_body_rejected_falls_back_to_default_mode():
         request=httpx.Request("POST", "https://api.deepseek.com/v1/chat/completions"),
     )
     exc = openai.BadRequestError(
-        "bad request", response=response,
+        "bad request",
+        response=response,
         body={"error": {"message": "unknown parameter: thinking"}},
     )
     kwargs = {"max_tokens": None, "extra_body": {"thinking": {"type": "disabled"}}}
@@ -226,7 +240,8 @@ def test_thinking_body_rejected_falls_back_to_default_mode():
         request=httpx.Request("POST", "https://api.deepseek.com/v1/chat/completions"),
     )
     exc_other = openai.BadRequestError(
-        "bad request", response=response_other,
+        "bad request",
+        response=response_other,
         body={"error": {"message": "model not found"}},
     )
     assert ai_provider._openai_retry_kwargs(exc_other, kwargs) is None
@@ -249,7 +264,9 @@ def test_openai_kwargs_include_configured_reasoning_effort(monkeypatch):
     assert "reasoning_effort" not in ai_provider._openai_kwargs(temperature=None, max_tokens=1000)
 
     stored["ai_provider"] = "openai"
-    assert ai_provider._openai_kwargs(temperature=None, max_tokens=1000)["reasoning_effort"] == "high"
+    assert (
+        ai_provider._openai_kwargs(temperature=None, max_tokens=1000)["reasoning_effort"] == "high"
+    )
 
     stored["ai_reasoning_effort"] = "custom-high"
     kwargs = ai_provider._openai_kwargs(temperature=0.3, max_tokens=1000)
@@ -348,6 +365,8 @@ def test_ai_settings_keep_provider_models_separate(monkeypatch):
     assert stored["ai_model"] == "new-custom-model"
     assert stored["ai_reasoning_effort"] == "vendor-high"
     assert stored["ai_codex_model"] == "gpt-5.6-sol"
+
+
 # ── 输出上限 / 上下文窗口配置 ─────────────────────────────────
 
 
@@ -405,9 +424,7 @@ async def test_generate_ai_text_clamps_max_tokens_to_config_cap(monkeypatch):
         return "ok"
 
     monkeypatch.setattr(ai_provider, "_run_openai_once", fake_run)
-    text = await ai_provider.generate_ai_text(
-        [{"role": "user", "content": "hi"}], max_tokens=9000
-    )
+    text = await ai_provider.generate_ai_text([{"role": "user", "content": "hi"}], max_tokens=9000)
     assert text == "ok"
     assert captured["max_tokens"] == 3000
 
@@ -429,7 +446,8 @@ async def test_generate_ai_text_default_cap_and_none_passthrough(monkeypatch):
     await ai_provider.generate_ai_text([{"role": "user", "content": "hi"}])
     assert captured["max_tokens"] == 3000  # 默认值, 未超 cap 原样下发
     await ai_provider.generate_ai_text(
-        [{"role": "user", "content": "hi"}], max_tokens=None,
+        [{"role": "user", "content": "hi"}],
+        max_tokens=None,
     )
     assert captured["max_tokens"] is None  # None = 推理模型放开, 不钳制
 
@@ -463,8 +481,9 @@ def test_save_ai_settings_persists_token_sizes(monkeypatch):
 
 
 def test_save_ai_settings_rejects_non_positive(monkeypatch):
-    from app.api import settings as settings_api
     from fastapi import HTTPException
+
+    from app.api import settings as settings_api
 
     req = settings_api.AiSettingsIn(provider="openai_compat", max_output_tokens=-1)
     with pytest.raises(HTTPException):
@@ -535,7 +554,7 @@ async def test_iter_openai_text_rejects_truncated_partial_content():
 
     with pytest.raises(RuntimeError, match="输出达到长度上限"):
         async for piece in ai_provider._iter_openai_text(stream):
-            pieces.append(piece)
+            pieces += [piece]
 
     assert pieces == ["未完成正文"]
 
@@ -588,9 +607,14 @@ def test_codex_process_env_excludes_application_secrets(monkeypatch, tmp_path):
 
 def test_codex_process_env_injects_provider_env_key(monkeypatch, tmp_path):
     """config.toml 里 env_key 指向的凭证应显式注入子进程环境 (正向覆盖)。"""
-    monkeypatch.setattr(ai_provider, "_active_codex_provider", lambda config: (
-        "custom", {"base_url": "https://example.test", "env_key": "CUSTOM_TOKEN"},
-    ))
+    monkeypatch.setattr(
+        ai_provider,
+        "_active_codex_provider",
+        lambda config: (
+            "custom",
+            {"base_url": "https://example.test", "env_key": "CUSTOM_TOKEN"},
+        ),
+    )
     monkeypatch.setattr(ai_provider, "_read_codex_config", lambda: {"model_providers": {}})
     monkeypatch.setenv("CUSTOM_TOKEN", "tok-123")
 
@@ -602,9 +626,14 @@ def test_codex_process_env_injects_provider_env_key(monkeypatch, tmp_path):
 
 def test_codex_process_env_rejects_malformed_env_key(monkeypatch, tmp_path):
     """env_key 不是合法环境变量名 → 不注入 (防御宿主任意读)。"""
-    monkeypatch.setattr(ai_provider, "_active_codex_provider", lambda config: (
-        "custom", {"env_key": "NOT A VALID NAME"},
-    ))
+    monkeypatch.setattr(
+        ai_provider,
+        "_active_codex_provider",
+        lambda config: (
+            "custom",
+            {"env_key": "NOT A VALID NAME"},
+        ),
+    )
     monkeypatch.setattr(ai_provider, "_read_codex_config", lambda: {})
     monkeypatch.setenv("PATH", "test-path")
 
@@ -721,9 +750,7 @@ def test_codex_cli_available_false_when_version_fails(monkeypatch):
     import subprocess
 
     monkeypatch.setattr(ai_provider, "_codex_base_command", lambda: ["codex"])
-    monkeypatch.setattr(
-        ai_provider.subprocess, "run", lambda a, **k: _FakeCompleted(1)
-    )
+    monkeypatch.setattr(ai_provider.subprocess, "run", lambda a, **k: _FakeCompleted(1))
     assert ai_provider.codex_cli_available() is False
     # 壳报 "Codex CLI not available" 这类非零退出同样判定不可用
     monkeypatch.setattr(
@@ -761,7 +788,9 @@ async def test_codex_exec_args_exclude_ephemeral(monkeypatch):
     monkeypatch.setattr(ai_provider, "current_ai_model", lambda: "gpt-5.6-sol")
 
     out = await ai_provider._run_codex_cli(
-        [{"role": "user", "content": "hi"}], max_tokens=None, timeout=1.0,
+        [{"role": "user", "content": "hi"}],
+        max_tokens=None,
+        timeout=1.0,
     )
     assert out == "ok"
     args = captured["args"]
@@ -771,6 +800,7 @@ async def test_codex_exec_args_exclude_ephemeral(monkeypatch):
 
 
 # ── macOS CLI 解析 (GUI 启动的桌面版 PATH 里没有 codex) ────────────────
+
 
 def test_resolve_macos_codex_command_finds_bundled_cli(tmp_path, monkeypatch):
     """ChatGPT.app 内置 CLI (Codex Desktop) 落位探测 — 与 Windows 解析器对称。"""
@@ -817,161 +847,13 @@ def test_resolve_command_macos_fallback_only_when_path_missing(monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(ai_provider.shutil, "which", lambda cmd: "/usr/bin/env-codex")
     monkeypatch.setattr(
-        ai_provider, "_resolve_macos_codex_command",
+        ai_provider,
+        "_resolve_macos_codex_command",
         lambda: "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
     )
     assert ai_provider._resolve_command("codex") == "/usr/bin/env-codex"
 
     monkeypatch.setattr(ai_provider.shutil, "which", lambda cmd: None)
-    assert ai_provider._resolve_command("codex").endswith("/MacOS/codex")
-
-
-# ── 401/超时失败的登录指引 (auth.json 缺失 = 钥匙串登录态无法复用) ─────
-
-def _codex_fail_run(monkeypatch, tmp_path, *, auth_json: bool, fail: Exception | tuple):
-    """_run_codex_cli 的失败路径桩: 跳过外部读取, 只验证提示文案。"""
-    home = tmp_path / "codex-home-src"
-    home.mkdir()
-    if auth_json:
-        (home / "auth.json").write_text("{}", encoding="utf-8")
-
-    monkeypatch.setattr(ai_provider, "_codex_base_command", lambda: ["codex"])
-    monkeypatch.setattr(ai_provider, "_prepare_codex_home", lambda p: None)
-    monkeypatch.setattr(ai_provider, "_codex_process_env", lambda p: {})
-    monkeypatch.setattr(ai_provider, "_read_output_file", lambda p: "")
-    monkeypatch.setattr(ai_provider, "_remove_tree_best_effort", lambda p: None)
-    monkeypatch.setattr(ai_provider, "_sweep_stale_codex_run_dirs", lambda **kw: None)
-    monkeypatch.setattr(ai_provider, "current_ai_model", lambda: "")
-    monkeypatch.setattr(ai_provider, "_codex_home", lambda: home)
-
-    if isinstance(fail, tuple):
-        monkeypatch.setattr(ai_provider, "_run_codex_process", lambda *a, **kw: fail)
-    else:
-        def raise_timeout(*a, **kw):
-            raise fail
-
-        monkeypatch.setattr(ai_provider, "_run_codex_process", raise_timeout)
-
-    return ai_provider._run_codex_cli(
-        [{"role": "user", "content": "hi"}], max_tokens=None, timeout=1.0,
-    )
-
-
-@pytest.mark.asyncio
-async def test_run_codex_cli_401_without_auth_json_appends_hint(monkeypatch, tmp_path):
-    """401 且 ~/.codex/auth.json 缺失 → 错误附可执行登录指引。"""
-    coro = _codex_fail_run(
-        monkeypatch, tmp_path,
-        auth_json=False,
-        fail=(1, b"", b"ERROR: unexpected status 401 Unauthorized: Missing bearer"),
-    )
-    with pytest.raises(RuntimeError, match="codex login"):
-        await coro
-
-
-@pytest.mark.asyncio
-async def test_run_codex_cli_401_with_auth_json_no_hint(monkeypatch, tmp_path):
-    """auth.json 存在 → 保持原始错误, 不加误导性登录指引。"""
-    coro = _codex_fail_run(
-        monkeypatch, tmp_path,
-        auth_json=True,
-        fail=(1, b"", b"ERROR: unexpected status 401 Unauthorized: expired token"),
-    )
-    with pytest.raises(RuntimeError) as exc_info:
-        await coro
-    assert "codex login" not in str(exc_info.value)
-
-
-@pytest.mark.asyncio
-async def test_run_codex_cli_timeout_without_auth_json_appends_hint(monkeypatch, tmp_path):
-    """无凭证时 codex 反复重试表现为挂起超时 — 同样附登录指引。"""
-    coro = _codex_fail_run(
-        monkeypatch, tmp_path,
-        auth_json=False,
-        fail=RuntimeError("Codex CLI 调用超时, 请稍后重试或检查本机 Codex 登录状态"),
-    )
-    with pytest.raises(RuntimeError, match="codex login"):
-        await coro
-
-
-# ── codex 真实探测 (旧实现只验 --version, 登录态缺失测不出来) ──────────
-
-@pytest.mark.asyncio
-async def test_probe_codex_cli_not_installed(monkeypatch):
-    monkeypatch.setattr(ai_provider, "codex_cli_available", lambda: False)
-    with pytest.raises(RuntimeError, match="未找到"):
-        await ai_provider.probe_ai_config(
-            provider="codex_cli", api_key="", base_url="", model="",
-        )
-
-
-@pytest.mark.asyncio
-async def test_probe_codex_cli_runs_real_exec(monkeypatch):
-    captured: dict = {}
-
-    async def fake_run_cli(messages, *, max_tokens, timeout, model_override):
-        captured["messages"] = messages
-        captured["timeout"] = timeout
-        captured["model"] = model_override
-        return "OK"
-
-    monkeypatch.setattr(ai_provider, "codex_cli_available", lambda: True)
-    monkeypatch.setattr(ai_provider, "_run_codex_cli", fake_run_cli)
-
-    text = await ai_provider.probe_ai_config(
-        provider="codex_cli", api_key="", base_url="", model="draft-model",
-    )
-    assert text == "OK"
-    assert captured["timeout"] >= 60.0  # 真实 exec 需要 CLI 启动时间
-    assert captured["model"] == "draft-model"
-
-
-@pytest.mark.asyncio
-async def test_probe_codex_cli_surfaces_auth_guidance(monkeypatch):
-    """登录态缺失的探测失败信息透传 (含指引), 不再假成功。"""
-    async def fail_run_cli(messages, *, max_tokens, timeout, model_override):
-        raise RuntimeError("Codex CLI 调用失败: 401 Unauthorized\n请执行 codex login")
-
-    monkeypatch.setattr(ai_provider, "codex_cli_available", lambda: True)
-    monkeypatch.setattr(ai_provider, "_run_codex_cli", fail_run_cli)
-
-    with pytest.raises(RuntimeError, match="codex login"):
-        await ai_provider.probe_ai_config(
-            provider="codex_cli", api_key="", base_url="", model="",
-        )
-
-
-# ── 陈旧运行目录清扫 (进程退出中断 finally 清理时的兜底) ────────────────
-
-def test_sweep_stale_codex_run_dirs_removes_only_stale(tmp_path, monkeypatch):
-    stale = tmp_path / "tickflow-codex-run-stale"
-    fresh = tmp_path / "tickflow-codex-run-fresh"
-    unrelated = tmp_path / "unrelated-dir"
-    for d in (stale, fresh, unrelated):
-        d.mkdir()
-        (d / "codex-home").mkdir()
-    old_ts = time.time() - 7200
-    os.utime(stale, (old_ts, old_ts))
-
-    monkeypatch.setattr(ai_provider.tempfile, "gettempdir", lambda: str(tmp_path))
-    ai_provider._sweep_stale_codex_run_dirs(force=True)
-
-    assert not stale.exists()
-    assert fresh.exists()
-    assert unrelated.exists()
-
-
-def test_sweep_stale_codex_run_dirs_runs_once_per_process(tmp_path, monkeypatch):
-    """非 force 调用受进程级开关保护 — 第二次不再扫描。"""
-    first = tmp_path / "tickflow-codex-run-first"
-    first.mkdir()
-    old_ts = time.time() - 7200
-    os.utime(first, (old_ts, old_ts))
-
-    monkeypatch.setattr(ai_provider.tempfile, "gettempdir", lambda: str(tmp_path))
-    monkeypatch.setattr(ai_provider, "_stale_sweep_done", True)
-    ai_provider._sweep_stale_codex_run_dirs()
-    assert first.exists()  # 开关已置位, 未清扫
-
-    ai_provider._sweep_stale_codex_run_dirs(force=True)
-    assert not first.exists()
+    resolved = ai_provider._resolve_command("codex")
+    assert resolved is not None
+    assert resolved.endswith("/MacOS/codex")

@@ -9,6 +9,7 @@
   POST /reports                保存一条报告
   DELETE /reports/{report_id}  删除一条报告
 """
+
 from __future__ import annotations
 
 import logging
@@ -126,11 +127,26 @@ def get_levels(
     # 按资产类型分流: ETF/指数走独立 enriched 存储, 股票保持原路径
     df = repo.get_daily_asset(repo.resolve_asset_type(symbol), symbol, start, end)
     if df.is_empty():
-        return {"levels": {"sr": [], "pivot": [], "extreme": [],
-                           "boll": [], "keltner_s": [], "keltner_m": [], "keltner_l": [],
-                           "atr_stop": [], "gap": [], "fib": [], "round": []},
-                "close": None, "summary": "无数据", "symbol": symbol,
-                "dates": [], "series": {}}
+        return {
+            "levels": {
+                "sr": [],
+                "pivot": [],
+                "extreme": [],
+                "boll": [],
+                "keltner_s": [],
+                "keltner_m": [],
+                "keltner_l": [],
+                "atr_stop": [],
+                "gap": [],
+                "fib": [],
+                "round": [],
+            },
+            "close": None,
+            "summary": "无数据",
+            "symbol": symbol,
+            "dates": [],
+            "series": {},
+        }
 
     levels = compute_levels(df)
     close = float(df.tail(1)["close"][0]) if "close" in df.columns else None
@@ -149,6 +165,7 @@ def get_levels(
 
 class AnalyzeRequest(BaseModel):
     """AI 个股分析请求。"""
+
     symbol: str
     focus: str = ""  # 可选:用户追加的分析关注点
 
@@ -167,7 +184,9 @@ async def analyze_stock(request: Request, req: AnalyzeRequest):
     data_dir = repo.store.data_dir
 
     async def stream_gen():
-        async for chunk in with_heartbeat(analyze_stock_stream(repo, data_dir, req.symbol, req.focus)):
+        async for chunk in with_heartbeat(
+            analyze_stock_stream(repo, data_dir, req.symbol, req.focus)
+        ):
             yield chunk + "\n"
 
     return StreamingResponse(
@@ -181,8 +200,10 @@ async def analyze_stock(request: Request, req: AnalyzeRequest):
 # 报告 CRUD(历史报告持久化)
 # ================================================================
 
+
 class SaveReportRequest(BaseModel):
     """保存一条 AI 个股分析报告。"""
+
     symbol: str
     name: str = ""
     focus: str = ""
@@ -201,15 +222,17 @@ def list_reports(request: Request):
 @router.post("/reports")
 def save_report(request: Request, req: SaveReportRequest):
     """保存一条报告。"""
-    report = stock_reports.save_report({
-        "symbol": req.symbol,
-        "name": req.name,
-        "focus": req.focus,
-        "content": req.content,
-        "summary": req.summary,
-        "close": req.close,
-        "levels": req.levels,
-    })
+    report = stock_reports.save_report(
+        {
+            "symbol": req.symbol,
+            "name": req.name,
+            "focus": req.focus,
+            "content": req.content,
+            "summary": req.summary,
+            "close": req.close,
+            "levels": req.levels,
+        }
+    )
     return {"ok": True, "report": report}
 
 

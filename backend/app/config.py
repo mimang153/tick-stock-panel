@@ -7,6 +7,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -252,6 +253,35 @@ class Settings(BaseSettings):
     # 写缓冲阈值: 满足任一条件即批量 INSERT (§4.2)
     ch_write_flush_interval_ms: int = 2000
     ch_write_flush_rows: int = 5000
+
+    # 缓存后端 — S4 起默认 redis（跨 worker 共享 + generation 计数器）；
+    # memory 仅作离线/测试兼容，测试 conftest 显式强制以保证隔离。
+    cache_backend: Literal["memory", "redis"] = "redis"
+    cache_redis_url: str = "redis://localhost:6379/0"
+    cache_redis_prefix: str = "tickflow:cache:"
+    cache_redis_socket_timeout_s: float = 1.0
+
+    # SSE 事件总线后端 — S4 起默认 redis（跨 worker 广播）；memory 仅离线/测试兼容。
+    event_bus_backend: Literal["memory", "redis"] = "redis"
+    event_bus_redis_url: str = "redis://localhost:6379/0"
+    event_bus_redis_channel: str = "tickflow:events"
+    event_bus_redis_socket_timeout_s: float = 1.0
+
+    # 多实例协调状态 — S4 起默认 redis（跨 worker 取消标志、限流、启动单飞）；
+    # memory 仅作离线/测试兼容。
+    coordination_backend: Literal["memory", "redis"] = "redis"
+    coordination_redis_url: str = "redis://localhost:6379/0"
+    coordination_redis_prefix: str = "tickflow:coord:"
+    coordination_redis_socket_timeout_s: float = 1.0
+
+    # mining run 状态机后端 — S4 起默认 redis（方案 C，state 权威在 Redis，
+    # CK 审计）；memory 文件版仅作离线/测试兼容。
+    mining_store_backend: Literal["memory", "redis"] = "redis"
+
+    # 模拟盘账户事务层（DES-005）— PostgreSQL 承载资金状态，事务写入组保证多 worker
+    # 账目原子。由 pg_dev.sh 用宿主机镜像启动容器（库 tsp_dev / 用户 tsp）。
+    # 源码直跑连 localhost:5432；容器内 compose 注入 PAPER_PG_URL_CONTAINER。
+    paper_pg_url: str = "postgresql://tsp:123456@localhost:5432/tsp_dev"
 
     # tiers.yaml 路径 — frozen: 资源目录内; 非 frozen: 项目根目录
     tiers_yaml: Path = _RESOURCE_ROOT / "tiers.yaml" if _IS_FROZEN else _PROJECT_ROOT / "tiers.yaml"

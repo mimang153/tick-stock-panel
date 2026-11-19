@@ -4,12 +4,14 @@
 (响应内含逐条冒烟结果) → 立即用引用该信号的策略跑回测 → 成功产出信号。
 全程秒级, 远低于 2 分钟验收线。
 """
+
 from __future__ import annotations
 
 import time
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import polars as pl
 import pytest
@@ -24,6 +26,7 @@ def _isolated_dirs(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     # 注入迁移自内置的信号定义 (signal_limit_up 等) — 回测解析硬依赖
     from tests.signal_seeds import install_pipeline_caches
+
     install_pipeline_caches(monkeypatch)
     yield tmp_path
 
@@ -31,20 +34,32 @@ def _isolated_dirs(tmp_path: Path, monkeypatch):
 # ── 冒烟 (静态层) ────────────────────────────────────────
 
 _GOOD_SIGNAL = {
-    "id": "smoke_ok", "name": "好信号", "kind": "entry", "timeframe": "daily",
+    "id": "smoke_ok",
+    "name": "好信号",
+    "kind": "entry",
+    "timeframe": "daily",
     "conditions": [{"left": "close", "op": ">", "right": "field:ma20"}],
 }
 _TYPO_SIGNAL = {
-    "id": "smoke_typo", "name": "拼错信号", "kind": "entry", "timeframe": "daily",
+    "id": "smoke_typo",
+    "name": "拼错信号",
+    "kind": "entry",
+    "timeframe": "daily",
     "conditions": [{"left": "cloes", "op": ">", "right": 0}],  # 拼错列名
 }
 _GOOD_FACTOR = {
-    "id": "uf_smoke", "label": "好因子", "kind": "custom", "lang": "python",
+    "id": "uf_smoke",
+    "label": "好因子",
+    "kind": "custom",
+    "lang": "python",
     "formula": 'ctx.col("close").rolling_mean(window_size=5).over("symbol")',
     "status": "active",
 }
 _TYPO_FACTOR = {
-    "id": "uf_typo", "label": "拼错因子", "kind": "custom", "lang": "python",
+    "id": "uf_typo",
+    "label": "拼错因子",
+    "kind": "custom",
+    "lang": "python",
     "formula": 'ctx.col("cloes") + 1',  # ctx.col 任意名 — 冒烟要拦住
     "status": "active",
 }
@@ -69,6 +84,7 @@ def test_smoke_stored_by_id_roundtrip(tmp_path: Path):
     assert result["ok"] is True
 
     import fastapi
+
     with pytest.raises(fastapi.HTTPException) as ei:
         smoke_stored("signal", "missing_id", tmp_path)
     assert ei.value.status_code == 404
@@ -83,7 +99,9 @@ def test_smoke_flags_typos_and_invalid_definitions() -> None:
     assert not typo_factor["ok"]
     assert typo_factor["issues"][0]["code"] == "W001"
 
-    invalid = smoke_definition("signal", {"id": "BAD", "name": "x", "kind": "both", "conditions": []})
+    invalid = smoke_definition(
+        "signal", {"id": "BAD", "name": "x", "kind": "both", "conditions": []}
+    )
     assert not invalid["ok"] and invalid["issues"][0]["code"] == "V001"
 
 
@@ -92,6 +110,7 @@ def test_catalog_lists_both_kinds_with_dependencies() -> None:
 
     custom_signals.save_one(settings.data_dir, _GOOD_SIGNAL)
     from app.factors import store as factor_store
+
     factor_store.save_one(settings.data_dir, _GOOD_FACTOR)
 
     items = catalog(settings.data_dir)
@@ -106,27 +125,26 @@ def test_catalog_lists_both_kinds_with_dependencies() -> None:
 # ── 验收: 导入 → 冒烟 → 可回测 (≤2 分钟) ─────────────────
 
 _E2E_SIGNAL = {
-    "id": "e2e_new", "name": "端到端新信号", "kind": "entry", "timeframe": "daily",
+    "id": "e2e_new",
+    "name": "端到端新信号",
+    "kind": "entry",
+    "timeframe": "daily",
     "conditions": [{"left": "close", "op": ">", "right": 0}],  # 恒真, 保证有候选
 }
 
 
-def test_import_to_backtest_within_two_minutes(tmp_path: Path, monkeypatch) -> None:
-    """备份导入新信号 → 导入响应带冒烟 → 引用该信号的回测立即可跑。"""
-    started = time.perf_counter()
-
-    # 1) 源目录造定义, 打备份 ZIP
-    source_dir = tmp_path / "source"
+def _build_import_backup_archive(tmp_path, monkeypatch):
     from app.factors import store as factor_store
     from app.strategy import custom_signals
 
+    source_dir = tmp_path / "source"
     monkeypatch.setattr(settings, "data_dir", source_dir)
     custom_signals.save_one(source_dir, _E2E_SIGNAL)
     factor_store.save_one(source_dir, _GOOD_FACTOR)
-    data, _filename = config_backup.build_backup(categories=["custom_signals", "custom_factors"])
+    return config_backup.build_backup(categories=["custom_signals", "custom_factors"])[0]
 
-    # 2) 导入到全新目录 — 响应内逐条冒烟
-    target_dir = tmp_path / "target"
+
+def _import_archive_and_assert_smoke(data, target_dir, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", target_dir)
     applied = config_backup.apply_archive(data, categories=["custom_signals", "custom_factors"])
     smoke_by_file = {
@@ -137,7 +155,8 @@ def test_import_to_backtest_within_two_minutes(tmp_path: Path, monkeypatch) -> N
     assert smoke_by_file["e2e_new.json"]["ok"], smoke_by_file["e2e_new.json"]
     assert smoke_by_file["uf_smoke.json"]["ok"], smoke_by_file["uf_smoke.json"]
 
-    # 3) 立即用引用导入信号的策略跑回测 (面板 stub, 与 prepare_panel 测试同模式)
+
+def _install_imported_signal_caches(monkeypatch):
     from app.indicators.pipeline import invalidate_custom_signals
 
     invalidate_custom_signals()  # 信号缓存指向新 data_dir 重载
@@ -150,76 +169,122 @@ def test_import_to_backtest_within_two_minutes(tmp_path: Path, monkeypatch) -> N
     seeds = load_seed_definitions()
     all_signals = [*seeds, _E2E_SIGNAL]
     monkeypatch.setattr(
-        pipeline, "_custom_signal_exprs",
+        pipeline,
+        "_custom_signal_exprs",
         custom_signals.build_expressions(all_signals),
     )
     prev_fields = custom_signals.prev_day_fields(all_signals)
     monkeypatch.setattr(
-        pipeline, "_custom_signal_exprs_today",
+        pipeline,
+        "_custom_signal_exprs_today",
         custom_signals.build_expressions_prev(all_signals, prev_fields),
     )
     monkeypatch.setattr(pipeline, "_custom_prev_fields_cache", prev_fields)
 
-    from app.backtest.engine import SimResult
-    from app.backtest.strategy import StrategyBacktestConfig, StrategyBacktestService
-    from app.strategy.engine import StrategyDef
 
-    class _EngineStub:
-        def __init__(self, panel: pl.DataFrame) -> None:
-            self.panel = panel
-            self.repo = SimpleNamespace(store=SimpleNamespace(data_dir=target_dir))
+class _EngineStub:
+    def __init__(self, panel: pl.DataFrame, target_dir: Path) -> None:
+        self.panel = panel
+        self.repo = SimpleNamespace(store=SimpleNamespace(data_dir=target_dir))
 
-        def load_panel(self, symbols, start, end, columns=None, asset_type="stock"):
-            return self.panel
+    def load_panel(self, symbols, start, end, columns=None, asset_type="stock"):
+        return self.panel
 
-        def load_panel_for_backtest(self, symbols, start, end, feature_plan, asset_type="stock"):
-            return self.load_panel(symbols, start, end)
+    def load_panel_for_backtest(self, symbols, start, end, feature_plan, asset_type="stock"):
+        return self.load_panel(symbols, start, end)
 
-        def simulate_market_matrix(self, matrix, config, progress_cb=None, cancel_event=None, options=None):
-            return SimResult(
-                equity_curve=[{"date": "2024-01-01", "value": config.initial_capital}],
-                drawdown_curve=[{"date": "2024-01-01", "value": 0.0}],
-                trades=[], per_symbol_stats=[],
-                stats={"total_return": 0.0, "n_trades": 0},
-            )
+    def simulate_market_matrix(
+        self, matrix, config, progress_cb=None, cancel_event=None, options=None
+    ):
+        from app.backtest.engine import SimResult
 
-    class _StrategyEngineStub:
-        def __init__(self) -> None:
-            self.strategy = StrategyDef(
-                meta={"id": "e2e", "name": "e2e", "scoring": {}, "params": [], "limit": 100},
-                basic_filter=None,
-                entry_signals=["csg_e2e_new"],  # ← 引用刚导入的信号
-                exit_signals=[],
-                stop_loss=None, trailing_stop=None,
-                trailing_take_profit_activate=None, trailing_take_profit_drawdown=None,
-                max_hold_days=None,
-                filter_fn=lambda df, params: pl.lit(True),
-                filter_history_fn=None, lookback_days=1, source="custom", file_path=None,
-            )
+        return SimResult(
+            equity_curve=[{"date": "2024-01-01", "value": config.initial_capital}],
+            drawdown_curve=[{"date": "2024-01-01", "value": 0.0}],
+            trades=[],
+            per_symbol_stats=[],
+            stats={"total_return": 0.0, "n_trades": 0},
+        )
 
-        def get(self, strategy_id):
-            return self.strategy
 
+class _StrategyEngineStub:
+    def __init__(self) -> None:
+        from app.strategy.engine import StrategyDef
+
+        self.strategy = StrategyDef(
+            meta={"id": "e2e", "name": "e2e", "scoring": {}, "params": [], "limit": 100},
+            basic_filter=cast(Any, None),
+            entry_signals=["csg_e2e_new"],  # ← 引用刚导入的信号
+            exit_signals=[],
+            stop_loss=None,
+            trailing_stop=None,
+            trailing_take_profit_activate=None,
+            trailing_take_profit_drawdown=None,
+            max_hold_days=None,
+            filter_fn=lambda df, params: pl.lit(True),
+            filter_history_fn=None,
+            lookback_days=1,
+            source="custom",
+            file_path=None,
+        )
+
+    def get(self, strategy_id):
+        return self.strategy
+
+
+def _build_e2e_panel():
     rows = []
     base = date(2024, 1, 1)
     for i in range(30):
         for sym in ("A", "B"):
             close = 10.0 + i * 0.1
-            rows.append({
-                "symbol": sym, "name": sym, "date": base + timedelta(days=i),
-                "open": close - 0.05, "high": close + 0.1, "low": close - 0.1, "close": close,
-                "volume": 100_000.0, "amount": close * 100_000.0,
-                "ma20": close - 0.2,
-                "signal_limit_up": False, "signal_limit_down": False,
-                # 面板已带信号列时注入路径直接可用; 不带时由 compute_signals 补
-                "csg_e2e_new": close > 0,
-            })
-    panel = pl.DataFrame(rows).sort(["symbol", "date"])
-    service = StrategyBacktestService(_EngineStub(panel), _StrategyEngineStub())
-    result = service.run(StrategyBacktestConfig(
-        strategy_id="e2e", symbols=["A", "B"],
-        start=date(2024, 1, 20), end=date(2024, 1, 30), mode="fast",
-    ))
+            rows.append(
+                {
+                    "symbol": sym,
+                    "name": sym,
+                    "date": base + timedelta(days=i),
+                    "open": close - 0.05,
+                    "high": close + 0.1,
+                    "low": close - 0.1,
+                    "close": close,
+                    "volume": 100_000.0,
+                    "amount": close * 100_000.0,
+                    "ma20": close - 0.2,
+                    "signal_limit_up": False,
+                    "signal_limit_down": False,
+                    # 面板已带信号列时注入路径直接可用; 不带时由 compute_signals 补
+                    "csg_e2e_new": close > 0,
+                }
+            )
+    return pl.DataFrame(rows).sort(["symbol", "date"])
+
+
+def _run_e2e_backtest(panel, target_dir):
+    from app.backtest.strategy import StrategyBacktestConfig, StrategyBacktestService
+
+    service = StrategyBacktestService(
+        cast(Any, _EngineStub(panel, target_dir)), cast(Any, _StrategyEngineStub())
+    )
+    return service.run(
+        StrategyBacktestConfig(
+            strategy_id="e2e",
+            symbols=["A", "B"],
+            start=date(2024, 1, 20),
+            end=date(2024, 1, 30),
+            mode=cast(Any, "fast"),
+        )
+    )
+
+
+def test_import_to_backtest_within_two_minutes(tmp_path: Path, monkeypatch) -> None:
+    """备份导入新信号 → 导入响应带冒烟 → 引用该信号的回测立即可跑。"""
+    started = time.perf_counter()
+    data = _build_import_backup_archive(tmp_path, monkeypatch)
+    target_dir = tmp_path / "target"
+    _import_archive_and_assert_smoke(data, target_dir, monkeypatch)
+    _install_imported_signal_caches(monkeypatch)
+    panel = _build_e2e_panel()
+    result = _run_e2e_backtest(panel, target_dir)
 
     assert result.error is None, result.error
     elapsed = time.perf_counter() - started

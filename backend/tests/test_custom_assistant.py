@@ -4,10 +4,11 @@
 SSE 流式工具循环的事件顺序与逐字 delta、历史截断、本地工具执行与
 摘要白名单、HTTP 流式端点行为。
 """
+
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 import polars as pl
 import pytest
@@ -82,9 +83,13 @@ def test_extension_registers_routes_via_loader() -> None:
 
 async def test_chat_stream_fails_closed_without_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(chat_service, "ai_configured", lambda: False)
-    events = await _collect(await _drain(chat_service.chat_stream(
-        history=[{"role": "user", "content": "hi"}],
-    )))
+    events = await _collect(
+        await _drain(
+            chat_service.chat_stream(
+                history=[{"role": "user", "content": "hi"}],
+            )
+        )
+    )
 
     assert events[0]["type"] == "error"
     assert events[0]["kind"] == "no_key"
@@ -118,12 +123,18 @@ async def test_chat_stream_uses_codex_tool_loop(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(chat_service, "ai_configured", lambda: True)
     monkeypatch.setattr(chat_service, "is_codex_cli_provider", lambda provider=None: True)
     monkeypatch.setattr(
-        chat_service, "stream_codex_round", _stream_script(script, captured),
+        chat_service,
+        "stream_codex_round",
+        _stream_script(cast(Any, script), captured),
     )
-    events = await _collect(await _drain(chat_service.chat_stream(
-        history=[{"role": "user", "content": "我有哪些策略?"}],
-        engine=_StubEngine(),
-    )))
+    events = await _collect(
+        await _drain(
+            chat_service.chat_stream(
+                history=[{"role": "user", "content": "我有哪些策略?"}],
+                engine=_StubEngine(),
+            )
+        )
+    )
 
     assert [event["type"] for event in events] == ["tool_call", "tool_result", "delta", "done"]
     assert events[1]["summary"] == "返回 2 个策略"
@@ -134,16 +145,22 @@ async def test_chat_stream_uses_codex_tool_loop(monkeypatch: pytest.MonkeyPatch)
     assert json.loads(result_message["content"])["ok"] is True
 
 
-async def test_chat_stream_streams_text_deltas_word_by_word(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_chat_stream_streams_text_deltas_word_by_word(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """纯文本回答: 逐字 delta 顺序产出, 内容按序拼接。"""
     script = [{"text_pieces": ["你", "好", "共有 ", "2 ", "个策略。"]}]
     monkeypatch.setattr(chat_service, "ai_configured", lambda: True)
     monkeypatch.setattr(chat_service, "is_codex_cli_provider", lambda provider=None: False)
     monkeypatch.setattr(chat_service, "stream_openai_round", _stream_script(script))
 
-    events = await _collect(await _drain(chat_service.chat_stream(
-        history=[{"role": "user", "content": "我有哪些策略?"}],
-    )))
+    events = await _collect(
+        await _drain(
+            chat_service.chat_stream(
+                history=[{"role": "user", "content": "我有哪些策略?"}],
+            )
+        )
+    )
 
     kinds = [e["type"] for e in events]
     assert kinds == ["delta"] * 5 + ["done"]
@@ -158,14 +175,20 @@ async def test_chat_stream_emits_tool_events_in_order(monkeypatch: pytest.Monkey
     ]
     monkeypatch.setattr(chat_service, "ai_configured", lambda: True)
     monkeypatch.setattr(chat_service, "is_codex_cli_provider", lambda provider=None: False)
-    monkeypatch.setattr(chat_service, "stream_openai_round", _stream_script(script, captured))
+    monkeypatch.setattr(
+        chat_service, "stream_openai_round", _stream_script(cast(Any, script), captured)
+    )
 
-    events = await _collect(await _drain(chat_service.chat_stream(
-        history=[{"role": "user", "content": "我有哪些策略?"}],
-        context={"page": "自选"},
-        engine=_StubEngine(),
-        data_dir=None,
-    )))
+    events = await _collect(
+        await _drain(
+            chat_service.chat_stream(
+                history=[{"role": "user", "content": "我有哪些策略?"}],
+                context={"page": "自选"},
+                engine=_StubEngine(),
+                data_dir=None,
+            )
+        )
+    )
 
     kinds = [e["type"] for e in events]
     assert kinds == ["tool_call", "tool_result", "delta", "delta", "done"]
@@ -198,7 +221,9 @@ async def test_chat_stream_emits_tool_events_in_order(monkeypatch: pytest.Monkey
     assert json.loads(second_round[-1]["content"])["ok"] is True
 
 
-async def test_chat_stream_rounds_checkpoint_prompts_and_stops(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_chat_stream_rounds_checkpoint_prompts_and_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """轮次检查点(取代旧 6 轮硬限): 到点弹 rounds_confirm, 拒绝则优雅收尾。"""
     script = [
         {"tool_calls": [{"id": f"c{i}", "name": "list_factors", "arguments": "{}"}]}
@@ -235,7 +260,9 @@ async def test_chat_stream_truncates_long_history(monkeypatch: pytest.MonkeyPatc
     script = [{"text_pieces": ["好的"]}]
     monkeypatch.setattr(chat_service, "ai_configured", lambda: True)
     monkeypatch.setattr(chat_service, "is_codex_cli_provider", lambda provider=None: False)
-    monkeypatch.setattr(chat_service, "stream_openai_round", _stream_script(script, captured))
+    monkeypatch.setattr(
+        chat_service, "stream_openai_round", _stream_script(cast(Any, script), captured)
+    )
 
     history = []
     for i in range(12):
@@ -262,9 +289,13 @@ async def test_chat_stream_surfaces_generate_failure(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(chat_service, "is_codex_cli_provider", lambda provider=None: False)
     monkeypatch.setattr(chat_service, "stream_openai_round", failing_round)
 
-    events = await _collect(await _drain(chat_service.chat_stream(
-        history=[{"role": "user", "content": "hi"}],
-    )))
+    events = await _collect(
+        await _drain(
+            chat_service.chat_stream(
+                history=[{"role": "user", "content": "hi"}],
+            )
+        )
+    )
 
     assert events[0]["type"] == "error"
     assert events[0]["kind"] == "model"
@@ -290,12 +321,14 @@ class _StubRepo:
 
 class _StubQuoteService:
     def get_quotes_compat(self) -> pl.DataFrame:
-        return pl.DataFrame({
-            "symbol": ["600519.SH", "300750.SZ"],
-            "close": [1500.0, 200.5],
-            "change_pct": [0.0123, -0.0456],
-            "amount": [3.0e9, 5.0e9],
-        })
+        return pl.DataFrame(
+            {
+                "symbol": ["600519.SH", "300750.SZ"],
+                "close": [1500.0, 200.5],
+                "change_pct": [0.0123, -0.0456],
+                "amount": [3.0e9, 5.0e9],
+            }
+        )
 
 
 async def _fake_execute_tool(name: str, args: dict[str, Any], ctx: Any) -> dict[str, Any]:
@@ -325,27 +358,31 @@ class _DailyRepo(_StubRepo):
         return pl.DataFrame(), None
 
     def get_daily_asset(self, asset_type, symbol, start, end):
-        return pl.DataFrame({
-            "date": ["2026-09-01", "2026-09-02", "2026-09-03"],
-            "open": [9.8, 10.4, 10.6],
-            "high": [10.6, 10.7, 10.8],
-            "low": [9.7, 10.2, 10.1],
-            "close": [10.0, 10.5, 10.3],
-            "volume": [100.0, 200.0, 150.0],
-        })
+        return pl.DataFrame(
+            {
+                "date": ["2026-09-01", "2026-09-02", "2026-09-03"],
+                "open": [9.8, 10.4, 10.6],
+                "high": [10.6, 10.7, 10.8],
+                "low": [9.7, 10.2, 10.1],
+                "close": [10.0, 10.5, 10.3],
+                "volume": [100.0, 200.0, 150.0],
+            }
+        )
 
     def get_minute(self, symbol, trade_date, asset_type="stock"):
         from datetime import datetime
 
-        return pl.DataFrame({
-            "datetime": [
-                datetime(2026, 9, 18, 9, 31),
-                datetime(2026, 9, 18, 9, 32),
-                datetime(2026, 9, 18, 9, 33),
-            ],
-            "close": [10.02, 10.05, 10.01],
-            "volume": [12.0, 8.0, 6.0],
-        })
+        return pl.DataFrame(
+            {
+                "datetime": [
+                    datetime(2026, 9, 18, 9, 31),
+                    datetime(2026, 9, 18, 9, 32),
+                    datetime(2026, 9, 18, 9, 33),
+                ],
+                "close": [10.02, 10.05, 10.01],
+                "volume": [12.0, 8.0, 6.0],
+            }
+        )
 
 
 async def test_get_stock_daily_attaches_kline_chart_payload() -> None:
@@ -400,7 +437,9 @@ async def test_execute_assistant_tool_validates_symbols() -> None:
 async def test_execute_assistant_tool_falls_back_to_core_catalog() -> None:
     ctx = assistant_tools.ToolContext.build(engine=_StubEngine())
     payload = await assistant_tools.execute_assistant_tool(
-        "list_strategies", {}, ctx,
+        "list_strategies",
+        {},
+        ctx,
     )
     assert payload["ok"] is True
     strategies = payload["result"]["strategies"]
@@ -410,10 +449,23 @@ async def test_execute_assistant_tool_falls_back_to_core_catalog() -> None:
 def test_local_tool_schemas_cover_page_capabilities() -> None:
     names = {s["function"]["name"] for s in assistant_tools.build_tool_schemas()}
     expected = {
-        "list_factors", "list_strategies", "list_data_capabilities", "run_backtest",
-        "get_stock_quote", "get_stock_daily", "get_stock_analysis", "get_financials",
-        "get_watchlist", "get_market_overview", "get_indices", "get_sector_rotation",
-        "get_regime", "get_abnormal", "get_lots", "list_signals", "run_strategy",
+        "list_factors",
+        "list_strategies",
+        "list_data_capabilities",
+        "run_backtest",
+        "get_stock_quote",
+        "get_stock_daily",
+        "get_stock_analysis",
+        "get_financials",
+        "get_watchlist",
+        "get_market_overview",
+        "get_indices",
+        "get_sector_rotation",
+        "get_regime",
+        "get_abnormal",
+        "get_lots",
+        "list_signals",
+        "run_strategy",
         "get_factor_values",
     }
     assert expected <= names
@@ -444,7 +496,8 @@ def test_summarize_tool_result_whitelist() -> None:
     assert "失败" in assistant_tools.summarize_tool_result("run_backtest", failed)
 
     quote_summary = assistant_tools.summarize_tool_result(
-        "get_stock_quote", {"ok": True, "result": {"count": 3, "rows": [1, 2, 3]}},
+        "get_stock_quote",
+        {"ok": True, "result": {"count": 3, "rows": [1, 2, 3]}},
     )
     assert quote_summary == "查询 3 只个股实时行情"
 
@@ -455,9 +508,12 @@ def test_http_chat_endpoint_streams_ndjson(monkeypatch: pytest.MonkeyPatch) -> N
     app = FastAPI()
     configure_backend_extensions(app)
     client = TestClient(app)
-    response = client.post("/api/custom/assistant/chat", json={
-        "messages": [{"role": "user", "content": "我有哪些策略?"}],
-    })
+    response = client.post(
+        "/api/custom/assistant/chat",
+        json={
+            "messages": [{"role": "user", "content": "我有哪些策略?"}],
+        },
+    )
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/x-ndjson")

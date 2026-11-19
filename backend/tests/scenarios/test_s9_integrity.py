@@ -38,12 +38,8 @@ def _wait(store, jid, deadline_s=3):
     raise AssertionError("job did not finish")
 
 
-def test_s9_integrity_scan_repair(scenario_app, monkeypatch):
-    _, base_repo, ck = scenario_app
-    root = base_repo.store.data_dir
-    bad_day = date(2026, 10, 29)
-
-    # job 相关单例隔离（同 test_data_integrity_api.app_env）
+def _patch_integrity_singletons(monkeypatch, root, bad_day):
+    """job 相关单例隔离（同 test_data_integrity_api.app_env）。"""
     jobs = pipeline_jobs.JobStore(store_dir=root / "jobs")
     monkeypatch.setattr(data_api, "job_store", jobs)
     monkeypatch.setattr(pipeline_jobs, "job_store", jobs)
@@ -56,6 +52,14 @@ def test_s9_integrity_scan_repair(scenario_app, monkeypatch):
     monkeypatch.setattr(preferences, "load", lambda: {})
     monkeypatch.setattr(integrity_check, "cn_today", lambda: date(2026, 10, 30))
     monkeypatch.setattr(data_integrity, "_trading_calendar", lambda: {bad_day})
+    return jobs
+
+
+def test_s9_integrity_scan_repair(scenario_app, monkeypatch):
+    _, base_repo, ck = scenario_app
+    root = base_repo.store.data_dir
+    bad_day = date(2026, 10, 29)
+    jobs = _patch_integrity_singletons(monkeypatch, root, bad_day)
 
     # repo 走 CK 双写
     repo = KlineRepository(DataStore(root), storage=ck)
@@ -67,10 +71,11 @@ def test_s9_integrity_scan_repair(scenario_app, monkeypatch):
             DAILY_ROWS("600002.SH", bad_day, 20.0),
         ],
     )
-    # 制造坏分区：覆盖本地 part.parquet（CK 镜像仍有正确数据）
-    part = root / "kline_daily" / f"date={bad_day}"
-    part.mkdir(parents=True, exist_ok=True)
-    (part / "part.parquet").write_bytes(b"bad parquet")
+    # 制造 CK 权威数据坏值（CK-only 下本地分区不参与扫描）
+    corrupted = ck.read_daily("kline_daily", start=bad_day, end=bad_day).with_columns(
+        pl.lit(-1.0).alias("close")
+    )
+    ck.write_daily("kline_daily", corrupted)
 
     from app.services import kline_sync
 

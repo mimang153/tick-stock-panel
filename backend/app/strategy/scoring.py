@@ -1,4 +1,5 @@
 """策略评分字段解析。"""
+
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
@@ -85,18 +86,21 @@ def _composite_value_expr(available: set[str], name: str) -> pl.Expr | None:
     return total
 
 
-def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
-    """返回评分值表达式；依赖不完整时返回 None。"""
-    available = set(columns)
+def _dispatch_virtual_expr(available: set[str], name: str) -> tuple[bool, pl.Expr | None]:
     if name in available:
-        return pl.col(name)
+        return True, pl.col(name)
     # composite 在 VIRTUAL 字典门控之前分派 (依赖经注册表递归展开) —— P3
     spec = _registry_get_factor(name)
     if spec is not None and spec.kind == "composite":
-        return _composite_value_expr(available, name)
+        return True, _composite_value_expr(available, name)
     dependencies = VIRTUAL_SCORING_DEPENDENCIES.get(name)
     if dependencies is None or not dependencies.issubset(available):
-        return None
+        return True, None
+    return False, None
+
+
+def _simple_bias_expr(name: str) -> pl.Expr | None:
+    """均线偏离 / MACD 百分比 / 布林带类评分字段。"""
     if name.startswith("ma") and name.endswith("_bias"):
         period = name.removeprefix("ma").removesuffix("_bias")
         if period.isdigit():
@@ -106,8 +110,7 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
         if period.isdigit():
             return _relative(pl.col("close"), pl.col(f"ema{period}"))
     if name in {"macd_dif_pct", "macd_dea_pct", "macd_hist_pct"}:
-        source = name.removesuffix("_pct")
-        return _ratio(pl.col(source), pl.col("close"))
+        return _ratio(pl.col(name.removesuffix("_pct")), pl.col("close"))
     if name == "atr_pct":
         return _ratio(pl.col("atr_14"), pl.col("close"))
     if name == "boll_position":
@@ -117,6 +120,11 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
         )
     if name == "boll_width":
         return _ratio(pl.col("boll_upper") - pl.col("boll_lower"), pl.col("ma20"))
+    return None
+
+
+def _simple_volume_expr(name: str) -> pl.Expr | None:
+    """量比 / 换手 / 成交额类评分字段。"""
     if name == "vol_ratio_10d":
         return _ratio(
             pl.col("volume"),
@@ -140,15 +148,45 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
         return _relative(pl.col("open"), pl.col("prev_close"))
     if name == "intraday_return":
         return _relative(pl.col("close"), pl.col("open"))
+    return None
+
+
+def _simple_price_expr(name: str) -> pl.Expr | None:
+    """价格位置 / 距离 / VWAP / 流通市值类评分字段。"""
     if name == "close_position":
         return _ratio(pl.col("close") - pl.col("low"), pl.col("high") - pl.col("low"))
     if name == "distance_to_high_60d":
         return _relative(pl.col("close"), pl.col("high_60d"))
     if name == "distance_from_low_60d":
         return _relative(pl.col("close"), pl.col("low_60d"))
+    if name == "vwap_bias":
+        vwap = _ratio(pl.col("amount"), pl.col("volume") * 100.0)
+        return _relative(pl.col("close"), vwap)
+    if name == "log_float_mv":
+        # 换手率 = 成交量/流通股本 → 股本 = volume/turnover_rate, 市值 = close x 股本
+        return (
+            pl.when((pl.col("turnover_rate") > 0) & (pl.col("volume") > 0))
+            .then((pl.col("close") * pl.col("volume") / pl.col("turnover_rate")).log())
+            .otherwise(None)
+        )
+    return None
+
+
+def _simple_scoring_expr(name: str) -> pl.Expr | None:
+    for builder in (_simple_bias_expr, _simple_volume_expr, _simple_price_expr):
+        expr = builder(name)
+        if expr is not None:
+            return expr
+    return None
+
+
+def _rolling_core_scoring_expr(name: str) -> pl.Expr | None:
     if name in {
-        "max_ret_20d", "ret_skew_20d", "up_days_20d",
-        "amihud_20d", "vol_price_corr_20d",
+        "max_ret_20d",
+        "ret_skew_20d",
+        "up_days_20d",
+        "amihud_20d",
+        "vol_price_corr_20d",
     }:
         change = _daily_change_expr()
         if name == "max_ret_20d":
@@ -156,28 +194,22 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
         if name == "ret_skew_20d":
             return change.rolling_skew(20, bias=True).over("symbol")
         if name == "up_days_20d":
-            return (
-                (change > 0).cast(pl.Float64)
-                .rolling_sum(20, min_samples=20).over("symbol")
-            )
+            return (change > 0).cast(pl.Float64).rolling_sum(20, min_samples=20).over("symbol")
         if name == "amihud_20d":
             illiquidity = _ratio(change.abs(), pl.col("amount") / 1e8)
             return illiquidity.rolling_mean(20, min_samples=20).over("symbol")
         volume = pl.col("volume")
-        product = change * volume
-        return _rolling_corr_expr(change, volume, product, 20).over("symbol")
+        return _rolling_corr_expr(change, volume, change * volume, 20).over("symbol")
     if name == "turnover_z_60d":
         baseline = pl.col("turnover_rate").shift(1)
         mean = baseline.rolling_mean(60, min_samples=60)
         std = baseline.rolling_std(60, min_samples=60)
         return (
-            pl.when(std > 0).then((pl.col("turnover_rate") - mean) / std)
+            pl.when(std > 0)
+            .then((pl.col("turnover_rate") - mean) / std)
             .otherwise(None)
             .over("symbol")
         )
-    if name == "vwap_bias":
-        vwap = _ratio(pl.col("amount"), pl.col("volume") * 100.0)
-        return _relative(pl.col("close"), vwap)
     if name == "vol_trend_5_60":
         fast = pl.col("volume").rolling_mean(5)
         slow = pl.col("volume").rolling_mean(60)
@@ -186,19 +218,13 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
         window = 20 if name == "limit_up_count_20d" else 60
         hit = (pl.col("consecutive_limit_ups").fill_null(0) > 0).cast(pl.Float64)
         return hit.rolling_sum(window, min_samples=window).over("symbol")
-    # ── 扩充批次 (2026-09-05): 全部滚动窗口默认 min_samples=窗口长 (fail-closed) ──
-    if name == "log_float_mv":
-        # 换手率 = 成交量/流通股本 → 股本 = volume/turnover_rate, 市值 = close x 股本
-        return (
-            pl.when((pl.col("turnover_rate") > 0) & (pl.col("volume") > 0))
-            .then((pl.col("close") * pl.col("volume") / pl.col("turnover_rate")).log())
-            .otherwise(None)
-        )
+    return None
+
+
+def _rolling_ext_momentum_expr(name: str) -> pl.Expr | None:
+    """动量 / 波动 / 资金流类滚动评分字段。"""
     if name == "momentum_120d":
-        return _relative(
-            pl.col("close"),
-            pl.col("close").shift(120),
-        ).over("symbol")
+        return _relative(pl.col("close"), pl.col("close").shift(120)).over("symbol")
     if name == "mom_accel_20_60":
         return pl.col("momentum_20d") - pl.col("momentum_60d")
     if name == "rsi_14_delta_5d":
@@ -210,13 +236,13 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
         intraday = _relative(pl.col("close"), pl.col("open"))
         return intraday.rolling_sum(20, min_samples=20).over("symbol")
     if name == "downside_vol_20d":
-        downside = (_daily_change_expr().clip(upper_bound=0.0) ** 2)
+        downside = _daily_change_expr().clip(upper_bound=0.0) ** 2
         return downside.rolling_mean(20, min_samples=20).sqrt().over("symbol")
     if name == "vol_regime_5_60":
         change = _daily_change_expr()
-        fast = change.rolling_std(5, min_samples=5)
-        slow = change.rolling_std(60, min_samples=60)
-        return _ratio(fast, slow).over("symbol")
+        return _ratio(
+            change.rolling_std(5, min_samples=5), change.rolling_std(60, min_samples=60)
+        ).over("symbol")
     if name == "amplitude_trend_20_60":
         fast = pl.col("amplitude").rolling_mean(20, min_samples=20)
         slow = pl.col("amplitude").rolling_mean(60, min_samples=60)
@@ -227,6 +253,11 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
         total = signed.rolling_sum(20, min_samples=20)
         scale = pl.col("volume").rolling_mean(20, min_samples=20) * 20.0
         return _ratio(total, scale).over("symbol")
+    return None
+
+
+def _rolling_ext_level_expr(name: str) -> pl.Expr | None:
+    """均值 / 位置 / KDJ 类滚动评分字段。"""
     if name == "amount_mean_20d":
         return (pl.col("amount") / 1e8).rolling_mean(20, min_samples=20).over("symbol")
     if name == "turnover_mean_20d":
@@ -249,14 +280,37 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
     return None
 
 
+def _rolling_extended_scoring_expr(name: str) -> pl.Expr | None:
+    # 扩充批次全部滚动窗口默认 min_samples=窗口长 (fail-closed)。
+    for builder in (_rolling_ext_momentum_expr, _rolling_ext_level_expr):
+        expr = builder(name)
+        if expr is not None:
+            return expr
+    return None
+
+
+def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
+    """返回评分值表达式；依赖不完整时返回 None。"""
+    handled, expr = _dispatch_virtual_expr(set(columns), name)
+    if handled:
+        return expr
+    for builder in (
+        _simple_scoring_expr,
+        _rolling_core_scoring_expr,
+        _rolling_extended_scoring_expr,
+    ):
+        expr = builder(name)
+        if expr is not None:
+            return expr
+    return None
+
+
 def _daily_change_expr() -> pl.Expr:
     previous = pl.col("close").shift(1)
     return _ratio(pl.col("close"), previous) - 1.0
 
 
-def _rolling_corr_expr(
-    left: pl.Expr, right: pl.Expr, product: pl.Expr, window: int
-) -> pl.Expr:
+def _rolling_corr_expr(left: pl.Expr, right: pl.Expr, product: pl.Expr, window: int) -> pl.Expr:
     """Pearson correlation over a rolling window, matching the matrix kernel formula."""
     mean_left = left.rolling_mean(window, min_samples=window)
     mean_right = right.rolling_mean(window, min_samples=window)
@@ -266,11 +320,11 @@ def _rolling_corr_expr(
     covariance = mean_product - mean_left * mean_right
     variance_left = mean_left_sq - mean_left * mean_left
     variance_right = mean_right_sq - mean_right * mean_right
-    return pl.when(
-        (variance_left > 0) & (variance_right > 0)
-    ).then(
-        covariance / (variance_left * variance_right).sqrt()
-    ).otherwise(None)
+    return (
+        pl.when((variance_left > 0) & (variance_right > 0))
+        .then(covariance / (variance_left * variance_right).sqrt())
+        .otherwise(None)
+    )
 
 
 def materialize_scoring_columns(
@@ -293,33 +347,42 @@ def materialize_scoring_columns(
     return frame.drop(depths.keys() - requested, strict=False)
 
 
+def _compile_scoring_spec(spec) -> Any:
+    """按 spec.lang 选择 DSL / Python 编译器（模块级以不累加外层圈复杂度）。"""
+    from app.factors.dsl import compile_formula_cached
+    from app.factors.py_expr import compile_python_expression_cached
+
+    if getattr(spec, "lang", "dsl") == "python":
+        return compile_python_expression_cached(spec.formula_text)
+    return compile_formula_cached(spec.formula_text)
+
+
 def _materialize_scoring_layer(frame: pl.DataFrame, names: Collection[str]) -> pl.DataFrame:
     # custom (DSL) 因子先物化: frame_transform 可能需要多阶段临时列 (嵌套窗口规避),
     # 与单表达式路径不同, 必须整体走帧变换 —— 与检验/试算共用同一条计算路径 (P3)。
     # P2b: 物化结果走内容寻址缓存 (键 = 定义 + 依赖列内容), 重复求值零成本;
     # 缓存故障一律回退现算, 不影响正确性。
-    from app.factors.dsl import FACTOR_COLUMN, compile_formula_cached
+    from app.factors.dsl import FACTOR_COLUMN
     from app.factors.materialize_cache import cache_key, get_cached, put_cached
-    from app.factors.py_expr import compile_python_expression_cached
 
     # 两段式: 命中列一次批量附着 (成本与因子数无关 — 每列一次 with_columns
     # 会随 K 线性拷贝帧); 未命中的逐个现算 (帧变换有依赖顺序)。
-    pending: list[tuple[str, object, str | None]] = []
+    pending: list[tuple[str, Any, str | None]] = []
     hits: dict[str, pl.Series] = {}
     for name in names:
         spec = _registry_get_factor(str(name))
         if spec is None or spec.kind != "custom" or name in frame.columns:
             continue
-        if getattr(spec, "lang", "dsl") == "python":
-            compiled = compile_python_expression_cached(spec.formula_text)
-        else:
-            compiled = compile_formula_cached(spec.formula_text)
+        compiled: Any = _compile_scoring_spec(spec)
         if not getattr(compiled, "ok", True):
             continue
         if compiled.frame_transform is None:
             continue
         key = cache_key(
-            str(name), spec.formula_text, spec.version, frame,
+            str(name),
+            spec.formula_text,
+            spec.version,
+            frame,
             spec.inputs | ({"symbol", "date"} & set(frame.columns)),
         )
         if key is not None:
@@ -342,8 +405,7 @@ def _materialize_scoring_layer(frame: pl.DataFrame, names: Collection[str]) -> p
         # 丢弃 DSL 分阶段临时列 — 与缓存命中路径的列集合完全一致
         # (临时列本就是变换内部工件, 不应泄漏进下游帧)。
         staged_temps = [
-            c for c in transformed.columns
-            if c not in frame.columns and c != FACTOR_COLUMN
+            c for c in transformed.columns if c not in frame.columns and c != FACTOR_COLUMN
         ]
         frame = transformed.drop([FACTOR_COLUMN, *staged_temps]).with_columns(column)
     expressions = [
@@ -356,9 +418,11 @@ def _materialize_scoring_layer(frame: pl.DataFrame, names: Collection[str]) -> p
 
 
 def _ratio(numerator: pl.Expr, denominator: pl.Expr) -> pl.Expr:
-    return pl.when(denominator.is_not_null() & (denominator != 0)).then(
-        numerator / denominator
-    ).otherwise(None)
+    return (
+        pl.when(denominator.is_not_null() & (denominator != 0))
+        .then(numerator / denominator)
+        .otherwise(None)
+    )
 
 
 def _relative(numerator: pl.Expr, denominator: pl.Expr) -> pl.Expr:

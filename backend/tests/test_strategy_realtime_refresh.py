@@ -1,9 +1,11 @@
 """策略页实时结果刷新 SSE 回归测试。"""
+
 from __future__ import annotations
 
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 import polars as pl
@@ -29,11 +31,13 @@ def _strategy_rule(scope: str = "all") -> dict:
 
 
 def _quote_df() -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": ["600000.SH"],
-        "close": [10.0],
-        "change_pct": [0.01],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "close": [10.0],
+            "change_pct": [0.01],
+        }
+    )
 
 
 def test_strategy_result_subscriber_notification_is_coalesced():
@@ -69,7 +73,12 @@ def test_many_sse_subscribers_wait_without_blocking_worker_threads():
         subscribers = [QuoteSubscriber() for _ in range(100)]
         tasks = [asyncio.create_task(sub.wait_async(1)) for sub in subscribers]
         await asyncio.sleep(0)
-        thread = threading.Thread(target=lambda: [sub.notify_quote() for sub in subscribers])
+
+        def _notify_all():
+            for sub in subscribers:
+                sub.notify_quote()
+
+        thread = threading.Thread(target=_notify_all)
         thread.start()
         assert all(await asyncio.gather(*tasks))
         thread.join(1)
@@ -142,19 +151,21 @@ def test_matrix_strategy_monitor_reuses_live_matrix_and_updates_last_row():
     for offset in range(62):
         for symbol, base in (("000001.SZ", 10.0), ("600000.SH", 20.0)):
             close = base + offset * 0.05
-            rows.append({
-                "symbol": symbol,
-                "name": symbol,
-                "date": start + timedelta(days=offset),
-                "open": close,
-                "high": close * 1.01,
-                "low": close * 0.99,
-                "close": close,
-                "volume": 1_000_000.0,
-                "amount": 100_000_000.0,
-                "total_shares": 1_000_000_000.0,
-                "float_shares": 800_000_000.0,
-            })
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "name": symbol,
+                    "date": start + timedelta(days=offset),
+                    "open": close,
+                    "high": close * 1.01,
+                    "low": close * 0.99,
+                    "close": close,
+                    "volume": 1_000_000.0,
+                    "amount": 100_000_000.0,
+                    "total_shares": 1_000_000_000.0,
+                    "float_shares": 800_000_000.0,
+                }
+            )
     panel = pl.DataFrame(rows)
     history = panel.filter(pl.col("date") < target)
     current = panel.filter(pl.col("date") == target)
@@ -175,16 +186,20 @@ def test_matrix_strategy_monitor_reuses_live_matrix_and_updates_last_row():
     monitor.set_strategy_engine(strategy_engine)
     monitor.set_data_dir(Path("test-data"))
     monitor.set_history_loader(load_history)
-    monitor.set_rules([{
-        "id": "matrix_macd",
-        "name": "MACD",
-        "type": "strategy",
-        "asset_type": "stock",
-        "strategy_id": "macd_golden",
-        "scope": "all",
-        "symbols": [],
-        "cooldown_seconds": 0,
-    }])
+    monitor.set_rules(
+        [
+            {
+                "id": "matrix_macd",
+                "name": "MACD",
+                "type": "strategy",
+                "asset_type": "stock",
+                "strategy_id": "macd_golden",
+                "scope": "all",
+                "symbols": [],
+                "cooldown_seconds": 0,
+            }
+        ]
+    )
 
     with patch("app.strategy.monitor._strategy_config.load_override", return_value=overrides):
         assert monitor.evaluate(current) == []
@@ -228,7 +243,7 @@ def test_quote_service_notifies_only_after_strategy_result_update():
     service = QuoteService()
     subscriber = service.subscribe()
     service.set_app_state(SimpleNamespace(monitor_engine=_MonitorWithUpdate(updated=True)))
-    service.get_enriched_today = lambda: (_quote_df(), quote_service.cn_today())
+    cast(Any, service).get_enriched_today = lambda: (_quote_df(), quote_service.cn_today())
 
     with patch.object(QuoteService, "_is_continuous_trading", return_value=True):
         service._evaluate_monitors(pl.DataFrame(), None)
@@ -240,7 +255,7 @@ def test_quote_service_skips_notification_without_strategy_result_update():
     service = QuoteService()
     subscriber = service.subscribe()
     service.set_app_state(SimpleNamespace(monitor_engine=_MonitorWithUpdate(updated=False)))
-    service.get_enriched_today = lambda: (_quote_df(), quote_service.cn_today())
+    cast(Any, service).get_enriched_today = lambda: (_quote_df(), quote_service.cn_today())
 
     with patch.object(QuoteService, "_is_continuous_trading", return_value=True):
         service._evaluate_monitors(pl.DataFrame(), None)

@@ -1,4 +1,5 @@
 """Persistent factor and strategy mining HTTP API."""
+
 from __future__ import annotations
 
 import asyncio
@@ -6,7 +7,7 @@ import json
 import math
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import date
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 import polars as pl
 from fastapi import APIRouter, Header, HTTPException, Query, Request
@@ -152,7 +153,10 @@ class MiningAutoStartRequest(BaseModel):
 
 
 def _require_mining_lock(request: Request) -> None:
-    """降级模式 (撞锁启动) 下拒绝一切挖掘启动入口, 指引到挖掘页锁状态卡。"""
+    """降级模式 (撞锁启动) 下拒绝挖掘入口, 指引到挖掘页锁状态卡。
+
+    redis 模式下 ``ensure_mining_lock`` 直接放行（flock 门控出局）。
+    """
     from app.services.mining_lock_admin import MiningLockAdminError, ensure_mining_lock
 
     try:
@@ -162,8 +166,7 @@ def _require_mining_lock(request: Request) -> None:
     if not available:
         raise HTTPException(
             status_code=409,
-            detail="挖掘锁被其他进程占用, 当前后端以降级模式运行 — "
-            "请在挖掘页点击“检查并恢复挖掘”",
+            detail="挖掘锁被其他进程占用, 当前后端以降级模式运行 — 请在挖掘页点击“检查并恢复挖掘”",
         )
 
 
@@ -180,6 +183,7 @@ def get_lock_status(request: Request) -> dict[str, Any]:
 
 @router.post("/lock/recover")
 def recover_lock(request: Request) -> dict[str, Any]:
+    """检查并恢复被其他进程占用的挖掘锁。"""
     from app.services.mining_lock_admin import MiningLockAdminError, check_and_recover
 
     try:
@@ -194,7 +198,8 @@ class MiningForceReleaseRequest(BaseModel):
 
 @router.post("/lock/force-release")
 def force_release_lock(
-    request: Request, payload: MiningForceReleaseRequest | None = None,
+    request: Request,
+    payload: MiningForceReleaseRequest | None = None,
 ) -> dict[str, Any]:
     """终止陈旧锁持有者并由当前后端接管; 不满足陈旧判定时返回拒绝原因。"""
     from app.services.mining_lock_admin import (
@@ -204,7 +209,8 @@ def force_release_lock(
 
     try:
         return force_release_for_app(
-            request.app.state, expected_pid=payload.expected_pid if payload else None,
+            request.app.state,
+            expected_pid=payload.expected_pid if payload else None,
         )
     except MiningLockAdminError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -214,9 +220,7 @@ def force_release_lock(
 def get_availability(
     request: Request,
     asset_type: Annotated[Literal["stock", "etf"], Query()] = "stock",
-    budget_profile: Annotated[
-        Literal["exploratory", "balanced", "strict"], Query()
-    ] = "balanced",
+    budget_profile: Annotated[Literal["exploratory", "balanced", "strict"], Query()] = "balanced",
     start: Annotated[date | None, Query()] = None,
     end: Annotated[date | None, Query()] = None,
 ) -> dict[str, Any]:
@@ -330,6 +334,30 @@ def cancel_run(run_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _build_auto_worker_request(
+    payload: MiningAutoStartRequest,
+    screening: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "factor_names": screening["pool"],
+        "strategy_ids": [],
+        "symbols": None,
+        "asset_type": payload.asset_type,
+        "start": payload.start.isoformat() if payload.start else None,
+        "end": payload.end.isoformat() if payload.end else None,
+        "budget_profile": payload.budget_profile,
+        "commission_pct": payload.commission_pct,
+        "stamp_tax_pct": payload.stamp_tax_pct,
+        "slippage_bps": payload.slippage_bps,
+        "correlation_threshold": payload.correlation_threshold,
+        "max_combination_factors": 4,
+        "beam_width": 12,
+        "max_finalists": MAX_FINALISTS,
+        "auto": True,
+        "auto_screening": screening,
+    }
+
+
 @router.post("/auto")
 def start_auto_run(payload: MiningAutoStartRequest, request: Request) -> dict[str, Any]:
     """自动挖掘: L1 统计筛选全量因子 → 达标池 → 复用挖掘任务管理启动嵌套样本外验证。
@@ -376,24 +404,7 @@ def start_auto_run(payload: MiningAutoStartRequest, request: Request) -> dict[st
     if not screening["pool"]:
         return {"started": False, "reason": "no_qualified_factors", "screening": screening}
 
-    worker_request = {
-        "factor_names": screening["pool"],
-        "strategy_ids": [],
-        "symbols": None,
-        "asset_type": payload.asset_type,
-        "start": payload.start.isoformat() if payload.start else None,
-        "end": payload.end.isoformat() if payload.end else None,
-        "budget_profile": payload.budget_profile,
-        "commission_pct": payload.commission_pct,
-        "stamp_tax_pct": payload.stamp_tax_pct,
-        "slippage_bps": payload.slippage_bps,
-        "correlation_threshold": payload.correlation_threshold,
-        "max_combination_factors": 4,
-        "beam_width": 12,
-        "max_finalists": MAX_FINALISTS,
-        "auto": True,
-        "auto_screening": screening,
-    }
+    worker_request = _build_auto_worker_request(payload, screening)
     try:
         fingerprint = build_data_fingerprint(
             request.app.state.repo,
@@ -565,6 +576,7 @@ def update_config(payload: MiningSchedulePatch) -> dict[str, Any]:
 
 
 def _manager(request: Request):
+    """取得挖掘任务管理器；不可用时返回 503。"""
     manager = getattr(request.app.state, "mining_manager", None)
     if manager is None:
         raise HTTPException(status_code=503, detail="mining manager is unavailable")
@@ -572,6 +584,7 @@ def _manager(request: Request):
 
 
 def _candidate_service(request: Request):
+    """取得（必要时构建并缓存）候选管理服务。"""
     service = getattr(request.app.state, "mining_candidate_service", None)
     if service is not None:
         return service
@@ -587,9 +600,7 @@ def _candidate_service(request: Request):
         CandidateStore(data_dir),
         request.app.state.strategy_engine,
         monitor_state_invalidator=(
-            monitor_engine.invalidate_strategy_state
-            if monitor_engine is not None
-            else None
+            monitor_engine.invalidate_strategy_state if monitor_engine is not None else None
         ),
     )
     request.app.state.mining_candidate_service = service
@@ -597,6 +608,7 @@ def _candidate_service(request: Request):
 
 
 def _required_manifest(store: MiningRunStore, run_id: str) -> dict[str, Any]:
+    """读取任务清单；校验失败/不存在时转换为对应 HTTP 错误。"""
     try:
         manifest = store.get(run_id)
     except MiningRunValidationError as exc:
@@ -609,6 +621,7 @@ def _required_manifest(store: MiningRunStore, run_id: str) -> dict[str, Any]:
 
 
 def _project_run(store: MiningRunStore, manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """把挖掘任务清单投影为对外视图，含统计与错误摘要。"""
     run_id = str(manifest["run_id"])
     summary = store.read_summary(run_id)
     events = store.read_events(run_id)
@@ -635,9 +648,7 @@ def _project_run(store: MiningRunStore, manifest: Mapping[str, Any]) -> dict[str
         "finished_at": manifest.get("finished_at"),
         "data_as_of": summary.get("data_as_of"),
         "progress": (
-            summary.get("progress")
-            if isinstance(summary.get("progress"), Mapping)
-            else None
+            summary.get("progress") if isinstance(summary.get("progress"), Mapping) else None
         ),
         "error": manifest.get("error"),
         "summary": compact,
@@ -645,6 +656,7 @@ def _project_run(store: MiningRunStore, manifest: Mapping[str, Any]) -> dict[str
 
 
 def _request_summary(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """投影挖掘请求参数，非有限数值统一降级为 None。"""
     request = manifest.get("request") or {}
     factor_names = request.get("factor_names")
     strategy_ids = request.get("strategy_ids")
@@ -663,6 +675,7 @@ def _request_summary(manifest: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _summary_projection(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """投影任务摘要为可序列化统计，worker 字段缺失时降级为空。"""
     worker = summary.get("worker") if isinstance(summary.get("worker"), Mapping) else {}
     return {
         "factor_count": int(summary.get("factor_count") or 0),
@@ -673,7 +686,7 @@ def _summary_projection(summary: Mapping[str, Any]) -> dict[str, Any]:
         "confidence": summary.get("confidence") or "low",
         "budget_exhausted": bool(summary.get("budget_exhausted", False)),
         "elapsed_ms": _finite(summary.get("elapsed_ms")),
-        "peak_rss_bytes": _optional_int(worker.get("peak_rss_bytes")),
+        "peak_rss_bytes": _optional_int((worker or {}).get("peak_rss_bytes")),
     }
 
 
@@ -682,6 +695,7 @@ def _read_registered_artifact(
     manifest: Mapping[str, Any],
     name: str,
 ) -> pl.DataFrame:
+    """读取任务注册的 parquet 产物，路径越界/超限均 fail-closed。"""
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, Mapping) or name not in artifacts:
         raise ValueError(f"mining artifact is not registered: {name}")
@@ -704,6 +718,7 @@ def _project_result(
     summary: Mapping[str, Any],
     frames: Mapping[str, pl.DataFrame],
 ) -> dict[str, Any]:
+    """把任务清单、摘要与各产物帧汇总为完整挖掘结果。"""
     factors = [_clean_record(row) for row in frames["factors"].to_dicts()]
     correlation = _project_correlation(frames["correlation"])
     fold_records = [_project_fold(row) for row in frames["folds"].to_dicts()]
@@ -733,16 +748,17 @@ def _project_result(
         "folds": folds,
         "telemetry": {
             "elapsed_ms": _finite(summary.get("elapsed_ms")),
-            "peak_rss_bytes": _optional_int(worker.get("peak_rss_bytes")),
+            "peak_rss_bytes": _optional_int((worker or {}).get("peak_rss_bytes")),
             "panel_scans": _optional_int(summary.get("panel_scans")),
             "matrix_bytes": _optional_int(summary.get("matrix_bytes")),
-            "serialized_result_bytes": _optional_int(worker.get("serialized_result_bytes")),
+            "serialized_result_bytes": _optional_int((worker or {}).get("serialized_result_bytes")),
             "phase_ms": _finite_mapping(summary.get("phase_ms")),
         },
     }
 
 
 def _project_correlation(frame: pl.DataFrame) -> dict[str, Any]:
+    """把因子相关性帧投影为对称矩阵与配对计数。"""
     required = {"factor_x", "factor_y", "rho", "pair_count"}
     if not required.issubset(frame.columns):
         raise ValueError("correlation artifact schema is invalid")
@@ -759,6 +775,7 @@ def _project_correlation(frame: pl.DataFrame) -> dict[str, Any]:
 
 
 def _project_fold(row: Mapping[str, Any]) -> dict[str, Any]:
+    """投影单条 fold 记录，展开因子 JSON 与归因字段。"""
     projected = _clean_record(row)
     projected["selected_factors"] = _json_string_list(row.get("selected_factors_json"))
     projected["candidate_signature"] = row.get("candidate_signature")
@@ -768,12 +785,24 @@ def _project_fold(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _public_fold(row: Mapping[str, Any]) -> dict[str, Any]:
+    """只保留可对外展示的 fold 字段。"""
     return {
         key: row.get(key)
         for key in (
-            "fold", "label", "train_start", "train_end", "test_start", "test_end",
-            "selected_factors", "total_return", "sharpe", "max_drawdown", "n_trades",
-            "skipped", "reason", "evaluation_kind",
+            "fold",
+            "label",
+            "train_start",
+            "train_end",
+            "test_start",
+            "test_end",
+            "selected_factors",
+            "total_return",
+            "sharpe",
+            "max_drawdown",
+            "n_trades",
+            "skipped",
+            "reason",
+            "evaluation_kind",
         )
     }
 
@@ -782,6 +811,7 @@ def _project_candidates(
     frame: pl.DataFrame,
     folds: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
+    """投影候选清单，绑定各自 fold 并计算准入门禁。"""
     required = {"signature", "name", "kind", "factor_names_json", "confidence"}
     if not required.issubset(frame.columns):
         raise ValueError("candidates artifact schema is invalid")
@@ -795,8 +825,7 @@ def _project_candidates(
         candidate["folds"] = [
             _public_fold(fold)
             for fold in folds
-            if fold["regime_state"] == "overall"
-            and fold["candidate_signature"] == signature
+            if fold["regime_state"] == "overall" and fold["candidate_signature"] == signature
         ]
         gate = evaluate_candidate_gate(
             confidence=row.get("confidence"),
@@ -813,7 +842,9 @@ def _project_candidates(
         candidates.append(candidate)
     candidates.sort(
         key=lambda item: (
-            -(item.get("oos_sharpe") if item.get("oos_sharpe") is not None else -math.inf),
+            -cast(
+                float, item.get("oos_sharpe") if item.get("oos_sharpe") is not None else -math.inf
+            ),
             str(item["signature"]),
         )
     )
@@ -824,6 +855,7 @@ def _project_regimes(
     folds: Sequence[Mapping[str, Any]],
     signature: str | None,
 ) -> list[dict[str, Any]]:
+    """按市场环境分组汇总 fold 的收益与风险指标。"""
     labels = {"overall": "整体", "strong": "强势", "range": "震荡", "weak": "弱势"}
     result = []
     for state in ("overall", "strong", "range", "weak"):
@@ -834,14 +866,16 @@ def _project_regimes(
             and (signature is None or row["candidate_signature"] == signature)
             and not row.get("skipped")
         ]
-        result.append({
-            "state": state,
-            "label": labels[state],
-            "n_dates": sum(int(row.get("n_dates") or 0) for row in rows),
-            "total_return": _mean(row.get("total_return") for row in rows),
-            "sharpe": _mean(row.get("sharpe") for row in rows),
-            "max_drawdown": _minimum(row.get("max_drawdown") for row in rows),
-        })
+        result.append(
+            {
+                "state": state,
+                "label": labels[state],
+                "n_dates": sum(int(row.get("n_dates") or 0) for row in rows),
+                "total_return": _mean(row.get("total_return") for row in rows),
+                "sharpe": _mean(row.get("sharpe") for row in rows),
+                "max_drawdown": _minimum(row.get("max_drawdown") for row in rows),
+            }
+        )
     return result
 
 
@@ -850,6 +884,7 @@ def _validate_selected_strategies(
     strategy_ids: Sequence[str],
     asset_type: str,
 ) -> None:
+    """校验选中策略可用于挖掘：非研究模板、矩阵原生、日线且资产类型匹配。"""
     for strategy_id in strategy_ids:
         strategy = strategy_engine.get(strategy_id)
         if strategy.meta.get("research_only"):
@@ -863,6 +898,7 @@ def _validate_selected_strategies(
 
 
 def _event_cursor(value: str | None) -> int:
+    """解析 SSE Last-Event-ID，非法值返回 400。"""
     if value in (None, ""):
         return 0
     try:
@@ -875,6 +911,7 @@ def _event_cursor(value: str | None) -> int:
 
 
 def _json_string_list(value: Any) -> list[str]:
+    """解析产物字段中的 JSON 字符串数组，非字符串返回空。"""
     if not isinstance(value, str):
         return []
     parsed = json.loads(value)
@@ -884,6 +921,7 @@ def _json_string_list(value: Any) -> list[str]:
 
 
 def _clean_record(row: Mapping[str, Any]) -> dict[str, Any]:
+    """清洗单条记录：键转字符串，浮点非有限值转 None。"""
     return {
         str(key): (_finite(value) if isinstance(value, float) else value)
         for key, value in row.items()
@@ -891,6 +929,10 @@ def _clean_record(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _finite(value: Any) -> float | None:
+    """转有限浮点；None/NaN/Inf/非数值统一返回 None。
+
+    保证进入响应 JSON 的数值不会是 NaN/Inf 这类不可序列化值。
+    """
     if value is None:
         return None
     try:
@@ -901,25 +943,27 @@ def _finite(value: Any) -> float | None:
 
 
 def _optional_int(value: Any) -> int | None:
+    """转可选整数：先走 _finite 再取整。"""
     number = _finite(value)
     return int(number) if number is not None else None
 
 
 def _finite_mapping(value: Any) -> dict[str, float] | None:
+    """投影为有限浮点字典，丢弃非数值项。"""
     if not isinstance(value, Mapping):
         return None
     return {
-        str(key): number
-        for key, item in value.items()
-        if (number := _finite(item)) is not None
+        str(key): number for key, item in value.items() if (number := _finite(item)) is not None
     }
 
 
 def _mean(values: Sequence[Any] | Any) -> float | None:
+    """对有限数值求均值，全为无效值时返回 None。"""
     finite = [number for value in values if (number := _finite(value)) is not None]
     return sum(finite) / len(finite) if finite else None
 
 
 def _minimum(values: Sequence[Any] | Any) -> float | None:
+    """取有限数值中的最小值（如最大回撤），全无效时返回 None。"""
     finite = [number for value in values if (number := _finite(value)) is not None]
     return min(finite) if finite else None

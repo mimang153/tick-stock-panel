@@ -16,6 +16,7 @@ tool_calls 分片, 流结束时统一返回本轮结果, 由 chat_service 决定
   上游提供了思考内容 (DeepSeek 思考模式的 reasoning_content) 时另带该键,
   包括最终回答轮; 下一轮必须随 assistant 消息原样回传。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -86,31 +87,75 @@ def _client(timeout: float) -> AsyncOpenAI:
     )
 
 
-async def stream_openai_round(
-    messages: Sequence[dict[str, Any]],
-    tools: Sequence[dict[str, Any]],
-    *,
-    temperature: float | None = 0.3,
-    timeout: float = 240.0,
-) -> AsyncIterator[dict[str, Any]]:
-    """执行一轮流式补全: yield 文本 delta, 最后 yield 一个 round_end 事件。"""
-    if is_responses_protocol():
-        # Responses 协议走平行实现, 事件输出与本函数同构, chat_service 无感。
-        async for event in ai_responses.stream_round(
-            messages, tools, temperature=temperature, timeout=timeout,
-        ):
-            yield event
+def _accumulate_chat_tool_calls(
+    delta, calls: dict[int, dict[str, Any]], ordered: list[dict[str, Any]]
+) -> None:
+    for tc in getattr(delta, "tool_calls", None) or []:
+        idx = int(getattr(tc, "index", 0) or 0)
+        tc_id = str(getattr(tc, "id", None) or "")
+        entry = calls.get(idx)
+        if entry is None or (tc_id and entry["id"] and tc_id != entry["id"]):
+            entry = {"id": "", "name": "", "arguments": ""}
+            calls[idx] = entry
+            ordered.append(entry)
+        if tc_id:
+            entry["id"] = tc_id
+        extra = getattr(tc, "extra_content", None)
+        if extra and "extra_content" not in entry:
+            entry["extra_content"] = extra
+        fn = getattr(tc, "function", None)
+        if fn is not None:
+            if getattr(fn, "name", None):
+                entry["name"] += str(fn.name)
+            if getattr(fn, "arguments", None):
+                entry["arguments"] += str(fn.arguments)
+
+
+def _chat_round_end(
+    calls: dict[int, dict[str, Any]],
+    ordered: list[dict[str, Any]],
+    finish_reason: str,
+    content_seen: bool,
+    reasoning_seen: bool,
+    reasoning_field_seen: bool,
+    reasoning_parts: list[str],
+) -> dict[str, Any]:
+    end: dict[str, Any] = {
+        "type": "round_end",
+        "tool_calls": ordered if calls else [],
+        "finish_reason": finish_reason,
+    }
+    if reasoning_field_seen:
+        end["reasoning_content"] = "".join(reasoning_parts)
+    if calls:
+        return end
+    if finish_reason in _LENGTH_FINISH_REASONS:
+        raise RuntimeError("AI 输出达到长度上限, 内容不完整; 请提高输出 Token 上限后重试")
+    if not content_seen:
+        if reasoning_seen:
+            raise RuntimeError("AI 仅返回推理内容, 未生成正文; 请检查模型配置或改用非推理模型")
+        raise RuntimeError("AI 服务未返回正文内容; 请检查模型配置或稍后重试")
+    return end
+
+
+async def _close_stream(stream) -> None:
+    """兼容同步/异步 close，确保流资源被释放。"""
+    close = getattr(stream, "close", None)
+    if close is None:
         return
+    if inspect.iscoroutinefunction(close):
+        await close()
+    else:
+        await asyncio.to_thread(close)
 
-    client = _client(timeout)
-    model = current_ai_model()
-    kwargs = _build_kwargs(temperature)
-    kwargs["tools"] = list(tools)
-    req_messages = prepare_tool_messages(
-        messages, model=model,
-        base_url=secrets_store.get_ai_config("ai_base_url", settings.ai_base_url),
-    )
 
+async def _stream_chat_completion(
+    client: AsyncOpenAI,
+    model: str,
+    req_messages: Sequence[dict[str, Any]],
+    kwargs: dict[str, Any],
+) -> AsyncIterator[dict[str, Any]]:
+    """执行一次 Chat Completions 流并归一化产出事件。"""
     while True:
         try:
             stream = await client.chat.completions.create(
@@ -130,7 +175,6 @@ async def stream_openai_round(
     content_seen = False
     reasoning_seen = False
     reasoning_parts: list[str] = []
-    # 上游显式返回 reasoning_content (哪怕是空串) 时也要在 round_end 里回传该字段。
     reasoning_field_seen = False
     finish_reason = ""
     calls: dict[int, dict[str, Any]] = {}
@@ -153,65 +197,54 @@ async def stream_openai_round(
         if reasoning:
             reasoning_seen = True
             reasoning_parts.append(str(reasoning))
-
         text = getattr(delta, "content", None)
         if text:
             content_seen = True
             yield {"type": "text", "delta": text}
+        _accumulate_chat_tool_calls(delta, calls, ordered)
 
-        for tc in getattr(delta, "tool_calls", None) or []:
-            idx = int(getattr(tc, "index", 0) or 0)
-            tc_id = str(getattr(tc, "id", None) or "")
-            entry = calls.get(idx)
-            # Gemini 的兼容接口会把并行调用逐个整条下发且 index 相同(或缺省),
-            # 只靠 index 累积会把两个调用的 name/arguments 拼成一个; 同一 index
-            # 上出现不同的 id 即视为新的调用。
-            if entry is None or (tc_id and entry["id"] and tc_id != entry["id"]):
-                entry = {"id": "", "name": "", "arguments": ""}
-                calls[idx] = entry
-                ordered.append(entry)
-            if tc_id:
-                entry["id"] = tc_id
-            # Gemini 3 在 extra_content.google.thought_signature 里返回思考签名,
-            # 下一轮回传历史时缺了它会被 400 拒绝。
-            extra = getattr(tc, "extra_content", None)
-            if extra and "extra_content" not in entry:
-                entry["extra_content"] = extra
-            fn = getattr(tc, "function", None)
-            if fn is not None:
-                if getattr(fn, "name", None):
-                    entry["name"] += str(fn.name)
-                if getattr(fn, "arguments", None):
-                    entry["arguments"] += str(fn.arguments)
+    await _close_stream(stream)
 
-    # 让 SDK 流对象尽快释放(部分兼容网关要求显式 close); SDK 2.x 的
-    # AsyncStream.close 是协程, 必须区分同步/异步两种签名。
-    close = getattr(stream, "close", None)
-    if close is not None:
-        if inspect.iscoroutinefunction(close):
-            await close()
-        else:
-            await asyncio.to_thread(close)
+    end = _chat_round_end(
+        calls,
+        ordered,
+        finish_reason,
+        content_seen,
+        reasoning_seen,
+        reasoning_field_seen,
+        reasoning_parts,
+    )
+    yield end
 
-    if calls:
-        end: dict[str, Any] = {
-            "type": "round_end",
-            "tool_calls": ordered,
-            "finish_reason": finish_reason,
-        }
-        # DeepSeek 思考模式: 带 tools 的后续请求缺了这一轮的 reasoning_content 会被 400。
-        if reasoning_field_seen:
-            end["reasoning_content"] = "".join(reasoning_parts)
-        yield end
+
+async def stream_openai_round(
+    messages: Sequence[dict[str, Any]],
+    tools: Sequence[dict[str, Any]],
+    *,
+    temperature: float | None = 0.3,
+    timeout: float = 240.0,
+) -> AsyncIterator[dict[str, Any]]:
+    """执行一轮流式补全: yield 文本 delta, 最后 yield 一个 round_end 事件。"""
+    if is_responses_protocol():
+        # Responses 协议走平行实现, 事件输出与本函数同构, chat_service 无感。
+        async for event in ai_responses.stream_round(
+            messages,
+            tools,
+            temperature=temperature,
+            timeout=timeout,
+        ):
+            yield event
         return
 
-    if finish_reason in _LENGTH_FINISH_REASONS:
-        raise RuntimeError("AI 输出达到长度上限, 内容不完整; 请提高输出 Token 上限后重试")
-    if not content_seen:
-        if reasoning_seen:
-            raise RuntimeError("AI 仅返回推理内容, 未生成正文; 请检查模型配置或改用非推理模型")
-        raise RuntimeError("AI 服务未返回正文内容; 请检查模型配置或稍后重试")
-    end = {"type": "round_end", "tool_calls": [], "finish_reason": finish_reason}
-    if reasoning_field_seen:
-        end["reasoning_content"] = "".join(reasoning_parts)
-    yield end
+    client = _client(timeout)
+    model = current_ai_model()
+    kwargs = _build_kwargs(temperature)
+    kwargs["tools"] = list(tools)
+    req_messages = prepare_tool_messages(
+        messages,
+        model=model,
+        base_url=secrets_store.get_ai_config("ai_base_url", settings.ai_base_url),
+    )
+
+    async for event in _stream_chat_completion(client, model, req_messages, kwargs):
+        yield event

@@ -1,4 +1,5 @@
 """preferences mtime 缓存测试 — 读盘去重, 且外部修改/自身写入后立即可见。"""
+
 from __future__ import annotations
 
 import json
@@ -7,6 +8,12 @@ import os
 import pytest
 
 from app.services import preferences
+
+
+def _record(result, log, *items):
+    """记录本次调用参数后返回既定结果(替代 append(x) or result 惯用法)。"""
+    log.extend(items)
+    return result
 
 
 @pytest.fixture(autouse=True)
@@ -99,8 +106,8 @@ def test_mining_schedule_invalid_stored_values_fail_closed(_isolated):
 
 
 def test_mining_schedule_setter_saves_group_once(monkeypatch):
-    calls = []
-    monkeypatch.setattr(preferences, "save", lambda updates: calls.append(updates) or updates)
+    calls: list = []
+    monkeypatch.setattr(preferences, "save", lambda updates: _record(updates, calls, updates))
 
     result = preferences.set_mining_schedule(True, 2, "strict")
 
@@ -124,23 +131,34 @@ def test_mining_schedule_setter_rejects_invalid_profile():
 
 
 def test_external_push_channel_whitelists_include_custom_and_email(_isolated):
-    assert preferences.set_webhook_default_channels([
-        "custom", "email", "custom", "unsupported",
-    ]) == ["custom", "email"]
-    assert preferences.set_review_push_channels([
-        "email", "wecom", "unsupported",
-    ]) == ["email", "wecom"]
+    assert preferences.set_webhook_default_channels(
+        [
+            "custom",
+            "email",
+            "custom",
+            "unsupported",
+        ]
+    ) == ["custom", "email"]
+    assert preferences.set_review_push_channels(
+        [
+            "email",
+            "wecom",
+            "unsupported",
+        ]
+    ) == ["email", "wecom"]
 
 
 def test_email_smtp_config_falls_back_from_malformed_stored_values(_isolated):
-    preferences.save({
-        "email_smtp_config": {
-            "host": " smtp.example.com ",
-            "port": "invalid",
-            "security": "invalid",
-            "to_addresses": "alerts@example.com",
-        },
-    })
+    preferences.save(
+        {
+            "email_smtp_config": {
+                "host": " smtp.example.com ",
+                "port": "invalid",
+                "security": "invalid",
+                "to_addresses": "alerts@example.com",
+            },
+        }
+    )
 
     assert preferences.get_email_smtp_config() == {
         "host": "smtp.example.com",

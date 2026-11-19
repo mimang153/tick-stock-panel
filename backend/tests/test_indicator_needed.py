@@ -13,19 +13,21 @@ def _bars(n: int = 90) -> pl.DataFrame:
     for symbol, offset in (("600000", 0.0), ("300001", 2.0)):
         for i in range(n):
             close = 10.0 + offset + i * 0.03 + ((i % 7) - 3) * 0.04
-            rows.append({
-                "symbol": symbol,
-                "date": date(2024, 1, 1) + timedelta(days=i),
-                "open": close - 0.02,
-                "high": close + 0.10,
-                "low": close - 0.10,
-                "close": close,
-                "volume": 1000 + i * 10,
-                "amount": close * (1000 + i * 10),
-                "raw_close": close,
-                "raw_high": close + 0.10,
-                "raw_low": close - 0.10,
-            })
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "date": date(2024, 1, 1) + timedelta(days=i),
+                    "open": close - 0.02,
+                    "high": close + 0.10,
+                    "low": close - 0.10,
+                    "close": close,
+                    "volume": 1000 + i * 10,
+                    "amount": close * (1000 + i * 10),
+                    "raw_close": close,
+                    "raw_high": close + 0.10,
+                    "raw_low": close - 0.10,
+                }
+            )
     return pl.DataFrame(rows)
 
 
@@ -33,6 +35,7 @@ def _bars(n: int = 90) -> pl.DataFrame:
 def _migrated_signal_definitions(monkeypatch):
     """注入迁移自内置的信号定义 (信号列定义驱动, 不依赖运行目录)。"""
     from tests.signal_seeds import install_pipeline_caches
+
     install_pipeline_caches(monkeypatch)
 
 
@@ -69,11 +72,13 @@ def test_compute_signals_empty_needed_adds_no_signals():
 
 def test_compute_limit_signals_subset_matches_full_and_prunes_other_outputs():
     bars = compute_indicators(_bars(), needed={"change_pct"})
-    instruments = pl.DataFrame({
-        "symbol": ["600000", "300001"],
-        "name": ["浦发银行", "测试股份"],
-        "float_shares": [1_000_000_000.0, 500_000_000.0],
-    })
+    instruments = pl.DataFrame(
+        {
+            "symbol": ["600000", "300001"],
+            "name": ["浦发银行", "测试股份"],
+            "float_shares": [1_000_000_000.0, 500_000_000.0],
+        }
+    )
     full = compute_limit_signals(bars, instruments)
     subset = compute_limit_signals(bars, instruments, needed={"signal_limit_up"})
 

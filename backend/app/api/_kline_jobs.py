@@ -309,8 +309,13 @@ async def _run_rebuild_enriched_job(repo, job_id) -> None:
             job_id,
             lambda: run_pipeline(on_batch_done=_batch_progress),
         )
-        enriched_dir = repo.store.data_dir / "kline_daily_enriched"
-        enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_dir.exists() else 0
+        # 在线路径以 CK 日期列表为准；本地 glob 仅用于无 storage 的离线兼容。
+        storage = getattr(repo, "storage", None)
+        if storage is not None:
+            enriched_days = len(storage.list_daily_dates("kline_daily_enriched"))
+        else:
+            enriched_dir = repo.store.data_dir / "kline_daily_enriched"
+            enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_dir.exists() else 0
 
         def _reload_memory_cache() -> None:
             repo.clear_cache()

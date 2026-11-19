@@ -7,10 +7,12 @@
 验证两种模式(position/full)和两种合并模式(union/intersect)的关键路径。
 合成数据用上涨趋势制造金叉信号。
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import polars as pl
@@ -40,11 +42,20 @@ def _synthetic_panel() -> pl.DataFrame:
             high = max(open_p, close) + np.random.uniform(0.1, 0.5)
             low = min(open_p, close) - np.random.uniform(0.1, 0.5)
             vol = float(np.random.uniform(1e6, 5e6))
-            rows.append({
-                "symbol": sym, "date": d, "open": open_p, "high": high,
-                "low": low, "close": close, "volume": vol,
-                "raw_close": close, "raw_high": high, "raw_low": low,
-            })
+            rows.append(
+                {
+                    "symbol": sym,
+                    "date": d,
+                    "open": open_p,
+                    "high": high,
+                    "low": low,
+                    "close": close,
+                    "volume": vol,
+                    "raw_close": close,
+                    "raw_high": high,
+                    "raw_low": low,
+                }
+            )
     return pl.DataFrame(rows).sort(["symbol", "date"])
 
 
@@ -55,7 +66,7 @@ class _RepoStub:
 
 def _make_service(panel: pl.DataFrame, builtin: Path, comp_dir: Path):
     """构造 StrategyBacktestService, 用 monkeypatch 的数据加载。"""
-    bt_engine = BacktestEngine(_RepoStub())
+    bt_engine = BacktestEngine(cast(Any, _RepoStub()))
 
     def _load_mdm(self, symbols, start, end, feature_plan, asset_type="stock", **kw):
         df = panel.filter((pl.col("date") >= start) & (pl.col("date") <= end))
@@ -64,7 +75,9 @@ def _make_service(panel: pl.DataFrame, builtin: Path, comp_dir: Path):
         cols = [c for c in sorted(set(feature_plan.base_columns)) if c in df.columns]
         return build_market_data_matrix(df.select(cols), field_columns=feature_plan.matrix_columns)
 
-    bt_engine.load_market_data_matrix_for_backtest = _load_mdm.__get__(bt_engine)
+    object.__setattr__(
+        bt_engine, "load_market_data_matrix_for_backtest", _load_mdm.__get__(bt_engine)
+    )
     strategy_engine = StrategyEngine(strategy_dirs=[builtin, comp_dir])
     return StrategyBacktestService(bt_engine, strategy_engine)
 
@@ -72,9 +85,7 @@ def _make_service(panel: pl.DataFrame, builtin: Path, comp_dir: Path):
 def _write_composite(
     comp_dir: Path, sid: str, children: list, *, merge_mode="union", min_confirm=0
 ):
-    children_repr = ", ".join(
-        f'{{"strategy_id": "{c}", "weight": {w}}}' for c, w in children
-    )
+    children_repr = ", ".join(f'{{"strategy_id": "{c}", "weight": {w}}}' for c, w in children)
     opts = '["union", "intersect"]'
     params_block = (
         f'{{"id": "merge_mode", "type": "select", '
@@ -105,9 +116,13 @@ def test_composite_backtest_position_mode(composite_setup):
     """position 模式: composite 回测产出交易、净值曲线和归因。"""
     svc, _ = composite_setup
     cfg = StrategyBacktestConfig(
-        strategy_id="custom_e2e_blend", symbols=None,
-        start=date(2025, 2, 1), end=date(2025, 5, 1),
-        mode="position", max_positions=5, holding_days=10,
+        strategy_id="custom_e2e_blend",
+        symbols=None,
+        start=date(2025, 2, 1),
+        end=date(2025, 5, 1),
+        mode="position",
+        max_positions=5,
+        holding_days=10,
         overrides={"basic_filter": {"enabled": False}},
     )
     result = svc.run(cfg)
@@ -124,9 +139,12 @@ def test_composite_backtest_full_mode(composite_setup):
     """full 模式(独立候选): composite 回测能跑通。"""
     svc, _ = composite_setup
     cfg = StrategyBacktestConfig(
-        strategy_id="custom_e2e_blend", symbols=None,
-        start=date(2025, 2, 1), end=date(2025, 5, 1),
-        mode="full", holding_days=10,
+        strategy_id="custom_e2e_blend",
+        symbols=None,
+        start=date(2025, 2, 1),
+        end=date(2025, 5, 1),
+        mode="full",
+        holding_days=10,
         overrides={"basic_filter": {"enabled": False}},
     )
     result = svc.run(cfg)
@@ -138,15 +156,21 @@ def test_composite_backtest_intersect_min1_equals_union(composite_setup):
     """intersect min_confirm=1 应等价于 union(都产出交易)。"""
     svc, comp_dir = composite_setup
     _write_composite(
-        comp_dir, "custom_e2e_blend",
+        comp_dir,
+        "custom_e2e_blend",
         [("ma_golden_cross", 0.5), ("macd_golden", 0.5)],
-        merge_mode="intersect", min_confirm=1,
+        merge_mode="intersect",
+        min_confirm=1,
     )
     svc.strategy_engine.reload()
     cfg = StrategyBacktestConfig(
-        strategy_id="custom_e2e_blend", symbols=None,
-        start=date(2025, 2, 1), end=date(2025, 5, 1),
-        mode="position", max_positions=5, holding_days=10,
+        strategy_id="custom_e2e_blend",
+        symbols=None,
+        start=date(2025, 2, 1),
+        end=date(2025, 5, 1),
+        mode="position",
+        max_positions=5,
+        holding_days=10,
         overrides={"basic_filter": {"enabled": False}},
     )
     result = svc.run(cfg)

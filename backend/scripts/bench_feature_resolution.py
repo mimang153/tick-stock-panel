@@ -11,6 +11,7 @@
   cd backend && uv run python scripts/bench_feature_resolution.py [strategy_id ...]
   不传 id 时扫描全部 filter_history 策略。--json PATH 另存结果。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -64,14 +65,14 @@ def main() -> None:
 
     engine = _build_engine()
     resolver = StrategyDependencyResolver()
-    strategies = [
-        s for s in engine.list_strategies_full() if s.filter_history_fn is not None
-    ] if hasattr(engine, "list_strategies_full") else []
+    strategies = (
+        [s for s in engine.list_strategies_full() if s.filter_history_fn is not None]
+        if hasattr(engine, "list_strategies_full")
+        else []
+    )
     if not strategies:
         # list 接口名差异兜底: 直接遍历注册表
-        strategies = [
-            s for s in engine._strategies.values() if s.filter_history_fn is not None
-        ]
+        strategies = [s for s in engine._strategies.values() if s.filter_history_fn is not None]
     if args.ids:
         strategies = [s for s in strategies if s.meta.get("id") in set(args.ids)]
 
@@ -83,21 +84,23 @@ def main() -> None:
         inferred_ms, inferred_plan = _resolve_quiet(resolver, s, s.required_features)
         legacy_w = len(legacy_plan.indicator_columns)
         inferred_w = len(inferred_plan.indicator_columns)
-        rows.append({
-            "strategy": sid,
-            "declared_required_features": declared,
-            "legacy": {
-                "resolve_ms": round(legacy_ms, 2),
-                "indicator_cols": legacy_w,
-                "base_cols": len(legacy_plan.base_columns),
-            },
-            "inferred": {
-                "resolve_ms": round(inferred_ms, 2),
-                "indicator_cols": inferred_w,
-                "base_cols": len(inferred_plan.base_columns),
-            },
-            "indicator_width_ratio": round(legacy_w / inferred_w, 2) if inferred_w else None,
-        })
+        rows.append(
+            {
+                "strategy": sid,
+                "declared_required_features": declared,
+                "legacy": {
+                    "resolve_ms": round(legacy_ms, 2),
+                    "indicator_cols": legacy_w,
+                    "base_cols": len(legacy_plan.base_columns),
+                },
+                "inferred": {
+                    "resolve_ms": round(inferred_ms, 2),
+                    "indicator_cols": inferred_w,
+                    "base_cols": len(inferred_plan.base_columns),
+                },
+                "indicator_width_ratio": round(legacy_w / inferred_w, 2) if inferred_w else None,
+            }
+        )
 
     print(f"{'strategy':36} {'依赖':4} {'legacy列宽':>9} {'当前列宽':>8} {'宽度比':>6}")
     for r in rows:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -26,17 +27,19 @@ STRATEGY_PATH = (
 
 
 def _market():
-    panel = pl.DataFrame({
-        "symbol": ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"] * 2,
-        "date": [date(2024, 1, 2)] * 4 + [date(2024, 1, 3)] * 4,
-        "open": [10.0] * 8,
-        "high": [10.5] * 8,
-        "low": [9.5] * 8,
-        "close": [10.0] * 8,
-        "volume": [1_000.0] * 8,
-        "amount": [1.0, 2.0, 3.0, 4.0, 4.0, 3.0, 2.0, 1.0],
-        "turnover_rate": [4.0, 3.0, 2.0, 1.0, 1.0, 2.0, 3.0, 4.0],
-    })
+    panel = pl.DataFrame(
+        {
+            "symbol": ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"] * 2,
+            "date": [date(2024, 1, 2)] * 4 + [date(2024, 1, 3)] * 4,
+            "open": [10.0] * 8,
+            "high": [10.5] * 8,
+            "low": [9.5] * 8,
+            "close": [10.0] * 8,
+            "volume": [1_000.0] * 8,
+            "amount": [1.0, 2.0, 3.0, 4.0, 4.0, 3.0, 2.0, 1.0],
+            "turnover_rate": [4.0, 3.0, 2.0, 1.0, 1.0, 2.0, 3.0, 4.0],
+        }
+    )
     return build_market_data_matrix(
         panel,
         field_columns={"amount", "turnover_rate"},
@@ -61,15 +64,13 @@ def test_strategy_loads_as_builtin_matrix_native_and_grid_params_validate():
     )
     assert len(combos) == 4
     assert strategy.matrix_strategy.required_warmup_bars({}) == 60
-    assert {"amount", "turnover_rate", "close"}.issubset(
-        strategy.matrix_strategy.required_fields()
-    )
+    assert {"amount", "turnover_rate", "close"}.issubset(strategy.matrix_strategy.required_fields())
 
 
 def test_research_template_is_hidden_from_ordinary_strategy_apis(tmp_path):
     engine = StrategyEngine(strategy_dirs=[STRATEGY_PATH.parent])
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
-    request = SimpleNamespace(
+    request: Any = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(strategy_engine=engine, repo=repo))
     )
 
@@ -80,12 +81,8 @@ def test_research_template_is_hidden_from_ordinary_strategy_apis(tmp_path):
     assert "factor_rank_research" in {
         item["id"] for item in engine.list_strategies(include_research=True)
     }
-    assert "factor_rank_research" not in {
-        item["id"] for item in screener_payload["presets"]
-    }
-    assert "factor_rank_research" not in {
-        item["id"] for item in strategy_payload["strategies"]
-    }
+    assert "factor_rank_research" not in {item["id"] for item in screener_payload["presets"]}
+    assert "factor_rank_research" not in {item["id"] for item in strategy_payload["strategies"]}
 
     with pytest.raises(HTTPException) as screener_error:
         screener_api.run_preset(
@@ -125,7 +122,7 @@ def test_dependency_resolver_includes_parameter_scoring_fields():
 
 
 def test_strategy_uses_controlled_scoring_directions_thresholds_and_top_rank():
-    strategy = StrategyEngine._load_file(STRATEGY_PATH).matrix_strategy
+    strategy: Any = StrategyEngine._load_file(STRATEGY_PATH).matrix_strategy
     market = _market()
 
     signals = strategy.compute_signals(
@@ -149,7 +146,7 @@ def test_strategy_uses_controlled_scoring_directions_thresholds_and_top_rank():
 
 
 def test_strategy_direction_changes_score_without_dynamic_formula_execution():
-    strategy = StrategyEngine._load_file(STRATEGY_PATH).matrix_strategy
+    strategy: Any = StrategyEngine._load_file(STRATEGY_PATH).matrix_strategy
     market = _market()
 
     high = strategy.compute_signals(
@@ -212,7 +209,7 @@ def test_strategy_direction_changes_score_without_dynamic_formula_execution():
     ],
 )
 def test_strategy_rejects_uncontrolled_or_invalid_research_params(params, message):
-    strategy = StrategyEngine._load_file(STRATEGY_PATH).matrix_strategy
+    strategy: Any = StrategyEngine._load_file(STRATEGY_PATH).matrix_strategy
 
     with pytest.raises(ValueError, match=message):
         strategy.compute_signals(_market(), params)

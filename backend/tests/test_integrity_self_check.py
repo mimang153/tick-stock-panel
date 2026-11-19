@@ -139,13 +139,18 @@ def test_halted_rows_allow_zero_prices_but_reject_nonfinite_values(tmp_path, clo
     assert [i.kind for i in issues] == expected
 
 
-def test_report_persists_and_repair_rechecks_with_backup(tmp_path, monkeypatch, ck_runtime):
+def test_report_persists_and_repair_rechecks_with_snapshot(tmp_path, monkeypatch, ck_runtime):
+    import json
+
     from app.services import integrity_check, kline_sync
     from app.tickflow.repository import DataStore, KlineRepository
 
     monkeypatch.setattr(integrity_check, "cn_today", lambda: TODAY)
-    path = write_day(tmp_path, date(2026, 10, 29))
+    day = date(2026, 10, 29)
+    path = write_day(tmp_path, day)
     original = pl.read_parquet(path)
+    corrupted = original.with_columns(pl.lit(-1.0).alias("close"))
+    ck_runtime.write_daily("kline_daily", corrupted)
     path.write_bytes(b"broken original")
     repo = KlineRepository(DataStore(tmp_path), storage=ck_runtime)
     monkeypatch.setattr(repo, "get_instruments_asset", lambda asset: original.select("symbol"))
@@ -162,10 +167,21 @@ def test_report_persists_and_repair_rechecks_with_backup(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(kline_sync, "iter_daily_frames", fetch)
     repaired = integrity_check.run_repair(repo, object(), report["id"])
-    assert calls == [(date(2026, 10, 29), "stock")]
+    assert calls == [(day, "stock")]
     assert repaired["issues"] == [] and repaired["status"] == "clean"
-    backups = list((tmp_path / "integrity_backups").rglob("*.parquet"))
-    assert len(backups) == 1 and backups[0].read_bytes() == b"broken original"
+    repaired_rows = ck_runtime.read_daily("kline_daily", start=day, end=day)
+    assert repaired_rows.equals(
+        original.select(["symbol", "date", "open", "high", "low", "close", "volume", "amount"])
+    )
+    audit = ck_runtime.client.query(
+        f"SELECT DISTINCT repair_id FROM {ck_runtime.client.table('ck_repair_audit')} "
+        "WHERE dataset = {table:String} AND day = {day:Date} ORDER BY repair_id",
+        {"table": "kline_daily", "day": day},
+    )
+    snapshot = ck_runtime.read_repair_snapshot(audit["repair_id"].to_list()[-1])
+    assert snapshot.height == 1
+    assert json.loads(snapshot["payload_json"][0])["close"] == -1.0
+    assert not (tmp_path / "integrity_backups").exists()
 
 
 @pytest.mark.parametrize("cancel", [False, True])

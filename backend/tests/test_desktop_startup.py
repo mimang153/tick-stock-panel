@@ -5,6 +5,7 @@
 "启动超时", 真因不可见。修复 = 预检秒失败 + 等待循环感知后端线程退出 +
 失败页透传原因。
 """
+
 from __future__ import annotations
 
 import errno
@@ -13,6 +14,7 @@ import sys
 import threading
 import time
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -24,6 +26,12 @@ from app.desktop import (
     _wait_for_server,
 )
 from app.services.mining_process_lock import MiningProcessLock
+
+
+def _record(result, log, *items):
+    """记录本次调用参数后返回既定结果(替代 append(x) or result 惯用法)。"""
+    log.extend(items)
+    return result
 
 
 @pytest.fixture()
@@ -42,7 +50,7 @@ def test_single_instance_ignores_unlocked_file_with_live_pid(data_dir):
 @pytest.mark.parametrize("lock_error", [None, errno.EACCES, errno.EIO])
 def test_single_instance_windows_lock_errors(data_dir, monkeypatch, lock_error):
     """锁冲突才作为已有实例处理, 磁盘/系统错误须交给启动错误提示。"""
-    opened = []
+    opened: list = []
 
     def lock(fd, mode, count):
         assert os.get_inheritable(fd) is False
@@ -69,16 +77,16 @@ def test_single_instance_windows_lock_errors(data_dir, monkeypatch, lock_error):
 def test_single_instance_rejects_other_process_then_allows_after_release(data_dir):
     import subprocess
 
-    script = (
-        "from app.desktop import _acquire_single_instance; "
-        "print(_acquire_single_instance())"
-    )
+    script = "from app.desktop import _acquire_single_instance; print(_acquire_single_instance())"
 
     def acquire_in_child():
         result = subprocess.run(
             [sys.executable, "-c", script],
             env={**os.environ, "DATA_DIR": str(data_dir)},
-            capture_output=True, text=True, timeout=15, check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
         )
         return result.stdout.strip()
 
@@ -91,6 +99,7 @@ def test_single_instance_rejects_other_process_then_allows_after_release(data_di
 
 
 # ---------- _failed_html ----------
+
 
 def test_failed_html_timeout_keeps_original_copy():
     html_text = _failed_html(None)
@@ -117,6 +126,7 @@ def test_failed_html_renders_newlines():
 
 # ---------- _wait_for_server ----------
 
+
 def test_wait_for_server_returns_immediately_when_backend_thread_dead():
     """后端线程已退出 (done_event 置位) 时不得等满 timeout —— 把启动失败伪装成超时的根源。"""
     done = threading.Event()
@@ -139,7 +149,7 @@ def test_main_timeout_records_stalled_backend_stack(data_dir, monkeypatch, caplo
     entered = threading.Event()
     release = threading.Event()
     stopped = threading.Event()
-    opened = []
+    opened: list = []
 
     def _slow_backend_import(port, done):
         entered.set()
@@ -174,6 +184,7 @@ def test_main_timeout_records_stalled_backend_stack(data_dir, monkeypatch, caplo
 
 # ---------- _precheck_mining_lock ----------
 
+
 def test_precheck_mining_lock_passes_when_free(data_dir):
     assert _precheck_mining_lock() is None
 
@@ -199,9 +210,8 @@ def test_precheck_mining_lock_detects_conflict(data_dir):
 
 # ---------- main() 预检冲突路径 ----------
 
-def test_main_proceeds_when_mining_lock_precheck_conflicts(
-    tmp_path, monkeypatch, caplog
-):
+
+def test_main_proceeds_when_mining_lock_precheck_conflicts(tmp_path, monkeypatch, caplog):
     """预检撞锁只降级: 留 WARNING 日志并继续启动, 不再提前退出失败页。
 
     lifespan 会以降级模式起面板 (挖掘入口 409, 挖掘页提供强制释放),
@@ -212,15 +222,14 @@ def test_main_proceeds_when_mining_lock_precheck_conflicts(
     monkeypatch.setattr(settings, "data_dir", tmp_path, raising=False)
     monkeypatch.setattr(desktop, "_guard_streams", lambda: None)
     monkeypatch.setattr(desktop, "_setup_logging", lambda: None)
-    monkeypatch.setattr(
-        desktop, "_precheck_mining_lock", lambda: "另一个后端实例正在占用数据目录"
-    )
+    monkeypatch.setattr(desktop, "_precheck_mining_lock", lambda: "另一个后端实例正在占用数据目录")
     monkeypatch.setattr(desktop, "_find_free_port", lambda base: 59998)
     monkeypatch.setattr(
-        desktop, "_wait_for_server",
+        desktop,
+        "_wait_for_server",
         lambda port, timeout, done_event: True,
     )
-    opened = []
+    opened: list = []
     monkeypatch.setattr(desktop, "_open_window", lambda url: opened.append(url))
 
     def _fake_uvmicorn(port, ready):
@@ -264,6 +273,7 @@ def test_main_reports_early_startup_errors(data_dir, monkeypatch, stage):
 
 # ---------- _open_window: pywebview 下载启用 ----------
 
+
 def test_open_window_enables_downloads_before_start(data_dir, monkeypatch):
     """pywebview 5.0+ 默认取消所有文件下载 (Edge WebView2 / WKWebView 一致) —
     必须在 webview.start() 前显式开启 ALLOW_DOWNLOADS, 否则配置备份导出、
@@ -277,9 +287,9 @@ def test_open_window_enables_downloads_before_start(data_dir, monkeypatch):
             calls.append(f"set:{key}={value}")
             super().__setitem__(key, value)
 
-    fake = types.ModuleType("webview")
+    fake: Any = types.ModuleType("webview")  # 测试桩动态挂属性
     fake.settings = _RecordingSettings()
-    fake.create_window = lambda *a, **k: calls.append("create_window") or object()
+    fake.create_window = lambda *a, **k: _record(object(), calls, "create_window")
     fake.start = lambda *a, **k: calls.append("start")
     monkeypatch.setitem(sys.modules, "webview", fake)
 

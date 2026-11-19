@@ -1,6 +1,8 @@
 """Load custom data source definitions from user data files."""
+
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib
 import json
@@ -12,6 +14,7 @@ import subprocess
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import yaml
 
@@ -53,8 +56,11 @@ def data_sources_dir() -> Path:
 def load_all(path: Path | None = None) -> None:
     """Load all custom provider YAML files into process memory."""
     global _PROVIDERS, _LOAD_ERRORS
-    retained = {name: provider for name, provider in _PROVIDERS.items()
-                if _PLUGIN_STATUS.get(name, {}).get("origin") == "external"}
+    retained = {
+        name: provider
+        for name, provider in _PROVIDERS.items()
+        if _PLUGIN_STATUS.get(name, {}).get("origin") == "external"
+    }
     for name, provider in _PROVIDERS.items():
         if name not in retained:
             provider.close()
@@ -66,13 +72,13 @@ def load_all(path: Path | None = None) -> None:
     for file in sorted([*base.glob("*.yaml"), *base.glob("*.yml")]):
         try:
             config = load_config(file)
-            provider = GenericHTTPProvider(config)
-            errors = provider.validate()
+            http_provider = GenericHTTPProvider(config)
+            errors = http_provider.validate()
             if errors:
                 _LOAD_ERRORS.append({"path": str(file), "name": config.name, "errors": errors})
-                provider.close()
+                http_provider.close()
                 continue
-            _PROVIDERS[config.name] = ManagedProvider(provider, builtin=False)
+            _PROVIDERS[config.name] = ManagedProvider(http_provider, builtin=False)
         except Exception as e:  # noqa: BLE001
             logger.warning("custom data source load failed %s: %s", file, e)
             _LOAD_ERRORS.append({"path": str(file), "errors": [str(e)]})
@@ -118,6 +124,7 @@ def plugin_manifest(name: str) -> dict | None:
     if not _NAME_RE.fullmatch(name or ""):
         return None
     from . import packages
+
     external = packages.manifest(name)
     if external is not None:
         return external
@@ -150,7 +157,8 @@ def probe_plugin_key(name: str, api_key: str) -> tuple[bool, str]:
     try:
         if _PLUGIN_STATUS.get(name, {}).get("origin") == "external":
             from . import packages
-            if not packages.read_state(name).get("enabled", True):
+
+            if not (packages.read_state(name) or {}).get("enabled", True):
                 return False, "请先启用插件"
             module = packages.import_module(manifest, entry.split(":", 1)[0])
         else:
@@ -162,10 +170,105 @@ def probe_plugin_key(name: str, api_key: str) -> tuple[bool, str]:
         return False, f"插件 '{name}' 未提供 Key 探测"
     try:
         ok, reason = probe(api_key)
-        return bool(ok), (str(reason).replace(api_key, "[已隐藏]")
-                          if _PLUGIN_STATUS.get(name, {}).get("origin") == "external" else str(reason))
+        return bool(ok), (
+            str(reason).replace(api_key, "[已隐藏]")
+            if _PLUGIN_STATUS.get(name, {}).get("origin") == "external"
+            else str(reason)
+        )
     except Exception:  # noqa: BLE001 — plugin exceptions may contain credentials
         return False, "Key 探测失败，请检查凭据、网络与接口权限"
+
+
+def _resolve_plugin_install_target(name: str) -> tuple[str, Path] | tuple[None, str]:
+    manifest = plugin_manifest(name)
+    if manifest is None:
+        return None, f"插件 '{name}' 不存在或无 plugin.yaml"
+    runtime = str(manifest.get("runtime", "none")).lower()
+    pdir = plugin_dir_of(name)
+    if not pdir.exists():
+        return None, f"插件目录不存在: {pdir}"
+    return runtime, pdir
+
+
+def _run_plugin_install(runtime: str, pdir: Path) -> subprocess.CompletedProcess | tuple[None, str]:
+    if runtime == "node":
+        npm = shutil.which("npm")
+        if not npm:
+            return None, "未找到 npm, 请先安装 Node.js (>=18)"
+        # 在插件目录执行 npm install
+        return subprocess.run(
+            [npm, "install", "--omit=dev", "--no-audit", "--no-fund"],
+            cwd=str(pdir),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+
+    import sys
+
+    # Python 型插件: 优先用 uv pip install (uv 管理的 venv 无 pip 模块),
+    # 回退 python -m pip。都装进当前后端虚拟环境。
+    # 关键: uv 分支必须显式传 --python sys.executable。dev.ps1 直接跑
+    # .venv/Scripts/python.exe 而不 activate, 后端进程 VIRTUAL_ENV 为空,
+    # uv pip 会默认选 PATH 上的基础解释器 (如 conda base, 常为只读) →
+    # 装错环境并 exit 2 (访问拒绝)。--python 锁定后端自身 venv, 与 pip
+    # 回退路径 (sys.executable -m pip) 的目标一致。
+    # uv 容错: 用户全局 uv.toml 配置错误时 exit 2, 回退 --no-config 重试。
+    # UV_HTTP_TIMEOUT=300: akshare 等含大包(如 mini-racer 14MB), 默认 30s 不够。
+    req = pdir / "requirements.txt"
+    if not req.exists():
+        return None, "Python 型插件需要 requirements.txt"
+    uv_bin = shutil.which("uv")
+    if uv_bin:
+        result = subprocess.run(
+            [uv_bin, "pip", "install", "--python", sys.executable, "-r", str(req)],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env={**__import__("os").environ, "UV_HTTP_TIMEOUT": "300"},
+        )
+        # exit 2 通常是配置文件解析错误, 绕过配置重试
+        # --no-config 会丢镜像, 显式传国内镜像加速 (与用户 uv.toml 意图一致)
+        if result.returncode == 2:
+            result = subprocess.run(
+                [
+                    uv_bin,
+                    "pip",
+                    "install",
+                    "--no-config",
+                    "--index-url",
+                    "https://pypi.tuna.tsinghua.edu.cn/simple",
+                    "--python",
+                    sys.executable,
+                    "-r",
+                    str(req),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                env={**__import__("os").environ, "UV_HTTP_TIMEOUT": "300"},
+            )
+        return result
+    return subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-r", str(req)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+
+def _format_plugin_install_result(result: subprocess.CompletedProcess) -> tuple[bool, str]:
+    if result.returncode == 0:
+        return True, "安装成功"
+    # 取 stderr 的第一个 error: 行(真正的错误原因), 避免把 uv 的长字段列表返回给用户
+    raw = (result.stderr or result.stdout or "").strip()
+    first_err = ""
+    for line in raw.splitlines():
+        if line.strip().startswith(("error", "Error", "Caused by")):
+            first_err = line.strip()
+            break
+    msg = first_err or raw[-200:]
+    return False, f"安装失败 (exit {result.returncode}): {msg}"
 
 
 def install_plugin(name: str) -> tuple[bool, str]:
@@ -174,82 +277,22 @@ def install_plugin(name: str) -> tuple[bool, str]:
     返回 (是否成功, 消息)。成功后调用方应 reload 重新扫描。
     依赖未找到 (npm/pip 缺失) 或命令失败时返回 False。
     """
-    manifest = plugin_manifest(name)
-    if manifest is None:
-        return False, f"插件 '{name}' 不存在或无 plugin.yaml"
-    runtime = str(manifest.get("runtime", "none")).lower()
-    pdir = plugin_dir_of(name)
-    if not pdir.exists():
-        return False, f"插件目录不存在: {pdir}"
+    target = _resolve_plugin_install_target(name)
+    if target[0] is None:
+        return False, target[1]
+    runtime, pdir = target
+    if runtime not in {"node", "python"}:
+        return False, f"runtime={runtime} 无需安装依赖"
 
     try:
-        if runtime == "node":
-            npm = shutil.which("npm")
-            if not npm:
-                return False, "未找到 npm, 请先安装 Node.js (>=18)"
-            # 在插件目录执行 npm install
-            result = subprocess.run(
-                [npm, "install", "--omit=dev", "--no-audit", "--no-fund"],
-                cwd=str(pdir),
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
-        elif runtime == "python":
-            import sys
-            # Python 型插件: 优先用 uv pip install (uv 管理的 venv 无 pip 模块),
-            # 回退 python -m pip。都装进当前后端虚拟环境。
-            # 关键: uv 分支必须显式传 --python sys.executable。dev.ps1 直接跑
-            # .venv/Scripts/python.exe 而不 activate, 后端进程 VIRTUAL_ENV 为空,
-            # uv pip 会默认选 PATH 上的基础解释器 (如 conda base, 常为只读) →
-            # 装错环境并 exit 2 (访问拒绝)。--python 锁定后端自身 venv, 与 pip
-            # 回退路径 (sys.executable -m pip) 的目标一致。
-            # uv 容错: 用户全局 uv.toml 配置错误时 exit 2, 回退 --no-config 重试。
-            # UV_HTTP_TIMEOUT=300: akshare 等含大包(如 mini-racer 14MB), 默认 30s 不够。
-            req = pdir / "requirements.txt"
-            if not req.exists():
-                return False, "Python 型插件需要 requirements.txt"
-            uv_bin = shutil.which("uv")
-            if uv_bin:
-                result = subprocess.run(
-                    [uv_bin, "pip", "install", "--python", sys.executable, "-r", str(req)],
-                    capture_output=True, text=True, timeout=300,
-                    env={**__import__("os").environ, "UV_HTTP_TIMEOUT": "300"},
-                )
-                # exit 2 通常是配置文件解析错误, 绕过配置重试
-                # --no-config 会丢镜像, 显式传国内镜像加速 (与用户 uv.toml 意图一致)
-                if result.returncode == 2:
-                    result = subprocess.run(
-                        [uv_bin, "pip", "install", "--no-config",
-                         "--index-url", "https://pypi.tuna.tsinghua.edu.cn/simple",
-                         "--python", sys.executable,
-                         "-r", str(req)],
-                        capture_output=True, text=True, timeout=300,
-                        env={**__import__("os").environ, "UV_HTTP_TIMEOUT": "300"},
-                    )
-            else:
-                result = subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "-r", str(req)],
-                    capture_output=True, text=True, timeout=300,
-                )
-        else:
-            return False, f"runtime={runtime} 无需安装依赖"
+        result = _run_plugin_install(runtime, pdir)
     except subprocess.TimeoutExpired:
         return False, "安装超时 (5分钟), 请检查网络后重试"
     except Exception as e:  # noqa: BLE001
         return False, f"安装失败: {e}"
-
-    if result.returncode != 0:
-        # 取 stderr 的第一个 error: 行(真正的错误原因), 避免把 uv 的长字段列表返回给用户
-        raw = (result.stderr or result.stdout or "").strip()
-        first_err = ""
-        for line in raw.splitlines():
-            if line.strip().startswith(("error", "Error", "Caused by")):
-                first_err = line.strip()
-                break
-        msg = first_err or raw[-200:]
-        return False, f"安装失败 (exit {result.returncode}): {msg}"
-    return True, "安装成功"
+    if isinstance(result, tuple):
+        return False, result[1]
+    return _format_plugin_install_result(result)
 
 
 def uninstall_plugin(name: str) -> tuple[bool, str]:
@@ -283,17 +326,23 @@ def uninstall_plugin(name: str) -> tuple[bool, str]:
         if not req.exists():
             return False, "Python 型插件缺少 requirements.txt, 无法自动卸载"
         # 读 requirements.txt 拿包名, 逐个 pip uninstall -y
-        pkgs = [l.strip().split("==")[0].split(">=")[0].strip()
-                for l in req.read_text().splitlines()
-                if l.strip() and not l.startswith("#")]
+        pkgs = [
+            line.strip().split("==")[0].split(">=")[0].strip()
+            for line in req.read_text().splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
         if not pkgs:
             return True, "requirements.txt 无有效包名"
         import sys
+
         uv_bin = _shutil.which("uv")
         # 与 install 一致: uv 分支显式 --python 锁定后端 venv (无 VIRTUAL_ENV 时
         # 会默认落到 PATH 基础解释器), 与 pip 回退 (sys.executable -m pip) 目标一致。
-        cmd = ([uv_bin, "pip", "uninstall", "--python", sys.executable, *pkgs]
-               if uv_bin else [sys.executable, "-m", "pip", "uninstall", "-y", *pkgs])
+        cmd = (
+            [uv_bin, "pip", "uninstall", "--python", sys.executable, *pkgs]
+            if uv_bin
+            else [sys.executable, "-m", "pip", "uninstall", "-y", *pkgs]
+        )
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode != 0:
@@ -307,8 +356,9 @@ def uninstall_plugin(name: str) -> tuple[bool, str]:
 
 def is_builtin(name: str) -> bool:
     """判断 name 是否为内置插件 (不可被用户编辑/删除)。"""
-    return ((name or "").lower() in _PLUGIN_STATUS
-            and _PLUGIN_STATUS[(name or "").lower()].get("origin") != "external")
+    return (name or "").lower() in _PLUGIN_STATUS and _PLUGIN_STATUS[(name or "").lower()].get(
+        "origin"
+    ) != "external"
 
 
 def names() -> set[str]:
@@ -332,10 +382,17 @@ def minute_config_fingerprint(name: str) -> bytes:
     if provider is None:
         return b""
     status = _PLUGIN_STATUS.get(name)
+    config: Any  # 两种分支的 tuple 形状不同，指纹序列化只依赖其内容
     if status is not None:
         env = status.get("api_key_env", "")
         key = secrets_store.get_env_backed_secret(f"{name}_api_key", env) if env else ""
-        config = ("plugin", status.get("version"), status.get("available"), "minute" in status["datasets"], key)
+        config = (
+            "plugin",
+            status.get("version"),
+            status.get("available"),
+            "minute" in status["datasets"],
+            key,
+        )
     else:
         source = provider.config
         minute = source.datasets.get("minute")
@@ -389,7 +446,11 @@ def _config_to_dict(config: CustomSourceConfig) -> dict:
         "auth": {
             "type": auth.type,
             **({"token_env": auth.token_env} if auth.token_env else {}),
-            **({"header": auth.header} if auth.type in {"bearer", "header"} and auth.header != "Authorization" else {}),
+            **(
+                {"header": auth.header}
+                if auth.type in {"bearer", "header"} and auth.header != "Authorization"
+                else {}
+            ),
             **({"param": auth.param} if auth.type == "query" and auth.param != "token" else {}),
         },
         "datasets": {},
@@ -404,12 +465,20 @@ def _config_to_dict(config: CustomSourceConfig) -> dict:
             "response_path": ds.response_path,
             "field_map": dict(ds.field_map),
             **({"transforms": dict(ds.transforms)} if ds.transforms else {}),
-            **({
-                "symbols_param": ds.symbols_param,
-                "start_param": ds.start_param,
-                "end_param": ds.end_param,
-            } if ds_name != "realtime" else {}),
-            **({"asset_type_param": ds.asset_type_param} if ds_name == "minute" and ds.asset_type_param else {}),
+            **(
+                {
+                    "symbols_param": ds.symbols_param,
+                    "start_param": ds.start_param,
+                    "end_param": ds.end_param,
+                }
+                if ds_name != "realtime"
+                else {}
+            ),
+            **(
+                {"asset_type_param": ds.asset_type_param}
+                if ds_name == "minute" and ds.asset_type_param
+                else {}
+            ),
             **({"freq_param": ds.freq_param} if ds_name == "minute" and ds.freq_param else {}),
             **({"pct_unit": ds.pct_unit} if ds_name == "realtime" and ds.pct_unit else {}),
         }
@@ -467,7 +536,15 @@ def _sanitize_for_yaml(config: dict) -> dict:
 
     datasets_out: dict = {}
     for ds_name, ds_cfg in (config.get("datasets") or {}).items():
-        if ds_name not in {"daily", "adj_factor", "realtime", "minute", "depth5", "full_minute", "financial"}:
+        if ds_name not in {
+            "daily",
+            "adj_factor",
+            "realtime",
+            "minute",
+            "depth5",
+            "full_minute",
+            "financial",
+        }:
             continue
         if not isinstance(ds_cfg, dict):
             continue
@@ -478,53 +555,29 @@ def _sanitize_for_yaml(config: dict) -> dict:
     return out
 
 
-def _sanitize_dataset(ds_name: str, ds_cfg: dict) -> dict:
-    out: dict = {}
-    url = str(ds_cfg.get("url", "") or "").strip()
-    if not url:
-        return out
-    out["url"] = url
-    method = str(ds_cfg.get("method", "GET") or "GET").upper()
-    out["method"] = method
+def _sanitize_numeric_options(ds_name: str, ds_cfg: dict, out: dict) -> None:
+    """校验并写入 batch/rpm/timeout 数值选项。"""
     if ds_cfg.get("batch") is not None:
-        try:
+        with contextlib.suppress(TypeError, ValueError):
             out["batch"] = int(ds_cfg["batch"])
-        except (TypeError, ValueError):
-            pass
     if ds_cfg.get("rpm") is not None:
-        try:
+        with contextlib.suppress(TypeError, ValueError):
             out["rpm"] = int(ds_cfg["rpm"])
-        except (TypeError, ValueError):
-            pass
     if ds_cfg.get("timeout") is not None:
         try:
             timeout = float(ds_cfg["timeout"])
         except (TypeError, ValueError) as e:
             raise ValueError(
-                f"{ds_name}: timeout must be a number between 0 and "
-                f"{MAX_TIMEOUT:g} seconds"
+                f"{ds_name}: timeout must be a number between 0 and {MAX_TIMEOUT:g} seconds"
             ) from e
         if not math.isfinite(timeout) or not 0 < timeout <= MAX_TIMEOUT:
-            raise ValueError(
-                f"{ds_name}: timeout must be between 0 and {MAX_TIMEOUT:g} seconds"
-            )
+            raise ValueError(f"{ds_name}: timeout must be between 0 and {MAX_TIMEOUT:g} seconds")
         if timeout != DEFAULT_TIMEOUT:
             out["timeout"] = timeout
-    out["response_path"] = str(ds_cfg.get("response_path", "") or "")
-    field_map = {
-        str(k): str(v)
-        for k, v in (ds_cfg.get("field_map") or {}).items()
-        if str(k).strip() and str(v).strip()
-    }
-    if field_map:
-        out["field_map"] = field_map
-    transforms = {
-        str(k): str(v)
-        for k, v in (ds_cfg.get("transforms") or {}).items()
-        if str(k).strip() and str(v).strip()
-    }
-    if transforms:
-        out["transforms"] = transforms
+
+
+def _sanitize_request_params(ds_name: str, ds_cfg: dict, out: dict) -> None:
+    """校验并写入数据集的请求参数（symbols/start/end/pct_unit/minute 专属）。"""
     if ds_name != "realtime":
         symbols_param = str(ds_cfg.get("symbols_param") or "").strip()
         start_param = str(ds_cfg.get("start_param") or "").strip()
@@ -549,6 +602,10 @@ def _sanitize_dataset(ds_name: str, ds_cfg: dict) -> dict:
             out["asset_type_param"] = asset_type_param
         if freq_param:
             out["freq_param"] = freq_param
+
+
+def _validate_request_params(ds_name: str, out: dict) -> None:
+    """检测请求参数名冲突；realtime 数据集豁免。"""
     request_params = [
         out.get("symbols_param", "symbols"),
         out.get("start_param", "start_time"),
@@ -558,19 +615,44 @@ def _sanitize_dataset(ds_name: str, ds_cfg: dict) -> dict:
         request_params.extend(
             name for name in (out.get("asset_type_param"), out.get("freq_param")) if name
         )
-    duplicates = sorted({
-        name for name in request_params if request_params.count(name) > 1
-    })
+    duplicates = sorted({name for name in request_params if request_params.count(name) > 1})
     if ds_name != "realtime" and duplicates:
-        raise ValueError(
-            f"{ds_name}: duplicate request parameter names: {', '.join(duplicates)}"
-        )
+        raise ValueError(f"{ds_name}: duplicate request parameter names: {', '.join(duplicates)}")
+
+
+def _sanitize_dataset(ds_name: str, ds_cfg: dict) -> dict:
+    out: dict = {}
+    url = str(ds_cfg.get("url", "") or "").strip()
+    if not url:
+        return out
+    out["url"] = url
+    method = str(ds_cfg.get("method", "GET") or "GET").upper()
+    out["method"] = method
+    _sanitize_numeric_options(ds_name, ds_cfg, out)
+    out["response_path"] = str(ds_cfg.get("response_path", "") or "")
+    field_map = {
+        str(k): str(v)
+        for k, v in (ds_cfg.get("field_map") or {}).items()
+        if str(k).strip() and str(v).strip()
+    }
+    if field_map:
+        out["field_map"] = field_map
+    transforms = {
+        str(k): str(v)
+        for k, v in (ds_cfg.get("transforms") or {}).items()
+        if str(k).strip() and str(v).strip()
+    }
+    if transforms:
+        out["transforms"] = transforms
+    _sanitize_request_params(ds_name, ds_cfg, out)
+    _validate_request_params(ds_name, out)
     return out
 
 
 # ================================================================
 # 内置可选插件 (plugins/ 目录) 的发现与注册
 # ================================================================
+
 
 def _load_builtin_plugins() -> None:
     """扫描 plugins/ 目录下每个含 plugin.yaml 的子目录, 动态加载。
@@ -579,8 +661,9 @@ def _load_builtin_plugins() -> None:
     每次调用重建 _PLUGIN_STATUS, 并把可用的插件注册进 _PROVIDERS。
     """
     global _PLUGIN_STATUS
-    _PLUGIN_STATUS = {name: info for name, info in _PLUGIN_STATUS.items()
-                      if info.get("origin") == "external"}
+    _PLUGIN_STATUS = {
+        name: info for name, info in _PLUGIN_STATUS.items() if info.get("origin") == "external"
+    }
     pdir = plugins_dir()
     for plugin_dir in sorted(pdir.iterdir()) if pdir.exists() else []:
         if not plugin_dir.is_dir():
@@ -594,6 +677,7 @@ def _load_builtin_plugins() -> None:
         except Exception as e:  # noqa: BLE001
             logger.warning("插件 %s 清单解析失败: %s", plugin_dir.name, e)
     from . import packages
+
     packages.discover()
 
 
@@ -704,8 +788,10 @@ class _UnavailableProvider:
     def __getattr__(self, name):
         if not name.startswith(("get_", "iter_")):
             raise AttributeError(name)
+
         def unavailable(*args, **kwargs):
             raise ProviderRequestError(f"数据源 {self.name} 不可用：{self.reason}")
+
         return unavailable
 
 
@@ -714,6 +800,7 @@ def record_external_error(name):
         logger.warning("external plugin name conflict: %s", name)
         return
     from .packages import DATASETS
+
     doc = {"name": name, "datasets": sorted(DATASETS), "version": ""}
     publish_external(doc, None, "插件加载失败，请检查清单与兼容范围", metadata=False)
 
@@ -729,7 +816,8 @@ def publish_external(doc, provider, reason, *, metadata=True):
         _PROVIDERS[name] = ManagedProvider(value)
     _PLUGIN_STATUS[name] = {
         **_manifest_status(doc, available, reason, origin="external"),
-        "version": doc.get("version", ""), "author": doc.get("author", ""),
+        "version": doc.get("version", ""),
+        "author": doc.get("author", ""),
         "can_test": available and callable(getattr(provider, "test_dataset", None)),
     }
     if metadata:
@@ -739,6 +827,7 @@ def publish_external(doc, provider, reason, *, metadata=True):
 
 def _external_signature(doc):
     from . import packages
+
     state = packages.read_state(doc["name"]) or {}
     key = secrets_store.get_env_backed_secret(f"{doc['name']}_api_key", doc.get("api_key_env", ""))
     return (doc.get("version"), state.get("enabled", True), hashlib.sha256(key.encode()).digest())
@@ -746,18 +835,24 @@ def _external_signature(doc):
 
 def refresh_external_metadata(name):
     from . import packages
+
     state = packages.read_state(name)
     if state and name in _PLUGIN_STATUS:
-        _PLUGIN_STATUS[name].update({
-            "pending_version": state.get("pending"), "previous_version": state.get("previous"),
-            "enabled": state.get("enabled", True), "pending_remove": state.get("remove", False),
-            "update_error": state.get("error"),
-        })
+        _PLUGIN_STATUS[name].update(
+            {
+                "pending_version": state.get("pending"),
+                "previous_version": state.get("previous"),
+                "enabled": state.get("enabled", True),
+                "pending_remove": state.get("remove", False),
+                "update_error": state.get("error"),
+            }
+        )
 
 
 def refresh_plugin(name, *, manifest_doc=None, strict=False):
     """Refresh one plugin without closing other providers or in-flight requests."""
     from . import packages
+
     doc = manifest_doc or plugin_manifest(name)
     if doc is None:
         raise ValueError("插件不存在")
@@ -765,9 +860,12 @@ def refresh_plugin(name, *, manifest_doc=None, strict=False):
     if state is None:
         _register_one_plugin(doc)
         return
-    if (manifest_doc is not None and name in _PROVIDERS
-            and _PLUGIN_STATUS.get(name, {}).get("origin") == "external"
-            and getattr(_PROVIDERS[name], "_external_signature", None) == _external_signature(doc)):
+    if (
+        manifest_doc is not None
+        and name in _PROVIDERS
+        and _PLUGIN_STATUS.get(name, {}).get("origin") == "external"
+        and getattr(_PROVIDERS[name], "_external_signature", None) == _external_signature(doc)
+    ):
         refresh_external_metadata(name)
         return
     if not state.get("enabled", True):

@@ -6,9 +6,11 @@
 ② 外部改写文件后 load()/get_ai_config() 立刻反映新值 (mtime+size 签名缓存失效);
 ③ GET /api/settings 暴露 secrets_path 供设置页展示。
 """
+
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -17,7 +19,7 @@ from app import secrets_store
 
 
 @pytest.fixture()
-def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     from app.config import settings
 
     monkeypatch.setattr(settings, "data_dir", tmp_path, raising=False)
@@ -35,11 +37,17 @@ def test_external_edit_is_picked_up_without_restart(data_dir: Path) -> None:
     # 模拟用户编辑器直接覆写文件 (绕过 secrets_store.save)。
     # 内容长度与 mtime 都变化, 签名缓存必然失效。
     path = data_dir / "user_data" / "secrets.json"
-    path.write_text(json.dumps({
-        "ai_model": "brand-new-model",
-        "ai_base_url": "https://new.example/v1",
-        "ai_api_key": "sk-new",
-    }, indent=2), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            {
+                "ai_model": "brand-new-model",
+                "ai_base_url": "https://new.example/v1",
+                "ai_api_key": "sk-new",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     assert secrets_store.get_ai_config("ai_model") == "brand-new-model"
     assert secrets_store.get_ai_config("ai_base_url") == "https://new.example/v1"
@@ -69,4 +77,7 @@ def test_get_settings_exposes_secrets_path(data_dir: Path) -> None:
     payload = settings_api.get_settings()
 
     assert payload["secrets_path"].endswith("secrets.json")
-    assert str(data_dir) in payload["secrets_path"] or Path(payload["secrets_path"]).name == "secrets.json"
+    assert (
+        str(data_dir) in payload["secrets_path"]
+        or Path(payload["secrets_path"]).name == "secrets.json"
+    )

@@ -1,11 +1,14 @@
-"""从 strategy/paper.py 抽取的 paper_positions 子模块（保持原公开 API）。"""
+"""从 strategy/paper.py 抽取的 paper_positions 子模块（保持原公开 API）。
+
+DES-005：底层台账/持仓读改写走 PostgreSQL 事务存储层（`app.storage.paper_pg`），
+`data_dir` 参数保留仅为兼容既有调用签名，PG 模式下不再读写文件。
+"""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-from app.services.fs_utils import atomic_write_text
+from app.storage import paper_pg as store
 
 DEFAULT_ACCOUNT_ID = "default"
 
@@ -23,34 +26,21 @@ _rootmod = _RootProxy()
 
 
 def _fills_path(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> Path:
-    return _rootmod._root(data_dir, account_id) / "fills.jsonl"
+    """兼容旧符号：PG 模式下无实际文件，返回一个逻辑路径占位。"""
+    del account_id
+    return Path(data_dir) / "paper" / "accounts" / "fills.jsonl"
 
 
 def load_fills(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> list[dict]:
-    p = _fills_path(data_dir, account_id)
-    if not p.exists():
-        return []
-    out: list[dict] = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            out.append(json.loads(line))
-        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
-            _rootmod.logger.warning("paper fill line skipped: %s", e)
-    return out
+    """从 PG 台账读全部 fill（payload），按 seq 排序。"""
+    return store.load_fills(account_id)
 
 
 def load_positions(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> dict[str, dict]:
-    """读物化持仓 (无文件时从台账重建)。"""
-    p = _rootmod._root(data_dir, account_id) / "positions.json"
-    if p.exists():
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            return data.get("positions", {})
-        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
-            _rootmod.logger.warning("paper positions load failed, rebuilding: %s", e)
+    """读物化持仓（PG 无持仓行则从台账重放）。"""
+    positions = store.load_positions(account_id)
+    if positions:
+        return positions
     return replay_positions(data_dir, account_id=account_id)[0]
 
 
@@ -115,7 +105,6 @@ def replay_positions(
                     },
                 )
             remain = qty
-            # FIFO 消耗批次; 台账正常时不会透支, 防御性 clamp
             for lot in pos["lots"]:
                 if remain <= 0:
                     break
@@ -135,12 +124,7 @@ def sell_capacity(
     symbol: str,
     account_id: str = DEFAULT_ACCOUNT_ID,
 ) -> tuple[int, int] | None:
-    """(T+1 可卖数量, 同 symbol 已挂 pending 卖出合计); 无持仓返回 None。
-
-    可卖数量按当前交易日现算 (与 _fill_order / overview 同口径): 物化文件里的
-    available_qty 是上次重建时的 T+1 口径, 跨日后不会更新, 次日仍会是 0。
-    pending 卖出单占用可卖额度, 否则多张单各自通过校验、成交时逐张扣减会超额。
-    """
+    """(T+1 可卖数量, 同 symbol 已挂 pending 卖出合计); 无持仓返回 None。"""
     pos = load_positions(data_dir, account_id).get(symbol)
     if pos is None or pos["qty"] <= 0:
         return None
@@ -161,31 +145,26 @@ def _available_of(pos: dict, today: str | None = None) -> int:
 
 
 def _append_fill(data_dir: Path, fill: dict, account_id: str = DEFAULT_ACCOUNT_ID) -> None:
-    p = _fills_path(data_dir, account_id)
-    with _rootmod.PAPER_LOCK, p.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(fill, ensure_ascii=False) + "\n")
+    """兼容旧符号：PG 模式下单笔 fill 追加由 record_fill_transaction 统一处理。
+
+    单独调用（如 corp_action）走 store 的台账追加；core 成交走事务组。
+    """
+    store.append_fill(account_id, fill)
 
 
 def _materialize(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> None:
-    """由台账重建 positions.json (每次成交后调用, 保持物化缓存与台账一致)。"""
+    """物化持仓到 PG（每次成交后调用，保持物化缓存与台账一致）。"""
     positions, _cash = replay_positions(data_dir, account_id=account_id)
     acc = _rootmod.get_account(data_dir, account_id)
     if acc is not None:
         today = _rootmod.cn_today().isoformat()
         for pos in positions.values():
             pos["available_qty"] = _available_of(pos, today)
-    atomic_write_text(
-        _rootmod._root(data_dir, account_id) / "positions.json",
-        json.dumps(
-            {"updated_at": _rootmod._now_iso(), "positions": positions},
-            ensure_ascii=False,
-            indent=2,
-        ),
-    )
+    store.save_positions(account_id, positions)
 
 
 def rebuild_positions(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> dict[str, dict]:
-    """修复兜底: 强制由台账重建物化持仓。"""
+    """修复兜底: 强制由台账重建物化持仓与现金。"""
     with _rootmod.PAPER_LOCK:
         positions, cash = replay_positions(data_dir, account_id=account_id)
         acc = _rootmod.get_account(data_dir, account_id)
@@ -195,12 +174,5 @@ def rebuild_positions(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> d
         today = _rootmod.cn_today().isoformat()
         for pos in positions.values():
             pos["available_qty"] = _available_of(pos, today)
-        atomic_write_text(
-            _rootmod._root(data_dir, account_id) / "positions.json",
-            json.dumps(
-                {"updated_at": _rootmod._now_iso(), "positions": positions},
-                ensure_ascii=False,
-                indent=2,
-            ),
-        )
+        store.save_positions(account_id, positions)
         return positions

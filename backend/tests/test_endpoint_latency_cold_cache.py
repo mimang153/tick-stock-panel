@@ -4,6 +4,7 @@ _endpoints_cache 的初值是 {"ts": 0.0, "data": None} —— 进程启动后�
 GET /api/settings/endpoints 之前, "data" 键存在但值为 None。前端 endpoints 查询
 有 5 分钟 staleTime, 后端(看门狗自愈/重启)重启后用户再点测速, 就落在这个窗口里。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -37,7 +38,9 @@ async def test_latency_test_falls_back_to_default_rounds_on_cold_cache():
 async def test_latency_test_uses_manifest_rounds_when_cache_is_warm(monkeypatch):
     """缓存已预热时仍取 endpoints.json 的 testRounds。"""
     monkeypatch.setattr(
-        settings_api, "_endpoints_cache", {"ts": 0.0, "data": {"testRounds": 2}},
+        settings_api,
+        "_endpoints_cache",
+        {"ts": 0.0, "data": {"testRounds": 2}},
     )
 
     result = await settings_api.test_endpoint(

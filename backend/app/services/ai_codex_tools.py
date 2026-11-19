@@ -1,4 +1,8 @@
-"""Codex 结构化工具轮次。仅生成并校验请求，工具由各调用方执行。"""
+"""Codex 结构化工具轮次。
+
+仅生成并校验请求, 工具由各调用方执行; 本模块不触碰 shell/文件/网络。
+"""
+
 from __future__ import annotations
 
 import json
@@ -10,18 +14,12 @@ from typing import Any
 from app.services import ai_provider
 
 
-async def run_message_once(
-    messages: Sequence[dict[str, Any]],
-    tools: Sequence[dict[str, Any]],
-    *,
-    max_tokens: int | None = None,
-    timeout: float = 240.0,
-) -> SimpleNamespace:
-    """通过 --output-schema 请求一轮答复, 完整校验后产出正文和工具请求。"""
+def _build_output_schema(tools: Sequence[dict[str, Any]]) -> tuple[list[str], dict[str, Any]]:
+    """由工具名构造 --output-schema, 约束模型只输出声明过的工具。"""
     names = sorted({tool["function"]["name"] for tool in tools})
     if not names:
         raise ValueError("Codex CLI 工具调用需要至少一个工具 schema")
-    output_schema = {
+    return names, {
         "type": "object",
         "properties": {
             "content": {"type": "string"},
@@ -41,7 +39,14 @@ async def run_message_once(
         "required": ["content", "tool_calls"],
         "additionalProperties": False,
     }
-    request = [
+
+
+def _build_request(
+    messages: Sequence[dict[str, Any]],
+    tools: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """把对话与工具清单打包成一条 system + 一条 user 的结构化请求。"""
+    return [
         {
             "role": "system",
             "content": (
@@ -55,13 +60,28 @@ async def run_message_once(
                 "When ready to answer, set tool_calls to an empty array."
             ),
         },
-        # 保留完整 assistant.tool_calls / tool_call_id, 不用只读取 content 的文本序列化。
-        {"role": "user", "content": json.dumps({"messages": list(messages), "tools": list(tools)}, ensure_ascii=False)},
+        {
+            "role": "user",
+            "content": json.dumps(
+                {"messages": list(messages), "tools": list(tools)}, ensure_ascii=False
+            ),
+        },
     ]
+
+
+async def _run_codex(
+    request: list[dict[str, Any]],
+    output_schema: dict[str, Any],
+    max_tokens: int | None,
+    timeout: float,
+) -> str:
+    """调用 Codex CLI; 版本不支持 --output-schema 时给出可操作的升级提示。"""
     try:
-        raw = await ai_provider._run_codex_cli(
-            request, max_tokens=max_tokens,
-            timeout=max(timeout, ai_provider.CODEX_MIN_TIMEOUT_SECONDS), output_schema=output_schema,
+        return await ai_provider._run_codex_cli(
+            request,
+            max_tokens=max_tokens,
+            timeout=max(timeout, ai_provider.CODEX_MIN_TIMEOUT_SECONDS),
+            output_schema=output_schema,
         )
     except RuntimeError as exc:
         detail = str(exc)
@@ -73,6 +93,8 @@ async def run_message_once(
             ) from exc
         raise
 
+
+def _parse_response(raw: str, names: list[str]) -> SimpleNamespace:
     invalid = "Codex CLI 工具响应格式无效, 请重试或检查模型是否支持结构化输出"
     try:
         response = json.loads(raw)
@@ -98,12 +120,29 @@ async def run_message_once(
             raise ai_provider.AIToolProtocolError(invalid) from exc
         if not isinstance(args, dict):
             raise ai_provider.AIToolProtocolError(invalid)
-        calls.append(SimpleNamespace(
-            id=uuid.uuid4().hex, type="function",
-            function=SimpleNamespace(name=name, arguments=arguments),
-        ))
+        calls.append(
+            SimpleNamespace(
+                id=uuid.uuid4().hex,
+                type="function",
+                function=SimpleNamespace(name=name, arguments=arguments),
+            )
+        )
 
     content = response["content"]
     if not content.strip() and not calls:
         raise ai_provider.AIToolProtocolError("Codex CLI 未返回正文或工具请求")
     return SimpleNamespace(content=content, tool_calls=calls)
+
+
+async def run_message_once(
+    messages: Sequence[dict[str, Any]],
+    tools: Sequence[dict[str, Any]],
+    *,
+    max_tokens: int | None = None,
+    timeout: float = 240.0,
+) -> SimpleNamespace:
+    """通过 --output-schema 请求一轮答复, 完整校验后产出正文和工具请求。"""
+    names, output_schema = _build_output_schema(tools)
+    request = _build_request(messages, tools)
+    raw = await _run_codex(request, output_schema, max_tokens, timeout)
+    return _parse_response(raw, names)

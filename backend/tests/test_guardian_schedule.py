@@ -1,4 +1,5 @@
 """守护每日调度与运行管理器参数化测试。"""
+
 from __future__ import annotations
 
 import threading
@@ -35,8 +36,13 @@ class _RecordingManager:
 
     def start(self, request, fingerprint, force=False, source="manual", run_id=None):
         self.starts.append(
-            {"request": request, "fingerprint": fingerprint, "force": force,
-             "source": source, "run_id": run_id}
+            {
+                "request": request,
+                "fingerprint": fingerprint,
+                "force": force,
+                "source": source,
+                "run_id": run_id,
+            }
         )
         return self.store.create(request, fingerprint, run_id=run_id)
 
@@ -57,34 +63,44 @@ def test_disabled_returns_disabled(tmp_path, monkeypatch):
     from app.services import preferences
 
     monkeypatch.setattr(
-        preferences, "get_guardian_schedule",
-        lambda: {"guardian_schedule_enabled": False, "guardian_watch_pct": 0.2,
-                 "guardian_retire_pct": 0.5, "guardian_k_max": 4},
+        preferences,
+        "get_guardian_schedule",
+        lambda: {
+            "guardian_schedule_enabled": False,
+            "guardian_watch_pct": 0.2,
+            "guardian_retire_pct": 0.5,
+            "guardian_k_max": 4,
+        },
     )
-    assert run_daily_guardian(_app_state(tmp_path), now=_friday()) == {
-        "status": "disabled"
-    }
+    assert run_daily_guardian(_app_state(tmp_path), now=_friday()) == {"status": "disabled"}
 
 
 def test_weekend_mismatch(tmp_path, monkeypatch):
     from app.services import preferences
 
     monkeypatch.setattr(
-        preferences, "get_guardian_schedule",
-        lambda: {"guardian_schedule_enabled": True, "guardian_watch_pct": 0.2,
-                 "guardian_retire_pct": 0.5, "guardian_k_max": 4},
+        preferences,
+        "get_guardian_schedule",
+        lambda: {
+            "guardian_schedule_enabled": True,
+            "guardian_watch_pct": 0.2,
+            "guardian_retire_pct": 0.5,
+            "guardian_k_max": 4,
+        },
     )
     saturday = datetime(2026, 10, 24, 18, 0)
-    assert run_daily_guardian(_app_state(tmp_path), now=saturday) == {
-        "status": "weekday_mismatch"
-    }
+    assert run_daily_guardian(_app_state(tmp_path), now=saturday) == {"status": "weekday_mismatch"}
 
 
 def test_enqueues_once_then_already_claimed(tmp_path, monkeypatch):
     from app.services import preferences
 
-    config = {"guardian_schedule_enabled": True, "guardian_watch_pct": 0.3,
-              "guardian_retire_pct": 0.6, "guardian_k_max": 3}
+    config = {
+        "guardian_schedule_enabled": True,
+        "guardian_watch_pct": 0.3,
+        "guardian_retire_pct": 0.6,
+        "guardian_k_max": 3,
+    }
     monkeypatch.setattr(preferences, "get_guardian_schedule", lambda: config)
     state = _app_state(tmp_path)
     manager = state.guardian_manager
@@ -97,7 +113,9 @@ def test_enqueues_once_then_already_claimed(tmp_path, monkeypatch):
     assert started["source"] == "scheduled"
     assert started["run_id"] == "guardian-daily-2026-10-23"
     assert started["request"]["thresholds"] == {
-        "watch_pct": 0.3, "retire_pct": 0.6, "k_max": 3,
+        "watch_pct": 0.3,
+        "retire_pct": 0.6,
+        "k_max": 3,
     }
     assert started["fingerprint"]["source_claim"] == "guardian-daily-2026-10-23"
     assert started["fingerprint"]["latest_enriched_date"] == "2026-10-23"
@@ -111,9 +129,14 @@ def test_missing_manager_raises(tmp_path, monkeypatch):
     from app.services import preferences
 
     monkeypatch.setattr(
-        preferences, "get_guardian_schedule",
-        lambda: {"guardian_schedule_enabled": True, "guardian_watch_pct": 0.2,
-                 "guardian_retire_pct": 0.5, "guardian_k_max": 4},
+        preferences,
+        "get_guardian_schedule",
+        lambda: {
+            "guardian_schedule_enabled": True,
+            "guardian_watch_pct": 0.2,
+            "guardian_retire_pct": 0.5,
+            "guardian_k_max": 4,
+        },
     )
     state = SimpleNamespace(repo=_Repo(tmp_path), guardian_manager=None)
     with pytest.raises(RuntimeError, match="guardian"):
@@ -137,9 +160,13 @@ def test_fingerprint_stable_and_sensitive(tmp_path):
 
 
 def test_guardian_request_shape():
-    request = guardian_request({
-        "guardian_watch_pct": 0.2, "guardian_retire_pct": 0.5, "guardian_k_max": 4,
-    })
+    request = guardian_request(
+        {
+            "guardian_watch_pct": 0.2,
+            "guardian_retire_pct": 0.5,
+            "guardian_k_max": 4,
+        }
+    )
     assert request == {
         "strategy_ids": None,
         "thresholds": {"watch_pct": 0.2, "retire_pct": 0.5, "k_max": 4},
@@ -152,9 +179,9 @@ def test_guardian_request_shape():
 def test_run_store_namespace(tmp_path):
     store = MiningRunStore(tmp_path, namespace="guardian")
     assert store.runs_root == (tmp_path / "research" / "guardian" / "runs").resolve()
-    assert MiningRunStore(tmp_path).runs_root == (
-        tmp_path / "research" / "mining" / "runs"
-    ).resolve()
+    assert (
+        MiningRunStore(tmp_path).runs_root == (tmp_path / "research" / "mining" / "runs").resolve()
+    )
     with pytest.raises(MiningRunValidationError):
         MiningRunStore(tmp_path, namespace="../escape")
 
@@ -166,8 +193,7 @@ def test_manager_kind_dispatches_guardian_worker(tmp_path):
     def fake_runner(task, progress_cb, cancel_event):
         seen.update(task)
         progress_cb({"type": "guardian_progress", "done": 1, "total": 1})
-        return {"status": "succeeded", "checked": 1, "skipped": 0, "errors": 0,
-                "results": []}
+        return {"status": "succeeded", "checked": 1, "skipped": 0, "errors": 0, "results": []}
 
     manager = MiningJobManager(
         tmp_path,
@@ -175,8 +201,7 @@ def test_manager_kind_dispatches_guardian_worker(tmp_path):
         kind="guardian",
         store=MiningRunStore(tmp_path, namespace="guardian"),
     )
-    manifest = manager.start({"strategy_ids": None}, {"version": "t"}, force=True,
-                             source="manual")
+    manifest = manager.start({"strategy_ids": None}, {"version": "t"}, force=True, source="manual")
     run_id = manifest["run_id"]
 
     deadline = time.monotonic() + 2.0
@@ -185,7 +210,9 @@ def test_manager_kind_dispatches_guardian_worker(tmp_path):
         if current and current["status"] == "succeeded":
             break
         time.sleep(0.01)
-    assert manager.store.get(run_id)["status"] == "succeeded"
+    run = manager.store.get(run_id)
+    assert run is not None
+    assert run["status"] == "succeeded"
     assert seen["kind"] == "guardian"
     assert seen["config"]["request"] == {"strategy_ids": None}
     assert seen["config"]["run_id"] == run_id
@@ -200,8 +227,7 @@ def test_manager_thread_named_by_kind(tmp_path):
     def fake_runner(task, progress_cb, cancel_event):
         names.append(threading.current_thread().name)
         started.set()
-        return {"status": "succeeded", "checked": 0, "skipped": 0, "errors": 0,
-                "results": []}
+        return {"status": "succeeded", "checked": 0, "skipped": 0, "errors": 0, "results": []}
 
     manager = MiningJobManager(
         tmp_path,
@@ -232,16 +258,11 @@ def test_run_scheduled_lab_triggers_both(monkeypatch, tmp_path):
     def boom(state):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(
-        "app.services.mining_schedule.run_weekly_mining", fake_mining
-    )
-    monkeypatch.setattr(
-        "app.services.guardian_schedule.run_daily_guardian", fake_guardian
-    )
+    monkeypatch.setattr("app.services.mining_schedule.run_weekly_mining", fake_mining)
+    monkeypatch.setattr("app.services.guardian_schedule.run_daily_guardian", fake_guardian)
     result = lab_schedule_module.run_scheduled_lab(SimpleNamespace())
     assert calls == ["mining", "guardian"]
-    assert result == {"mining": {"status": "enqueued"},
-                      "guardian": {"status": "enqueued"}}
+    assert result == {"mining": {"status": "enqueued"}, "guardian": {"status": "enqueued"}}
 
     monkeypatch.setattr("app.services.mining_schedule.run_weekly_mining", boom)
     result = lab_schedule_module.run_scheduled_lab(SimpleNamespace())

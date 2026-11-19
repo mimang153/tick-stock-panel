@@ -5,10 +5,12 @@
 BinderException, except 分支退回配置字段 —— 那些对象只有 `dtype` 没有 `type`,
 前端按 `type` 判断数值列的扩展列/资金流下拉因此全部为空。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import polars as pl
 import pytest
@@ -19,7 +21,9 @@ from app.services.ext_data import ExtConfig, ExtConfigStore, ExtField, PullConfi
 
 def _config(mode: str = "timeseries") -> ExtConfig:
     return ExtConfig(
-        id="flow", label="资金流", mode=mode,
+        id="flow",
+        label="资金流",
+        mode=cast(Any, mode),
         fields=[
             ExtField("symbol", "string", "标的代码"),
             ExtField("net", "float", "主力净流入"),
@@ -33,11 +37,13 @@ def _seed(tmp_path: Path, config: ExtConfig) -> None:
     ExtConfigStore(tmp_path).upsert(config)
     part = tmp_path / "ext_data" / config.id / "timeseries" / "date=2026-10-23"
     part.mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": ["600000.SH"],
-        "net": [1.5],
-        "rank": [3],
-    }).write_parquet(part / "part.parquet")
+    pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "net": [1.5],
+            "rank": [3],
+        }
+    ).write_parquet(part / "part.parquet")
 
 
 def _request(tmp_path: Path) -> SimpleNamespace:

@@ -3,16 +3,19 @@
 参考线在当日开盘即必须已知: 含当根收盘的均线会让盘中模拟成交价依赖
 15:00 才确定的收盘价 (前视), 污染 minute_fill 声称的分钟级精确成交。
 """
+
 from __future__ import annotations
 
 import numpy as np
 
-MINUTE_EXIT_TRIGGER_SIGNALS = frozenset({
-    "signal_ma5_breakdown",
-    "signal_ma10_breakdown",
-    "signal_ma20_breakdown",
-    "signal_ma_dead_5_20",
-})
+MINUTE_EXIT_TRIGGER_SIGNALS = frozenset(
+    {
+        "signal_ma5_breakdown",
+        "signal_ma10_breakdown",
+        "signal_ma20_breakdown",
+        "signal_ma_dead_5_20",
+    }
+)
 
 
 def unsupported_minute_exit_signals(signals: list[str] | tuple[str, ...]) -> list[str]:
@@ -40,11 +43,7 @@ def build_minute_exit_reference(
                 _apply(code, (10.0 * fields["ma10"] - close) / 9.0)
             elif signal_id == "signal_ma20_breakdown" and "ma20" in fields:
                 _apply(code, (20.0 * fields["ma20"] - close) / 19.0)
-            elif (
-                signal_id == "signal_ma_dead_5_20"
-                and "ma5" in fields
-                and "ma20" in fields
-            ):
+            elif signal_id == "signal_ma_dead_5_20" and "ma5" in fields and "ma20" in fields:
                 sum4 = 5.0 * fields["ma5"] - close
                 sum19 = 20.0 * fields["ma20"] - close
                 _apply(code, (sum19 - 4.0 * sum4) / 3.0)

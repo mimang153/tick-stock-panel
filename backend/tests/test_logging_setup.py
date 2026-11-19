@@ -1,4 +1,5 @@
 """app/logfile.py: 日志归拢 data/logs/ + 大小切割 + 旧位置一次性迁移。"""
+
 from __future__ import annotations
 
 import logging
@@ -6,8 +7,8 @@ from logging.handlers import RotatingFileHandler
 
 import pytest
 
-from app.logfile import attach_rotating_log
 from app.config import settings
+from app.logfile import attach_rotating_log
 
 
 @pytest.fixture()
@@ -92,8 +93,11 @@ def test_rollover_degrades_to_copy_and_truncate(data_dir, no_leaked_handlers, mo
     import app.logfile as logfile
 
     attach_rotating_log("backend.log", max_mb=1, backup_count=1)
-    handler = [h for h in logging.getLogger().handlers
-               if isinstance(h, logfile.StallSafeRotatingFileHandler)][-1]
+    handler = [
+        h
+        for h in logging.getLogger().handlers
+        if isinstance(h, logfile.StallSafeRotatingFileHandler)
+    ][-1]
     handler.maxBytes = 60  # 小阈值便于触发滚动
 
     def boom(src, dst):
@@ -114,17 +118,23 @@ def test_rollover_degrades_to_copy_and_truncate(data_dir, no_leaked_handlers, mo
     assert handler in logging.getLogger().handlers
 
 
-def test_persistent_rotate_failure_disables_handler(data_dir, no_leaked_handlers, monkeypatch, caplog):
+def test_persistent_rotate_failure_disables_handler(
+    data_dir, no_leaked_handlers, monkeypatch, caplog
+):
     """滚动彻底失败 (copy-and-truncate 也炸) → 停用文件 handler + 单条 ERROR 指引,
     后续日志不再逐条刷堆栈。"""
     import app.logfile as logfile
 
     attach_rotating_log("backend.log", max_mb=1, backup_count=1)
-    handler = [h for h in logging.getLogger().handlers
-               if isinstance(h, logfile.StallSafeRotatingFileHandler)][-1]
+    handler = [
+        h
+        for h in logging.getLogger().handlers
+        if isinstance(h, logfile.StallSafeRotatingFileHandler)
+    ][-1]
     handler.maxBytes = 60
     # gh-116263 (Python 3.12.9+): 空文件永不滚动 — 预置内容让首条日志即触发滚动,
     # 否则 3.12 上 shouldRollover 直接 False, rotate/handleError 根本不会执行
+    assert handler.stream is not None
     handler.stream.write("-" * 100 + "\n")
     handler.stream.flush()
 

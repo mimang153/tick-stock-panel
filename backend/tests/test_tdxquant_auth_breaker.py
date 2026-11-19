@@ -5,7 +5,10 @@ Key 失效时 SDK 表现为逐只「返回空数据」(无独立异常)。锁定
 ② 熔断冷却期内再次调用 → 快速失败返回空帧;
 ③ 冷却期满或重建 provider 实例 → 恢复重试; 非空数据错误不触发熔断。
 """
+
 from __future__ import annotations
+
+from typing import Any, cast
 
 import pytest
 
@@ -25,8 +28,16 @@ class _FakeClient:
         step = self.script.pop(0) if self.script else {"Date": ["2026-10-27"]}
         if isinstance(step, Exception):
             raise step
-        return {"Date": [], "Time": [], "Open": [], "High": [], "Low": [], "Close": [],
-                "Volume": [], "Amount": []}
+        return {
+            "Date": [],
+            "Time": [],
+            "Open": [],
+            "High": [],
+            "Low": [],
+            "Close": [],
+            "Volume": [],
+            "Amount": [],
+        }
 
 
 def _blank_error() -> TdxQuantError:
@@ -59,7 +70,7 @@ def test_cooldown_fast_fail_skips_native_calls():
     p = _provider_with(fake)
     p.get_intraday_latest(symbols=[f"S{i}" for i in range(10)])  # 触发熔断
     fake2 = _FakeClient([])
-    p._client = fake2
+    cast(Any, p)._client = fake2
     df = p.get_intraday_batch([f"S{i}" for i in range(50)])
     assert df.is_empty()
     assert fake2.calls == 0  # 熔断期内整轮快速失败, 不再调用原生库
@@ -69,9 +80,10 @@ def test_cooldown_expiry_recovers():
     fake = _FakeClient([_blank_error()] * 10)
     p = _provider_with(fake)
     p.get_intraday_latest(symbols=[f"S{i}" for i in range(10)])
+    assert p._auth_failed_at is not None
     p._auth_failed_at -= tdx_provider.TdxQuantProvider._AUTH_COOLDOWN_S + 1  # 模拟冷却期满
     ok = _FakeClient([])
-    p._client = ok
+    cast(Any, p)._client = ok
     assert p.get_intraday_latest(symbols=["A"]).is_empty()
     assert ok.calls == 1  # 恢复重试
     assert p._auth_failed_at is None

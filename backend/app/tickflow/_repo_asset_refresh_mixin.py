@@ -84,11 +84,39 @@ class _AssetRefreshMixin(_RepoMixinBase):
             logger.debug("ETF enriched 缓存刷新跳过: %s", e)
 
     def _refresh_index_enriched(self) -> None:
-        """从指数 enriched parquet 加载最新日到内存缓存 (300天重算通用指标)。
+        """从 CK 指数 enriched 加载最新日并重算通用指标（在线）/ 本地 parquet 兼容。
 
-        磁盘窄表无指标列, 必须 scan 近 300 天重算, 否则监控信号规则无列可评估。
+        磁盘窄表无指标列, 必须读近 300 天重算, 否则监控信号规则无列可评估。
         指数无复权需求, 不读 raw_close/raw_high/raw_low。
         """
+        from datetime import timedelta
+
+        store = getattr(self, "storage", None)
+        if store is None:
+            self._refresh_index_enriched_local()
+            return
+        try:
+            dates = store.list_daily_dates("kline_index_enriched")
+            if not dates:
+                self._index_enriched_cache = None
+                self._index_enriched_cache_date = None
+                return
+            latest = dates[-1]
+            df_hist = store.read_daily(
+                "kline_index_enriched",
+                start=latest - timedelta(days=300),
+                columns=["symbol", "date", "open", "high", "low", "close", "volume", "amount"],
+            ).sort(["symbol", "date"])
+            if df_hist.is_empty():
+                return
+            df_full = self._compute_index_enriched_range(df_hist)
+            self._index_enriched_cache = df_full.filter(pl.col("date") == latest).sort(["symbol"])
+            self._index_enriched_cache_date = latest
+        except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+            logger.debug("指数 enriched 缓存刷新跳过: %s", e)
+
+    def _refresh_index_enriched_local(self) -> None:
+        """离线兼容：从本地 parquet 分区刷新指数 enriched 内存缓存。"""
         try:
             enriched_dir = self.store.data_dir / "kline_index_enriched"
             dates = (
@@ -150,7 +178,21 @@ class _AssetRefreshMixin(_RepoMixinBase):
             logger.debug("指数 enriched 缓存刷新跳过: %s", e)
 
     def _refresh_instruments(self) -> None:
-        """加载 instruments 到内存。"""
+        """加载 instruments 到内存；在线路径只读 CK 维表。"""
+        store = getattr(self, "storage", None)
+        if store is not None:
+            try:
+                df = store.read_instruments("stock")
+                if not df.is_empty():
+                    if "as_of" in df.columns:
+                        df = df.sort("as_of", descending=True, nulls_last=True).unique(
+                            subset=["symbol"], keep="first", maintain_order=True
+                        )
+                    self._instruments_cache = df
+                    self._name_map_cache = None
+            except Exception as e:  # noqa: BLE001 - CK 不可用时不静默回退到本地旧数据
+                logger.warning("instruments CK 缓存刷新失败: %s", e)
+            return
         try:
             files = sorted((self.store.data_dir / "instruments").rglob("*.parquet"))
             if not files:
@@ -173,7 +215,18 @@ class _AssetRefreshMixin(_RepoMixinBase):
             logger.warning("instruments 缓存刷新失败: %s", e)
 
     def _refresh_index_instruments(self) -> None:
-        """加载指数 instruments 到内存。"""
+        """加载指数 instruments 到内存；在线路径只读 CK 维表。"""
+        store = getattr(self, "storage", None)
+        if store is not None:
+            try:
+                df = store.read_instruments("index")
+                if not df.is_empty():
+                    self._index_instruments_cache = df
+                    self._index_symbol_set_cache = None
+                    self._name_map_cache = None
+            except Exception as e:  # noqa: BLE001 - CK 不可用时不静默回退到本地旧数据
+                logger.debug("index instruments CK 缓存刷新跳过: %s", e)
+            return
         try:
             df = guarded_collect(scan_parquet_compat(self._index_inst_glob), priority="background")
             if not df.is_empty():
@@ -184,8 +237,38 @@ class _AssetRefreshMixin(_RepoMixinBase):
         except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.debug("index instruments 缓存刷新跳过: %s", e)
 
+    def _refresh_etf_instruments_from_ck(self, store) -> None:
+        parts: list[pl.DataFrame] = []
+        try:
+            df = store.read_instruments("etf")
+            if not df.is_empty():
+                parts.append(df)
+        except Exception as e:  # noqa: BLE001 - CK 不可用时不静默回退到本地旧数据
+            logger.debug("etf instruments CK 缓存刷新跳过(new): %s", e)
+        try:
+            legacy = store.read_instruments("index")
+            if not legacy.is_empty() and "asset_type" in legacy.columns:
+                legacy = legacy.filter(pl.col("asset_type") == "etf")
+                if not legacy.is_empty():
+                    parts.append(legacy)
+        except Exception as e:  # noqa: BLE001 - CK 旧表可能尚未建立
+            logger.debug("etf instruments CK legacy fallback skipped: %s", e)
+        if parts:
+            df_all = (
+                pl.concat(parts, how="diagonal_relaxed")
+                .unique(subset=["symbol"], keep="last")
+                .sort("symbol")
+            )
+            self._etf_instruments_cache = df_all
+            self._etf_symbol_set_cache = None
+            self._name_map_cache = None
+
     def _refresh_etf_instruments(self) -> None:
-        """加载 ETF instruments 到内存；兼容旧版 instruments_index 中的 ETF。"""
+        """加载 ETF instruments 到内存；在线路径只读 CK 维表。"""
+        store = getattr(self, "storage", None)
+        if store is not None:
+            self._refresh_etf_instruments_from_ck(store)
+            return
         parts: list[pl.DataFrame] = []
         try:
             df = guarded_collect(scan_parquet_compat(self._etf_inst_glob), priority="background")

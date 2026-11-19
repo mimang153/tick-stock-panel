@@ -7,8 +7,10 @@
   - 一切缓存故障 (目录只读 / parquet 损坏) 回退现算 (fail-open);
   - 小帧旁路 (哈希+IO 比现算贵, 不缓存)。
 """
+
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -24,7 +26,7 @@ _REGISTERED: list[str] = []
 
 
 @pytest.fixture(autouse=True)
-def _isolated_cache(tmp_path: Path, monkeypatch) -> None:
+def _isolated_cache(tmp_path: Path, monkeypatch) -> Iterator[None]:
     """缓存写到临时目录; 每个测试从全空缓存开始。
 
     收尾同时注销本测试注册的 uf_* 因子 — 注册表是进程级全局,
@@ -43,12 +45,14 @@ def _isolated_cache(tmp_path: Path, monkeypatch) -> None:
 
 def _frame(n: int = 60_000, seed: int = 3) -> pl.DataFrame:
     rng = np.random.default_rng(seed)
-    return pl.DataFrame({
-        "symbol": ["600000.SH"] * n,
-        "date": np.arange(n, dtype=np.int64),
-        "close": rng.normal(10, 1, n),
-        "volume": rng.uniform(1e4, 1e6, n),
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["600000.SH"] * n,
+            "date": np.arange(n, dtype=np.int64),
+            "close": rng.normal(10, 1, n),
+            "volume": rng.uniform(1e4, 1e6, n),
+        }
+    )
 
 
 def _register(fid: str, formula: str, version: int = 1) -> None:
@@ -56,10 +60,16 @@ def _register(fid: str, formula: str, version: int = 1) -> None:
 
     with contextlib.suppress(ValueError):
         unregister_factor(fid)
-    register_definition({
-        "id": fid, "label": fid, "kind": "custom",
-        "formula": formula, "status": "active", "version": version,
-    })
+    register_definition(
+        {
+            "id": fid,
+            "label": fid,
+            "kind": "custom",
+            "formula": formula,
+            "status": "active",
+            "version": version,
+        }
+    )
     _REGISTERED.append(fid)
 
 
@@ -86,7 +96,9 @@ def test_input_value_change_invalidates() -> None:
 
     _register("uf_c2", "ts_mean(close, 30)")
     base = materialize_scoring_columns(_frame(seed=1), ["uf_c2"])
-    changed = materialize_scoring_columns(_frame(seed=1).with_columns(pl.col("close") * 2.0), ["uf_c2"])
+    changed = materialize_scoring_columns(
+        _frame(seed=1).with_columns(pl.col("close") * 2.0), ["uf_c2"]
+    )
     assert not base["uf_c2"].equals(changed["uf_c2"])
     assert materialize_cache.stats()["miss"] == 2  # 两次都是未命中 (键不同)
 
@@ -150,6 +162,8 @@ def test_same_values_different_groups_do_not_reuse_cached_ranks():
     _register("uf_group_rank", "rank(close)")
     frame = _frame()
     one_per_day = materialize_scoring_columns(frame, ["uf_group_rank"])
-    same_day = materialize_scoring_columns(frame.with_columns(pl.lit(1).alias("date")), ["uf_group_rank"])
+    same_day = materialize_scoring_columns(
+        frame.with_columns(pl.lit(1).alias("date")), ["uf_group_rank"]
+    )
     assert one_per_day["uf_group_rank"].min() == 1
     assert same_day["uf_group_rank"].min() == pytest.approx(1 / frame.height)

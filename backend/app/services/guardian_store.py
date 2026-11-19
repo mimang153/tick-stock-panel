@@ -144,9 +144,7 @@ class GuardianStore:
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise GuardianStoreError(
-                f"failed to read guardian profile: {strategy_id}"
-            ) from exc
+            raise GuardianStoreError(f"failed to read guardian profile: {strategy_id}") from exc
         if not isinstance(value, dict):
             raise GuardianStoreError(f"invalid guardian profile: {strategy_id}")
         return _normalize_profile(value, strategy_id)
@@ -253,9 +251,7 @@ class GuardianStore:
         path = self._profile_path(str(profile["strategy_id"]))
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            text = json.dumps(
-                profile, ensure_ascii=False, allow_nan=False, indent=2
-            ) + "\n"
+            text = json.dumps(profile, ensure_ascii=False, allow_nan=False, indent=2) + "\n"
             with temporary.open("w", encoding="utf-8", newline="\n") as stream:
                 stream.write(text)
                 stream.flush()
@@ -287,8 +283,7 @@ def _normalize_profile(value: dict[str, Any], strategy_id: str) -> dict[str, Any
         raise GuardianStoreError(f"invalid status in guardian profile: {strategy_id}")
     baseline = value.get("baseline")
     if baseline is not None and (
-        not isinstance(baseline, dict)
-        or baseline.get("kind") not in BASELINE_KINDS
+        not isinstance(baseline, dict) or baseline.get("kind") not in BASELINE_KINDS
     ):
         raise GuardianStoreError(f"invalid baseline in guardian profile: {strategy_id}")
     checks = value.get("checks")
@@ -310,9 +305,7 @@ def _copy_json(value: Mapping[str, Any]) -> dict[str, Any]:
     try:
         return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
     except (TypeError, ValueError) as exc:
-        raise GuardianStoreValidationError(
-            "guardian payload is not JSON serializable"
-        ) from exc
+        raise GuardianStoreValidationError("guardian payload is not JSON serializable") from exc
 
 
 def _validate_iso_date(value: Any, field: str) -> None:

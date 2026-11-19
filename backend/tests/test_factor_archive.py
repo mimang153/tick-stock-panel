@@ -1,9 +1,11 @@
 """自定义因子归档测试 — 可逆标记位 + 列表合并 + 注册表不受影响。"""
+
 from __future__ import annotations
 
 import contextlib
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -87,9 +89,13 @@ def test_backtest_columns_expose_archive_metadata_but_registry_still_computes(tm
 
     store.register_definition(_DEFINITION)
     store.save_one(tmp_path, {**_DEFINITION, "archived": True})
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
-    )))
+    request: Any = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
+            )
+        )
+    )
     columns = factor_columns(request)["columns"]
     mine = next(item for item in columns if item["id"] == "uf_arch_test")
     assert mine["archived"] is True

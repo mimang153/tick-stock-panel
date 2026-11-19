@@ -1,4 +1,5 @@
 """实时行情开关的 HTTP 契约: fuyao 独立于 TickFlow 档位, 数据门禁仍生效。"""
+
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
@@ -76,11 +77,16 @@ def test_fuyao_still_requires_local_data(quote_api):
 def test_fuyao_waits_for_history_repair(quote_api, monkeypatch):
     client, service, saved, _ = quote_api
     day = datetime.now(CN_TZ).date() - timedelta(days=1)
-    monkeypatch.setattr(data_integrity, "scan_recent_integrity", lambda root: [
-        data_integrity.IntegrityIssue(day, "kline_daily", "snapshot"),
-    ])
     monkeypatch.setattr(
-        data_integrity, "launch_integrity_repair",
+        data_integrity,
+        "scan_recent_integrity",
+        lambda root: [
+            data_integrity.IntegrityIssue(day, "kline_daily", "snapshot"),
+        ],
+    )
+    monkeypatch.setattr(
+        data_integrity,
+        "launch_integrity_repair",
         lambda *args, **kwargs: ("history-repair", True),
     )
 

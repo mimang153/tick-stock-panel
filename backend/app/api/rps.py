@@ -3,6 +3,7 @@
 供「概念分析 → 涨幅RPS轮动」对话框调用。返回最近 N 个交易日的概念涨幅
 排名矩阵:每列(日期)各自把所有概念按当天涨幅从高到低排序。
 """
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Query, Request
@@ -20,7 +21,9 @@ router = APIRouter(prefix="/api/rps", tags=["rps"])
 def get_rotation(
     request: Request,
     days: int = Query(12, ge=7, le=30, description="最近 N 个交易日(7-30)"),
-    kind: str = Query("concept", pattern="concept|industry", description="维度: concept 概念 / industry 行业"),
+    kind: str = Query(
+        "concept", pattern="concept|industry", description="维度: concept 概念 / industry 行业"
+    ),
     level: int | None = Query(None, ge=1, le=3, description="行业层级(仅 kind=industry): 1/2/3 级"),
 ) -> dict:
     """维度涨幅轮动矩阵(概念或行业)。
@@ -35,7 +38,8 @@ def get_rotation(
 
 class AnalyzeRequest(BaseModel):
     """AI 维度轮动分析请求(概念或行业)。"""
-    days: int = 12   # 分析最近 N 个交易日
+
+    days: int = 12  # 分析最近 N 个交易日
     focus: str = ""  # 用户追加的关注点
     kind: str = "concept"  # "concept" 概念 / "industry" 行业
     level: int | None = None  # 行业层级(1/2/3), 仅 kind=industry 有效
@@ -64,7 +68,13 @@ async def analyze_rotation(request: Request, req: AnalyzeRequest):
     async def stream_gen():
         async for chunk in with_heartbeat(
             analyze_rotation_stream(
-                repo, days, req.focus, quote_service, depth_service, kind, level,
+                repo,
+                days,
+                req.focus,
+                quote_service,
+                depth_service,
+                kind,
+                level,
             ),
         ):
             yield chunk + "\n"

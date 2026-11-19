@@ -76,7 +76,9 @@ def test_frozen_probe_returns_result_without_console(monkeypatch, reachable):
             return {"Date": ["2026-01-02"]}
 
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr("app.plugins.tdxquant.client.materialize_lib", lambda key, tmp: tmp / "fake.dll")
+    monkeypatch.setattr(
+        "app.plugins.tdxquant.client.materialize_lib", lambda key, tmp: tmp / "fake.dll"
+    )
     monkeypatch.setattr(tdxmod._NativeTdxAiData, "get_instance", classmethod(lambda cls: Native()))
     monkeypatch.setattr(tqs, "_clean", lambda raw: raw)
     monkeypatch.setattr(probe.time, "sleep", lambda _: None)
@@ -107,7 +109,7 @@ def test_probe_redirects_stdin_without_console(monkeypatch):
     assert probe.run("TDX-SMOKE-KEY")[0] is True
 
 
-@pytest.mark.parametrize("content", ['{"ok": "yes"}', '{"ok":', '[]'])
+@pytest.mark.parametrize("content", ['{"ok": "yes"}', '{"ok":', "[]"])
 def test_probe_rejects_invalid_result_file(monkeypatch, content):
     def fake_run(cmd, **kwargs):
         root = Path(kwargs["env"][probe._PROBE_ENV_TMP])
@@ -231,7 +233,9 @@ def test_run_worker_exception_reports_stage(monkeypatch, tmp_path, capsys):
     assert progress["stage"] == "exception"
 
 
-def test_run_worker_rejects_explicit_auth_denial_after_reachable_snapshot(monkeypatch, tmp_path, capsys):
+def test_run_worker_rejects_explicit_auth_denial_after_reachable_snapshot(
+    monkeypatch, tmp_path, capsys
+):
     _patch_worker_env(monkeypatch, tmp_path)
     import tdxaidata.tdxaidata as tdxmod
     from tdxaidata import tqs

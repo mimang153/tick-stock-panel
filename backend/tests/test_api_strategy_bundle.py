@@ -3,11 +3,13 @@
 沿用 mini-app 模式: 只挂 strategies 路由, 手工注入 strategy_engine,
 不进主应用 lifespan。服务层语义见 tests/test_strategy_bundle.py。
 """
+
 from __future__ import annotations
 
 import io
 import json
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -21,19 +23,20 @@ from app.factors.registry import unregister_factor
 from app.services import preferences
 from app.strategy.engine import StrategyEngine
 
-STANDALONE = '''\
+STANDALONE = """\
 META = {"id": "custom_standalone", "name": "独立", "description": "d", "tags": [],
        "asset_types": ["stock"], "timeframes": ["1d"],
        "scoring": {"uf_dep": 1.0}}
 
 import polars as pl
 
+
 SCORING = {"uf_dep": 1.0}
 
 
 def filter(df: pl.DataFrame, params: dict) -> pl.Expr:
     return pl.lit(True)
-'''
+"""
 
 UF_DEP = {"id": "uf_dep", "label": "依赖因子", "kind": "custom", "formula": "close", "lang": "dsl"}
 
@@ -47,7 +50,7 @@ def _write(path: Path, content: str | dict) -> None:
 
 
 @pytest.fixture()
-def client(tmp_path: Path, monkeypatch) -> TestClient:
+def client(tmp_path: Path, monkeypatch) -> Iterator[TestClient]:
     from app.config import settings
 
     monkeypatch.setattr(settings, "data_dir", tmp_path)
@@ -84,9 +87,7 @@ def test_export_unknown_strategy_404(client: TestClient) -> None:
     assert client.get("/api/strategies/custom_nope/bundle").status_code == 404
 
 
-def test_inspect_and_apply_roundtrip(
-    client: TestClient, tmp_path_factory, monkeypatch
-) -> None:
+def test_inspect_and_apply_roundtrip(client: TestClient, tmp_path_factory, monkeypatch) -> None:
     from app.config import settings
 
     blob = client.get("/api/strategies/custom_standalone/bundle").content
@@ -133,25 +134,46 @@ def test_apply_rejects_out_of_scope(client: TestClient) -> None:
 
 
 @pytest.mark.parametrize("legacy_export", [False, True])
-def test_both_export_formats_import_through_current_api(client, tmp_path_factory, monkeypatch, legacy_export):
+def test_both_export_formats_import_through_current_api(
+    client, tmp_path_factory, monkeypatch, legacy_export
+):
     from app.config import settings
 
-    exported = (client.get("/api/strategies/custom_standalone/bundle") if legacy_export else
-                client.post("/api/definitions/resources/export", json={"resources": [{"kind": "strategy", "id": "custom_standalone"}]}))
+    exported = (
+        client.get("/api/strategies/custom_standalone/bundle")
+        if legacy_export
+        else client.post(
+            "/api/definitions/resources/export",
+            json={"resources": [{"kind": "strategy", "id": "custom_standalone"}]},
+        )
+    )
     assert exported.status_code == 200
     destination = tmp_path_factory.mktemp("current_import")
     monkeypatch.setattr(settings, "data_dir", destination)
-    client.app.state.strategy_engine = StrategyEngine(strategy_dirs=[destination / "strategies/custom"])
+    client.app.state.strategy_engine = StrategyEngine(
+        strategy_dirs=[destination / "strategies/custom"]
+    )
     files = [("files", ("strategy.zip", exported.content, "application/zip"))]
     preview = client.post("/api/definitions/resources/inspect", files=files)
     assert preview.status_code == 200
     body = preview.json()
     assert not any(entry["issues"] for entry in body["entries"])
-    applied = client.post("/api/definitions/resources/apply", files=files, data={
-        "selected": json.dumps(body["roots"]), "overwrite": "[]", "revision": body["revision"],
-    })
+    applied = client.post(
+        "/api/definitions/resources/apply",
+        files=files,
+        data={
+            "selected": json.dumps(body["roots"]),
+            "overwrite": "[]",
+            "revision": body["revision"],
+        },
+    )
     assert applied.status_code == 200
     assert applied.json()["imported"] == 3
-    assert client.app.state.strategy_engine.get("custom_standalone").file_path == destination / "strategies/custom/custom_standalone.py"
+    assert (
+        client.app.state.strategy_engine.get("custom_standalone").file_path
+        == destination / "strategies/custom/custom_standalone.py"
+    )
     assert json.loads((destination / "user_data/custom_factors/uf_dep.json").read_text()) == UF_DEP
-    assert json.loads((destination / "user_data/strategy_overrides/custom_standalone.json").read_text()) == {"params": {"n": 5}}
+    assert json.loads(
+        (destination / "user_data/strategy_overrides/custom_standalone.json").read_text()
+    ) == {"params": {"n": 5}}

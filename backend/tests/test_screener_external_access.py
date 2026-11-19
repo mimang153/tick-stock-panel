@@ -3,9 +3,11 @@
 conditions/order_by 是用户可控的 SQL 片段; 隔离连接若允许外部访问,
 注入的 read_parquet/COPY 可读写任意文件 (文件写 RCE)。
 """
+
 from __future__ import annotations
 
 from datetime import date
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import polars as pl
@@ -15,7 +17,7 @@ from app.services.screener import ScreenerService
 
 def _service_with_panel(panel: pl.DataFrame) -> ScreenerService:
     svc = ScreenerService(MagicMock(), asset_type="stock")
-    svc._load_enriched_for_date = lambda d: panel  # type: ignore[method-assign]
+    cast(Any, svc)._load_enriched_for_date = lambda d: panel
     return svc
 
 
@@ -52,9 +54,9 @@ def test_injected_read_of_valid_parquet_leaks_nothing(tmp_path) -> None:
     # 未加固的连接读它也会报错; 合法同构文件在未加固连接下会真的混入结果
     victim = tmp_path / "victim.parquet"
     _panel().write_parquet(victim)
-    svc = _service_with_panel(pl.DataFrame(
-        {"symbol": ["999999.SZ"], "close": [99.0], "turnover_rate": [9.0]}
-    ))
+    svc = _service_with_panel(
+        pl.DataFrame({"symbol": ["999999.SZ"], "close": [99.0], "turnover_rate": [9.0]})
+    )
     result = svc.run(
         date(2026, 9, 2),
         [f"1=1) UNION SELECT * FROM read_parquet('{victim}') --"],
@@ -106,14 +108,12 @@ def test_external_access_switch_is_the_effective_barrier(tmp_path) -> None:
     finally:
         plain.close()
 
-    hardened = duckdb.connect(
-        database=":memory:", config={"enable_external_access": False}
-    )
+    hardened = duckdb.connect(database=":memory:", config={"enable_external_access": False})
     try:
         raised = False
         try:
             hardened.execute(inject)
-        except Exception:
+        except Exception:  # noqa: BLE001 - 验证加固连接拒绝访问, 需捕获任意异常后断言
             raised = True
         assert raised, "external_access=False 的连接不应能读外部文件"
     finally:

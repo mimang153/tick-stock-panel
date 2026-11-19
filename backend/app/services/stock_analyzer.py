@@ -12,6 +12,7 @@
 
 不知道: HTTP、前端、配置持久化。
 """
+
 from __future__ import annotations
 
 import json
@@ -19,6 +20,7 @@ import logging
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 
@@ -37,6 +39,7 @@ _MAX_PERIODS = 4
 # ================================================================
 # 数据加载
 # ================================================================
+
 
 def _load_kline(repo, symbol: str) -> pl.DataFrame:
     """读取该标的最近 N 根日 K(已含技术指标 / 信号)。
@@ -60,15 +63,16 @@ def _clean_rows(df: pl.DataFrame, keep_cols: list[str]) -> list[dict]:
     """
     import datetime
     import math
+
     cols = [c for c in keep_cols if c in df.columns]
     sub = df.select(cols)
     rows = []
     for rec in sub.to_dicts():
-        clean = {}
+        clean: dict[str, Any] = {}
         for k, v in rec.items():
             if isinstance(v, float):
                 clean[k] = None if not math.isfinite(v) else round(v, 4)
-            elif isinstance(v, (datetime.date, datetime.datetime)):
+            elif isinstance(v, datetime.date | datetime.datetime):
                 clean[k] = v.isoformat()
             else:
                 clean[k] = v
@@ -95,6 +99,7 @@ def _load_financials(data_dir: Path, symbol: str) -> dict[str, list[dict]]:
         if "period_end" in df.columns:
             df = df.sort("period_end", descending=True).head(2)  # 只取最近 2 期
         import math
+
         rows = []
         for rec in df.to_dicts():
             clean = {}
@@ -195,7 +200,10 @@ _SYSTEM_PROMPT = """你是一位拥有 15 年 A 股一线研究经验的技术�
 # 用户消息构建
 # ================================================================
 
-def _paper_position_part(positions: list[dict], close: float | None, raw_close: float | None) -> str:
+
+def _paper_position_part(
+    positions: list[dict], close: float | None, raw_close: float | None
+) -> str:
     """虚拟持仓上下文 (V3): 模拟盘持有该标的时注入提示词, 让 AI 结合仓位给建议。
 
     positions 为多账户列表 [{account_id, qty, avg_cost}, ...] (V2 账户隔离),
@@ -252,36 +260,45 @@ def _build_user_prompt(
 
     has_fin = any(fins.values())
     if has_fin:
-        parts.extend([
-            "",
-            "以下是该标的最新财务数据(JSON,核心指标 + 利润表,金额单位为元):",
-            "```json",
-            json.dumps(fins, ensure_ascii=False),
-            "```",
-        ])
+        parts.extend(
+            [
+                "",
+                "以下是该标的最新财务数据(JSON,核心指标 + 利润表,金额单位为元):",
+                "```json",
+                json.dumps(fins, ensure_ascii=False),
+                "```",
+            ]
+        )
     elif asset_type == "index":
-        parts.extend([
-            "",
-            "(该标的为指数: 无财务、股本与涨跌停数据。请按系统提示词第 4 节的说明,"
-            "在基本面/财务面维度给出\"接入中\"的友好提示,不要编造数据;"
-            "消息面维度基于价量异动推断即可。)",
-        ])
+        parts.extend(
+            [
+                "",
+                "(该标的为指数: 无财务、股本与涨跌停数据。请按系统提示词第 4 节的说明,"
+                '在基本面/财务面维度给出"接入中"的友好提示,不要编造数据;'
+                "消息面维度基于价量异动推断即可。)",
+            ]
+        )
     elif asset_type == "etf":
-        parts.extend([
-            "",
-            "(该标的为 ETF: 场内基金无上市公司财务报表、股本与涨跌停口径。"
-            "请按系统提示词第 4 节的说明,在基本面/财务面维度明确这是 ETF 常态,"
-            "不要编造公司财务数字,也不要写成「财务接入中」;"
-            "消息面维度基于价量异动推断即可。)",
-        ])
+        parts.extend(
+            [
+                "",
+                "(该标的为 ETF: 场内基金无上市公司财务报表、股本与涨跌停口径。"
+                "请按系统提示词第 4 节的说明,在基本面/财务面维度明确这是 ETF 常态,"
+                "不要编造公司财务数字,也不要写成「财务接入中」;"
+                "消息面维度基于价量异动推断即可。)",
+            ]
+        )
     else:
-        parts.extend([
-            "",
-            "(该标的暂无财务数据:当前为 Free 模式或尚未同步财务报表。"
-            "请按系统提示词第 4 节的说明,在基本面/财务面维度给出\"接入中\"的友好提示,不要编造数据。)",
-        ])
+        parts.extend(
+            [
+                "",
+                "(该标的暂无财务数据:当前为 Free 模式或尚未同步财务报表。"
+                '请按系统提示词第 4 节的说明,在基本面/财务面维度给出"接入中"的友好提示,不要编造数据。)',
+            ]
+        )
 
     from app.services.ai_provider import build_focus_instruction
+
     focus_instruction = build_focus_instruction(focus, report_name="个股分析报告")
     if focus_instruction:
         parts.extend(["", focus_instruction])
@@ -296,24 +313,85 @@ def _build_user_prompt(
 # ================================================================
 
 _KLINE_KEEP_COLS = [
-    "date", "open", "high", "low", "close", "volume", "change_pct",
-    "ma5", "ma10", "ma20", "ma60",
-    "macd_dif", "macd_dea", "macd_hist",
-    "kdj_k", "kdj_d", "kdj_j",
-    "rsi_6", "rsi_14", "rsi_24",
-    "boll_upper", "boll_mid", "boll_lower",
-    "atr_14", "vol_ratio_5d", "turnover_rate",
+    "date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "change_pct",
+    "ma5",
+    "ma10",
+    "ma20",
+    "ma60",
+    "macd_dif",
+    "macd_dea",
+    "macd_hist",
+    "kdj_k",
+    "kdj_d",
+    "kdj_j",
+    "rsi_6",
+    "rsi_14",
+    "rsi_24",
+    "boll_upper",
+    "boll_mid",
+    "boll_lower",
+    "atr_14",
+    "vol_ratio_5d",
+    "turnover_rate",
     "consecutive_limit_ups",
     # 信号类(布尔)——只挑对消息面推断有用的几个
-    "signal_limit_up", "signal_broken_limit_up", "signal_macd_golden",
-    "signal_macd_dead", "signal_ma_golden_5_20", "signal_volume_surge",
-    "signal_boll_breakout_upper", "signal_boll_breakdown_lower",
+    "signal_limit_up",
+    "signal_broken_limit_up",
+    "signal_macd_golden",
+    "signal_macd_dead",
+    "signal_ma_golden_5_20",
+    "signal_volume_surge",
+    "signal_boll_breakout_upper",
+    "signal_boll_breakdown_lower",
 ]
 
 
 # ================================================================
 # 流式分析入口
 # ================================================================
+
+
+def _stream_prompt(
+    df: pl.DataFrame,
+    data_dir: Path,
+    symbol: str,
+    focus: str,
+    fins: dict[str, list[dict]],
+    levels: dict[str, list[dict]],
+    close: float | None,
+    asset_type: str,
+) -> str:
+    """构建流式分析用户提示词,包含虚拟持仓上下文。"""
+    paper_positions: list[dict] = []
+    try:
+        from app.strategy import paper as paper_trading
+
+        for acc_id in paper_trading.list_account_ids(data_dir):
+            pos = paper_trading.load_positions(data_dir, account_id=acc_id).get(symbol)
+            if pos and (pos.get("qty") or 0) > 0:
+                paper_positions.append({"account_id": acc_id, **pos})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("读取模拟盘持仓失败 (跳过注入): %s", e)
+    raw_close = float(df.tail(1)["raw_close"][0]) if "raw_close" in df.columns else None
+    kline_tail = _clean_rows(df, _KLINE_KEEP_COLS)
+    return _build_user_prompt(
+        kline_tail,
+        fins,
+        levels,
+        close,
+        symbol,
+        focus,
+        asset_type=asset_type,
+        paper_positions=paper_positions,
+        raw_close=raw_close,
+    )
+
 
 async def analyze_stock_stream(
     repo,
@@ -332,10 +410,13 @@ async def analyze_stock_stream(
     # 1. 加载 K 线
     df = _load_kline(repo, symbol)
     if df.is_empty():
-        yield json.dumps({
-            "type": "error",
-            "message": f"标的 {symbol} 暂无日 K 数据,请先同步",
-        }, ensure_ascii=False)
+        yield json.dumps(
+            {
+                "type": "error",
+                "message": f"标的 {symbol} 暂无日 K 数据,请先同步",
+            },
+            ensure_ascii=False,
+        )
         return
 
     # 2. 价位计算(基于 K 线)
@@ -347,36 +428,22 @@ async def analyze_stock_stream(
     fins = {} if asset_type in {"etf", "index"} else _load_financials(data_dir, symbol)
 
     # 4. meta
-    yield json.dumps({
-        "type": "meta",
-        "symbol": symbol,
-        "summary": summarize_levels(levels, close),
-        "levels": levels,
-        "close": close,
-    }, ensure_ascii=False)
+    yield json.dumps(
+        {
+            "type": "meta",
+            "symbol": symbol,
+            "summary": summarize_levels(levels, close),
+            "levels": levels,
+            "close": close,
+        },
+        ensure_ascii=False,
+    )
 
     # 5+6. 构建提示词 + 流式调用 LLM(整体 try-except,任何异常都 yield error,避免前端卡死)
     try:
         from app.services.ai_provider import stream_ai_text
 
-        # 虚拟持仓上下文 (V3): 逐账户 (V2 多账户) 收集持有该标的的持仓注入
-        # (任何异常静默跳过, 不影响分析)。
-        paper_positions: list[dict] = []
-        try:
-            from app.strategy import paper as paper_trading
-            for acc_id in paper_trading.list_account_ids(data_dir):
-                pos = paper_trading.load_positions(data_dir, account_id=acc_id).get(symbol)
-                if pos and (pos.get("qty") or 0) > 0:
-                    paper_positions.append({"account_id": acc_id, **pos})
-        except Exception as e:  # noqa: BLE001
-            logger.warning("读取模拟盘持仓失败 (跳过注入): %s", e)
-        # 浮盈口径用 raw: 持仓成本不复权, 与前复权 close 混算会在除权后失真
-        raw_close = float(df.tail(1)["raw_close"][0]) if "raw_close" in df.columns else None
-
-        kline_tail = _clean_rows(df, _KLINE_KEEP_COLS)
-        user_prompt = _build_user_prompt(kline_tail, fins, levels, close, symbol, focus,
-                                         asset_type=asset_type, paper_positions=paper_positions,
-                                         raw_close=raw_close)
+        user_prompt = _stream_prompt(df, data_dir, symbol, focus, fins, levels, close, asset_type)
         got_content = False
         async for delta in stream_ai_text(
             [
@@ -393,13 +460,15 @@ async def analyze_stock_stream(
             yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
 
     except Exception as e:
-        logger.exception("AI stock analysis failed for %s: %s", symbol, e)
+        logger.exception("AI stock analysis failed for %s", symbol)
         yield json.dumps({"type": "error", "message": f"AI 分析失败: {e}"}, ensure_ascii=False)
         return
 
     if not got_content:
         # 流正常结束但一个正文块都没有(典型: 输出上限被思考吃光后静默截断)
         logger.warning("AI stock analysis ended with empty content for %s", symbol)
-        yield json.dumps({"type": "error", "message": "AI 未返回正文(输出被截断), 请重试"}, ensure_ascii=False)
+        yield json.dumps(
+            {"type": "error", "message": "AI 未返回正文(输出被截断), 请重试"}, ensure_ascii=False
+        )
         return
     yield json.dumps({"type": "done"}, ensure_ascii=False)

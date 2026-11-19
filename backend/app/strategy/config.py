@@ -4,6 +4,7 @@
 不知道: 引擎、AI、前端、回测。
 存储: data/user_data/strategy_overrides/{strategy_id}.json
 """
+
 from __future__ import annotations
 
 import copy
@@ -37,10 +38,7 @@ def _overrides_dir(data_dir: Path) -> Path:
 def _path(data_dir: Path, strategy_id: str, *, ensure_dir: bool = True) -> Path:
     # ensure_dir=False 供热路径读取: mkdir 系统调用在 Windows 上 ~0.07ms,
     # 读缓存命中时跳过它 (目录由写路径保证存在)。
-    if ensure_dir:
-        d = _overrides_dir(data_dir)
-    else:
-        d = data_dir / "user_data" / "strategy_overrides"
+    d = _overrides_dir(data_dir) if ensure_dir else data_dir / "user_data" / "strategy_overrides"
     return d / f"{strategy_id}.json"
 
 
@@ -75,7 +73,7 @@ def load_override(data_dir: Path, strategy_id: str) -> dict:
         _override_cache[key] = data
         _override_cache_sig[key] = sig
         return copy.deepcopy(data)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - 单个策略覆盖文件损坏不影响其余策略
         logger.warning("load override %s failed: %s", strategy_id, e)
         return {}
 
@@ -104,6 +102,6 @@ def list_overrides(data_dir: Path) -> dict[str, dict]:
         try:
             sid = f.stem
             result[sid] = json.loads(f.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception:  # noqa: BLE001 - 单个策略定义文件损坏, 跳过继续加载
             continue
     return result

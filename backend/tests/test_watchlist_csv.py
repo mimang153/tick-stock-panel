@@ -167,8 +167,8 @@ def test_import_dedupe_and_header_skipped(tmp_path: Path, ck_runtime):
     assert symbols == ["600036.SH", "515880.SH"]
 
 
-def test_import_junk_rows_ignored(tmp_path: Path):
-    _write_instruments(tmp_path)
+def test_import_junk_rows_ignored(tmp_path: Path, ck_runtime):
+    _write_instruments(tmp_path, ck_runtime)
     raw = "hello,world\n600036,招商银行\n,,\n".encode()
     res = import_watchlist_csv(raw, tmp_path)
     assert [c["symbol"] for c in res["candidates"]] == ["600036.SH"]
@@ -189,9 +189,9 @@ def test_codes_dedupe_order_and_counts(tmp_path: Path, ck_runtime):
     assert by_code["999999"]["matched"] is False
 
 
-def test_codes_same_line_multiple_codes_not_collapsed(tmp_path: Path):
+def test_codes_same_line_multiple_codes_not_collapsed(tmp_path: Path, ck_runtime):
     # 同行多码（逗号/空格分隔）不得被压成单候选
-    _write_instruments(tmp_path)
+    _write_instruments(tmp_path, ck_runtime)
     res = import_watchlist_codes("600036, 515880   601636", tmp_path)
     assert res["codes"] == ["600036", "515880", "601636"]
     assert res["matched_count"] == 2

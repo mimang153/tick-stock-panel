@@ -6,6 +6,7 @@ fetch 抛出裸 network error。空闲期插入 {"type":"ping"} 心跳行保活;
 前端各消费方与 daily_pipeline 的 recap 消费循环对未知事件类型均静默
 忽略, 新增类型无兼容影响。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -39,7 +40,7 @@ async def with_heartbeat(
             async for item in events:
                 queue.put_nowait(("item", item))
             queue.put_nowait(("eof", None))
-        except Exception as e:  # 由消费端原样重抛
+        except Exception as e:  # noqa: BLE001 - 由消费端原样重抛,此处仅透传
             queue.put_nowait(("error", e))
 
     pump_task = asyncio.create_task(pump())

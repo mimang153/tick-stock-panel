@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Any
 
 import polars as pl
 import pytest
 
 from app.indicators import pipeline
 
-_CK = {"store": None}
+_CK: dict[str, Any] = {"store": None}
 
 
 @pytest.fixture(autouse=True)
@@ -75,6 +76,13 @@ def _write_daily_multi(data_dir, symbols: list[str], dates: list[str]) -> None:
             _CK["store"].write_daily("kline_daily", df)
 
 
+def _read_enriched(day: str, columns: list[str] | None = None) -> pl.DataFrame:
+    """CK-only 发布后 enriched 的唯一在线读源是 CK 事实表。"""
+    dt = date.fromisoformat(day)
+    cols = columns or ["symbol", "date", "close"]
+    return _CK["store"].read_daily("kline_daily_enriched", start=dt, end=dt, columns=cols)
+
+
 def _fake_compute_enriched(raw: pl.DataFrame, **_kwargs) -> pl.DataFrame:
     return raw.with_columns(
         pl.col("close").alias("raw_close"),
@@ -98,12 +106,14 @@ def test_full_rebuild_overwrites_existing_partitions_without_deleting_base(tmp_p
 
     assert written == 2
     assert marker.read_text(encoding="utf-8") == "keep"
-    assert pl.read_parquet(tmp_path / "kline_daily_enriched" / "date=2026-07-14" / "part.parquet")[
-        "close"
-    ].to_list() == [14.0]
+    assert _read_enriched("2026-07-14")["close"].to_list() == [14.0]
+    assert _read_enriched("2026-07-15")["close"].to_list() == [15.0]
+    # CK-only 发布不覆盖本地 parquet；预置的 07-15 仍保留旧值
     assert pl.read_parquet(tmp_path / "kline_daily_enriched" / "date=2026-07-15" / "part.parquet")[
         "close"
-    ].to_list() == [15.0]
+    ].to_list() == [1.0]
+    current = _CK["store"].current_generation("stock")
+    assert current and current["state"] == "ready" and current["generation_id"]
 
 
 def test_full_rebuild_tolerates_orphan_partitions_absent_from_daily(tmp_path, monkeypatch):
@@ -122,12 +132,8 @@ def test_full_rebuild_tolerates_orphan_partitions_absent_from_daily(tmp_path, mo
 
     assert written == 2
     # 孤儿分区原样保留 (合并只重写重建范围内的分区, 不删旧目录)
-    assert pl.read_parquet(tmp_path / "kline_daily_enriched" / "date=2026-07-13" / "part.parquet")[
-        "close"
-    ].to_list() == [13.0]
-    assert pl.read_parquet(tmp_path / "kline_daily_enriched" / "date=2026-07-15" / "part.parquet")[
-        "close"
-    ].to_list() == [15.0]
+    assert _read_enriched("2026-07-13")["close"].to_list() == [13.0]
+    assert _read_enriched("2026-07-15")["close"].to_list() == [15.0]
 
 
 def test_full_rebuild_rejects_missing_existing_dates_before_writing(tmp_path, monkeypatch):
@@ -148,10 +154,7 @@ def test_full_rebuild_rejects_missing_existing_dates_before_writing(tmp_path, mo
     with pytest.raises(RuntimeError, match="缺少已有日期分区"):
         pipeline.run_pipeline(data_dir=tmp_path)
 
-    existing = pl.read_parquet(
-        tmp_path / "kline_daily_enriched" / "date=2026-07-15" / "part.parquet"
-    )
-    assert existing["close"].to_list() == [1.0]
+    assert _read_enriched("2026-07-15")["close"].to_list() == [1.0]
 
 
 # ================================================================
@@ -181,9 +184,13 @@ def test_full_rebuild_streaming_output_matches_direct_compute(tmp_path, monkeypa
         ["symbol", "date"]
     )
 
-    got = pl.read_parquet(str(tmp_path / "kline_daily_enriched" / "**" / "*.parquet"))
+    got = _CK["store"].read_daily("kline_daily_enriched")
     got_cols = [c for c in expected.columns if c in got.columns]
-    assert got.select(got_cols).sort(["symbol", "date"]).equals(expected.select(got_cols))
+    assert (
+        got.select(got_cols)
+        .sort(["symbol", "date"])
+        .equals(expected.select(got_cols).sort(["symbol", "date"]))
+    )
 
 
 def test_full_rebuild_cleans_staging_and_keeps_it_outside_globs(tmp_path, monkeypatch):
@@ -196,9 +203,13 @@ def test_full_rebuild_cleans_staging_and_keeps_it_outside_globs(tmp_path, monkey
 
     staging_root = tmp_path / ".staging" / "enriched_rebuild"
     assert not staging_root.exists() or not any(staging_root.iterdir())
-    # 暂存位于 enriched 树外: enriched glob 只见 date=* 分区
+    # 暂存位于 enriched 树外；CK-only 发布后本地不再产生 date=* 分区
     parts = list((tmp_path / "kline_daily_enriched").glob("date=*"))
-    assert sorted(p.name for p in parts) == ["date=2026-07-14", "date=2026-07-15"]
+    assert parts == []
+    assert [d.isoformat() for d in _CK["store"].list_daily_dates("kline_daily_enriched")] == [
+        "2026-07-14",
+        "2026-07-15",
+    ]
 
 
 def test_stale_staging_swept_on_full_rebuild(tmp_path, monkeypatch):

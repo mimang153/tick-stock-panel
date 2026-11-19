@@ -5,6 +5,7 @@
 OCR 一致的候选结构，前端复用同一套勾选确认流程；写入目标统一走自选分组语义
 （watchlist.add_batch 的 group_ids M:N 并入），本模块不落盘、不建标签。
 """
+
 from __future__ import annotations
 
 import csv
@@ -147,8 +148,8 @@ def _resolve_rows(
     code_to_symbol, symbol_to_name = build_instrument_lookups(data_dir)
     # 名称兜底反向表：CSV 可能只有名称列（无代码）
     name_to_symbol: dict[str, str] = {}
-    for symbol, name in symbol_to_name.items():
-        name_to_symbol.setdefault(name, symbol)
+    for sym, name in symbol_to_name.items():
+        name_to_symbol.setdefault(name, sym)
 
     existing = existing_symbols or set()
     # 全部唯一代码按出现顺序一次性构建候选（复用 OCR 的构造逻辑，单一来源）
@@ -165,12 +166,14 @@ def _resolve_rows(
     }
 
     candidates: list[dict[str, Any]] = []
-    seen_symbols: set[str] = set()       # 已发出的已匹配 symbol
+    seen_symbols: set[str] = set()  # 已发出的已匹配 symbol
     emitted_unmatched: set[str] = set()  # 已发出的未匹配 code
     for row_codes, row_name in rows:
         # 行内代码优先：取第一个已匹配主数据的（避免价格/成交量数字误报）
         matched = next((cand_by_code[c] for c in row_codes if cand_by_code[c].matched), None)
-        symbol = matched.symbol if matched else (name_to_symbol.get(row_name) if row_name else None)
+        symbol: str | None = (
+            matched.symbol if matched else (name_to_symbol.get(row_name) if row_name else None)
+        )
         if symbol:
             if symbol in seen_symbols:
                 continue

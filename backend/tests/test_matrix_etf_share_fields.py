@@ -17,6 +17,7 @@ _populate_matrix_derived_arrays 直接抛
 turnover_rate 降级为全 NaN 列 (与运行期 _optional_field 语义一致),
 股票行为保持不变。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -78,43 +79,53 @@ def test_etf_cache_profile_excludes_share_fields():
     engine = _engine()
     etf_plan = _resolve_research_plan(engine, asset_type="etf")
     etf_profile = build_matrix_cache_profile(
-        engine, "etf", requested_plan=etf_plan, requested_forward_bars=5,
+        engine,
+        "etf",
+        requested_plan=etf_plan,
+        requested_forward_bars=5,
     )
     assert "total_shares" not in etf_profile.field_columns
     assert "float_shares" not in etf_profile.field_columns
 
     stock_plan = _resolve_research_plan(engine, asset_type="stock")
     stock_profile = build_matrix_cache_profile(
-        engine, "stock", requested_plan=stock_plan, requested_forward_bars=5,
+        engine,
+        "stock",
+        requested_plan=stock_plan,
+        requested_forward_bars=5,
     )
     assert {"total_shares", "float_shares"} <= set(stock_profile.field_columns)
 
 
 def _etf_instruments() -> pl.DataFrame:
     # index_sync._fetch_instruments_by_type("etf","etf") 的实际落盘 schema
-    return pl.DataFrame({
-        "symbol": ["510300.SH", "510500.SH"],
-        "name": ["沪深300ETF", "中证500ETF"],
-        "code": ["510300", "510500"],
-        "asset_type": ["etf", "etf"],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["510300.SH", "510500.SH"],
+            "name": ["沪深300ETF", "中证500ETF"],
+            "code": ["510300", "510500"],
+            "asset_type": ["etf", "etf"],
+        }
+    )
 
 
 def _etf_dataset(tmp_path: Path) -> pads.Dataset:
-    pl.DataFrame({
-        "symbol": ["510300.SH", "510500.SH"],
-        "date": [date(2024, 1, 2)] * 2,
-        "open": [4.0, 6.0],
-        "high": [4.1, 6.1],
-        "low": [3.9, 5.9],
-        "close": [4.0, 6.0],
-        "volume": [100.0, 200.0],
-        "amount": [400.0, 1200.0],
-        "raw_close": [4.0, 6.0],
-        "raw_high": [4.1, 6.1],
-        "raw_low": [3.9, 5.9],
-        "turnover_rate": [0.01, 0.02],
-    }).write_parquet(tmp_path / "part.parquet")
+    pl.DataFrame(
+        {
+            "symbol": ["510300.SH", "510500.SH"],
+            "date": [date(2024, 1, 2)] * 2,
+            "open": [4.0, 6.0],
+            "high": [4.1, 6.1],
+            "low": [3.9, 5.9],
+            "close": [4.0, 6.0],
+            "volume": [100.0, 200.0],
+            "amount": [400.0, 1200.0],
+            "raw_close": [4.0, 6.0],
+            "raw_high": [4.1, 6.1],
+            "raw_low": [3.9, 5.9],
+            "turnover_rate": [0.01, 0.02],
+        }
+    ).write_parquet(tmp_path / "part.parquet")
     return pads.dataset(str(tmp_path / "part.parquet"), format="parquet")
 
 
@@ -122,12 +133,13 @@ def test_matrix_storage_fields_resolve_with_etf_instruments(tmp_path):
     engine = _engine()
     etf_plan = _resolve_research_plan(engine, asset_type="etf")
     profile = build_matrix_cache_profile(
-        engine, "etf", requested_plan=etf_plan, requested_forward_bars=5,
+        engine,
+        "etf",
+        requested_plan=etf_plan,
+        requested_forward_bars=5,
     )
     requested = (
-        set(etf_plan.base_columns)
-        | set(etf_plan.instrument_columns)
-        | set(etf_plan.matrix_columns)
+        set(etf_plan.base_columns) | set(etf_plan.instrument_columns) | set(etf_plan.matrix_columns)
     )
     build_fields = frozenset(
         _normalize_matrix_cache_fields(frozenset(requested))
@@ -136,7 +148,9 @@ def test_matrix_storage_fields_resolve_with_etf_instruments(tmp_path):
     assert "total_shares" not in build_fields
 
     _parquet_fields, matrix_fields, vector_fields = _resolve_matrix_storage_fields(
-        _etf_dataset(tmp_path), build_fields, _etf_instruments(),
+        _etf_dataset(tmp_path),
+        build_fields,
+        _etf_instruments(),
     )
     assert "total_shares" not in matrix_fields + vector_fields
     assert vector_fields == []
@@ -155,19 +169,21 @@ def test_share_fields_still_unavailable_without_sanitization(tmp_path):
 
 def _etf_dataset_without_turnover(tmp_path: Path) -> pads.Dataset:
     """真实 ETF enriched 窄表: 只有 OHLCV 基础列, 无 turnover_rate。"""
-    pl.DataFrame({
-        "symbol": ["510300.SH", "510500.SH"],
-        "date": [date(2024, 1, 2)] * 2,
-        "open": [4.0, 6.0],
-        "high": [4.1, 6.1],
-        "low": [3.9, 5.9],
-        "close": [4.0, 6.0],
-        "volume": [100.0, 200.0],
-        "amount": [400.0, 1200.0],
-        "raw_close": [4.0, 6.0],
-        "raw_high": [4.1, 6.1],
-        "raw_low": [3.9, 5.9],
-    }).write_parquet(tmp_path / "part.parquet")
+    pl.DataFrame(
+        {
+            "symbol": ["510300.SH", "510500.SH"],
+            "date": [date(2024, 1, 2)] * 2,
+            "open": [4.0, 6.0],
+            "high": [4.1, 6.1],
+            "low": [3.9, 5.9],
+            "close": [4.0, 6.0],
+            "volume": [100.0, 200.0],
+            "amount": [400.0, 1200.0],
+            "raw_close": [4.0, 6.0],
+            "raw_high": [4.1, 6.1],
+            "raw_low": [3.9, 5.9],
+        }
+    ).write_parquet(tmp_path / "part.parquet")
     return pads.dataset(str(tmp_path / "part.parquet"), format="parquet")
 
 
@@ -221,13 +237,15 @@ def test_stock_turnover_rate_still_derived_when_float_shares_present(tmp_path):
     plan = _resolve_research_plan(engine, asset_type="stock")
     assert "turnover_rate" in plan.matrix_columns
 
-    stock_inst = pl.DataFrame({
-        "symbol": ["510300.SH", "510500.SH"],
-        "name": ["沪深300ETF", "中证500ETF"],
-        "code": ["510300", "510500"],
-        "asset_type": ["stock", "stock"],
-        "float_shares": [1.0e6, 2.0e6],  # 测试用极小股本, 便于断言非 NaN
-    })
+    stock_inst = pl.DataFrame(
+        {
+            "symbol": ["510300.SH", "510500.SH"],
+            "name": ["沪深300ETF", "中证500ETF"],
+            "code": ["510300", "510500"],
+            "asset_type": ["stock", "stock"],
+            "float_shares": [1.0e6, 2.0e6],  # 测试用极小股本, 便于断言非 NaN
+        }
+    )
     dataset = _etf_dataset_without_turnover(tmp_path)  # parquet 无 turnover_rate
     parquet_fields, matrix_fields, vector_fields = _resolve_matrix_storage_fields(
         dataset,
@@ -264,6 +282,7 @@ def test_stock_turnover_rate_still_derived_when_float_shares_present(tmp_path):
 
 # ── #215: 运行期股票专属过滤键中和 ────────────────────────────
 
+
 def test_basic_filter_for_asset_neutralizes_stock_only_runtime_keys() -> None:
     """#215 回归: boards 按股票代码前缀匹配、price_min=3 是股票专属口径,
     对 ETF 不可满足 —— 运行期不中和会让入场候选在掩码阶段静默清零
@@ -273,9 +292,14 @@ def test_basic_filter_for_asset_neutralizes_stock_only_runtime_keys() -> None:
 
     sanitized = _basic_filter_for_asset(dict(DEFAULT_BASIC_FILTER), "etf")
     for key in (
-        "price_min", "price_max", "boards",
-        "market_cap_min", "float_cap_min", "float_cap_max",
-        "turnover_min", "turnover_max",
+        "price_min",
+        "price_max",
+        "boards",
+        "market_cap_min",
+        "float_cap_min",
+        "float_cap_max",
+        "turnover_min",
+        "turnover_max",
     ):
         assert sanitized[key] is None, f"{key} 应被中和"
 

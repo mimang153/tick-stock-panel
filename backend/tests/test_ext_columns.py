@@ -1,4 +1,5 @@
 """#547: 重复扩展列不能使梯队 500 或向自选泄漏 _right 列。"""
+
 from datetime import date
 from types import SimpleNamespace
 
@@ -29,8 +30,11 @@ _PARSERS = [screener._parse_ext_columns, watchlist._parse_ext_columns]
         ),
         (
             f"{_FIELD},other.所属概念,{_FIELD},ext_gn_ths.所属行业",
-            [("ext_gn_ths", "所属概念", None), ("other", "所属概念", None),
-             ("ext_gn_ths", "所属行业", None)],
+            [
+                ("ext_gn_ths", "所属概念", None),
+                ("other", "所属概念", None),
+                ("ext_gn_ths", "所属行业", None),
+            ],
         ),
         (
             f"{_FIELD}@25:00,bad-id.field,{_FIELD}",
@@ -44,7 +48,8 @@ def test_duplicate_columns_preserve_order_and_normalized_time(parse, raw, expect
 
 @pytest.mark.parametrize("parse", _PARSERS, ids=["screener", "watchlist"])
 @pytest.mark.parametrize(
-    "raw", [f"{_FIELD}@09:20,{_FIELD}", f"{_FIELD}@09:20,{_FIELD}@09:25", "a__b.c,a.b__c"],
+    "raw",
+    [f"{_FIELD}@09:20,{_FIELD}", f"{_FIELD}@09:20,{_FIELD}@09:25", "a__b.c,a.b__c"],
 )
 def test_conflicting_output_columns_are_rejected(parse, raw):
     with pytest.raises(HTTPException) as exc:
@@ -58,43 +63,60 @@ def client(tmp_path, monkeypatch):
 
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     symbols = ["600000.SH", "000001.SZ"]
-    snapshot = pl.DataFrame({
-        "symbol": symbols, "name": ["涨停样例", "跌停样例"],
-        "close": [11.0, 9.0], "change_pct": [0.1, -0.1],
-        "signal_limit_up": [True, False], "signal_limit_down": [False, True],
-        "signal_broken_limit_up": [False, False], "signal_limit_down_recovery": [False, False],
-        "consecutive_limit_ups": [2, 0], "consecutive_limit_downs": [0, 2],
-    })
+    snapshot = pl.DataFrame(
+        {
+            "symbol": symbols,
+            "name": ["涨停样例", "跌停样例"],
+            "close": [11.0, 9.0],
+            "change_pct": [0.1, -0.1],
+            "signal_limit_up": [True, False],
+            "signal_limit_down": [False, True],
+            "signal_broken_limit_up": [False, False],
+            "signal_limit_down_recovery": [False, False],
+            "consecutive_limit_ups": [2, 0],
+            "consecutive_limit_downs": [0, 2],
+        }
+    )
     config = ExtConfig(
-        id="ext_gn_ths", label="测试扩展", mode="snapshot",
+        id="ext_gn_ths",
+        label="测试扩展",
+        mode="snapshot",
         fields=[ExtField("所属概念"), ExtField("所属行业"), ExtField("t")],
         pull=PullConfig(url="https://example.test", time_field="t"),
     )
     ExtConfigStore(tmp_path).upsert(config)
     parquet = tmp_path / "ext_data" / config.id / "part.parquet"
-    pl.DataFrame({
-        "symbol": [s for s in symbols for _ in range(2)],
-        "t": ["09:19:00", "09:25:00"] * 2,
-        "所属概念": ["早盘概念", "最新概念"] * 2,
-        "所属行业": ["早盘行业", "最新行业"] * 2,
-    }).write_parquet(parquet)
+    pl.DataFrame(
+        {
+            "symbol": [s for s in symbols for _ in range(2)],
+            "t": ["09:19:00", "09:25:00"] * 2,
+            "所属概念": ["早盘概念", "最新概念"] * 2,
+            "所属行业": ["早盘行业", "最新行业"] * 2,
+        }
+    ).write_parquet(parquet)
     config_path = parquet.with_name("config.json")
     originals = {p: p.read_bytes() for p in (parquet, config_path)}
     repo = SimpleNamespace(
         store=SimpleNamespace(data_dir=tmp_path, db=None),
         get_enriched_latest=lambda: (snapshot, _DAY),
         get_enriched_latest_asset=lambda _: (pl.DataFrame(), None),
-        get_etf_symbol_set=set, get_index_symbol_set=set,
+        get_etf_symbol_set=set,
+        get_index_symbol_set=set,
         get_instruments=pl.DataFrame,
         get_name_map=lambda _: dict(zip(symbols, ["涨停样例", "跌停样例"], strict=True)),
     )
-    monkeypatch.setattr(watchlist.watchlist, "list_symbols", lambda: [{"symbol": s} for s in symbols])
+    monkeypatch.setattr(
+        watchlist.watchlist, "list_symbols", lambda: [{"symbol": s} for s in symbols]
+    )
     monkeypatch.setattr(ScreenerService, "_load_enriched_for_date", lambda self, day: snapshot)
-    monkeypatch.setattr(ScreenerService, "load_prior_consecutive", lambda self, day, col: pl.DataFrame())
+    monkeypatch.setattr(
+        ScreenerService, "load_prior_consecutive", lambda self, day, col: pl.DataFrame()
+    )
     app = FastAPI()
     app.state.repo = repo
     app.state.depth_service = SimpleNamespace(
-        get_sealed_map=lambda *args, **kwargs: {}, is_sealed_ready=lambda _: False,
+        get_sealed_map=lambda *args, **kwargs: {},
+        is_sealed_ready=lambda _: False,
     )
     app.include_router(screener.router)
     app.include_router(watchlist.router)

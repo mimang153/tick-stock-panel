@@ -120,6 +120,15 @@ class _MinuteQueryMixin(_RepoMixinBase):
 
     def get_matrix_data_generation(self, asset_type: str = "stock") -> str:
         """Return the stable generation for managed enriched readers."""
+        store = getattr(self, "storage", None)
+        current = getattr(store, "current_generation", None)
+        if current is not None:
+            try:
+                record = current(asset_type)
+                if record:
+                    return str(record.get("generation_id") or record.get("committed_at"))
+            except Exception:  # noqa: BLE001 - CK 元数据不可用时回退本地标记
+                pass
         return get_enriched_generation(self.store.data_dir, asset_type)
 
     def get_enriched_generation_snapshot(

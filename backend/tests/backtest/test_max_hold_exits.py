@@ -5,6 +5,7 @@ _build_max_hold_exits 是 /api/backtest/run 里 max_hold_days 强制平仓的纯
 1. 链式 `iloc[row][col] = True` 在 pandas CoW 下写入丢失 → 强制退出信号从不生效。
 2. 以 `entries.copy()` 起步 → 把入场位当退出位, 入场当日即被平仓。
 """
+
 from __future__ import annotations
 
 import pandas as pd

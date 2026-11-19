@@ -5,6 +5,7 @@
 修复: darwin frozen 默认 → ~/Library/Application Support/TSP (包外),
 启动时自动把包内/兄弟目录的旧数据搬过来。
 """
+
 from __future__ import annotations
 
 import json
@@ -16,6 +17,7 @@ from app.config import _user_data_root
 from app.tickflow.repository import DataStore
 
 # ── 路径解析 ─────────────────────────────────────────────────────────
+
 
 def test_darwin_frozen_uses_app_support_outside_bundle(tmp_path, monkeypatch):
     home = tmp_path / "fakehome"
@@ -39,6 +41,7 @@ def test_dev_mode_uses_project_root(monkeypatch):
 
 
 # ── 迁移 (直接构造最小实例调方法, 不触发完整 __init__) ────────────────
+
 
 def _repo_with_data_dir(new_dir: Path) -> DataStore:
     repo = DataStore.__new__(DataStore)
@@ -145,6 +148,7 @@ def test_dev_mode_never_migrates(tmp_path, monkeypatch):
 
 # ── 跳过整体迁移时单独捞回 secrets.json ───────────────────────────────
 
+
 def _setup_skip_migration(tmp_path):
     """构造 has_new_data=True 场景: 新目录已有 parquet, 旧包数据还在。"""
     new_dir = tmp_path / "newdata"
@@ -181,7 +185,9 @@ def test_migration_rescues_secrets_when_new_has_data(tmp_path, monkeypatch):
 def test_migration_keeps_existing_credential_file_as_one_configuration(tmp_path, monkeypatch):
     """旧地址/账号不能与新 Key 拼接；已有凭据整份优先。"""
     new_dir, bundle_data = _setup_skip_migration(tmp_path)
-    (bundle_data / "user_data" / "secrets.json").write_text('{"mine": 2, "legacy": 1}', encoding="utf-8")
+    (bundle_data / "user_data" / "secrets.json").write_text(
+        '{"mine": 2, "legacy": 1}', encoding="utf-8"
+    )
     (new_dir / "user_data" / "secrets.json").write_text('{"mine": 1}', encoding="utf-8")
 
     monkeypatch.setattr(sys, "frozen", True, raising=False)
@@ -233,7 +239,9 @@ def test_migration_rescues_preferences_when_new_has_data(tmp_path, monkeypatch):
 def test_migration_only_fills_missing_preference_fields(tmp_path, monkeypatch):
     """新目录已有偏好优先，旧文件只补缺失字段。"""
     new_dir, bundle_data = _setup_skip_migration(tmp_path)
-    (bundle_data / "user_data" / "preferences.json").write_text('{"mine": false, "legacy": true}', encoding="utf-8")
+    (bundle_data / "user_data" / "preferences.json").write_text(
+        '{"mine": false, "legacy": true}', encoding="utf-8"
+    )
     (new_dir / "user_data" / "preferences.json").write_text('{"mine": true}', encoding="utf-8")
 
     monkeypatch.setattr(sys, "frozen", True, raising=False)
@@ -242,4 +250,7 @@ def test_migration_only_fills_missing_preference_fields(tmp_path, monkeypatch):
 
     _repo_with_data_dir(new_dir)._migrate_legacy_data_dir()
 
-    assert json.loads((new_dir / "user_data" / "preferences.json").read_text(encoding="utf-8")) == {"mine": True, "legacy": True}
+    assert json.loads((new_dir / "user_data" / "preferences.json").read_text(encoding="utf-8")) == {
+        "mine": True,
+        "legacy": True,
+    }

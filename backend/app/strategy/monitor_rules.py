@@ -12,11 +12,12 @@
   - 字段白名单复用 custom_signals.ALLOWED_FIELDS (阈值条件) + 信号列清单 (布尔条件)
   - id 正则与 custom_signals 一致,保证可纳入同一索引体系
 """
+
 from __future__ import annotations
 
 import math
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from app.definitions import JsonDefinitionStore
@@ -25,7 +26,17 @@ from app.strategy.intraday_signals import uses_intraday_signals
 
 # ── 常量 ────────────────────────────────────────────────
 ID_RE = re.compile(r"^[a-z0-9_]{1,40}$")
-RULE_TYPES = {"strategy", "signal", "price", "market", "ladder", "sector", "abnormal", "volume_delta", "date"}
+RULE_TYPES = {
+    "strategy",
+    "signal",
+    "price",
+    "market",
+    "ladder",
+    "sector",
+    "abnormal",
+    "volume_delta",
+    "date",
+}
 SCOPES = {"symbols", "all", "sector", "watchlist_group"}
 LOGICS = {"and", "or"}
 DIRECTIONS = {"entry", "exit", "both"}
@@ -104,8 +115,8 @@ def date_rule_in_window(remind_date: str, lead_days: int, today: str) -> bool:
     return start <= today_d <= remind
 
 
-def validate(rule: dict) -> None:
-    """校验一条监控规则,非法则抛 ValueError (含中文信息)。"""
+def _validate_common(rule: dict) -> None:
+    """校验 id/name/type 三个公共字段。"""
     rid = rule.get("id", "")
     if not isinstance(rid, str) or not ID_RE.match(rid):
         raise ValueError(f"规则 id 非法 (仅小写字母数字下划线, 1-40字符): {rid!r}")
@@ -114,157 +125,205 @@ def validate(rule: dict) -> None:
     if rule.get("type") not in RULE_TYPES:
         raise ValueError(f"type 必须是 {RULE_TYPES} 之一")
 
-    # 指数规则: 仅 signal/price + symbols 作用域 + 不含分时信号
-    # (指数无涨跌停/策略/封单语义; 无本地分钟K, 分时信号会静默不触发)
-    if rule.get("asset_type") == "index":
-        if rule.get("type") not in ("signal", "price"):
-            raise ValueError("指数监控仅支持 signal/price 类型 (无涨跌停/策略/封单语义)")
-        if rule.get("scope") != "symbols":
-            raise ValueError("指数监控仅支持指定标的 (scope=symbols)")
-        if uses_intraday_signals(rule):
-            raise ValueError("指数无本地分钟K数据, 不支持分时信号条件")
 
-    # 策略类型: 需要 strategy_id + direction,conditions 可空
-    if rule.get("type") == "strategy":
-        if not rule.get("strategy_id"):
-            raise ValueError("策略类型规则必须指定 strategy_id")
-        if rule.get("direction", "entry") not in DIRECTIONS:
-            raise ValueError(f"direction 必须是 {DIRECTIONS} 之一")
-        notify_events = rule.get("notify_events")
-        if not isinstance(notify_events, list) or not notify_events:
-            raise ValueError("策略类型规则至少选择一个通知事件")
-        invalid_events = set(notify_events) - STRATEGY_NOTIFY_EVENTS
-        if invalid_events:
-            raise ValueError(f"notify_events 包含非法事件: {sorted(invalid_events)}")
-        score_min = rule.get("score_min")
-        score_max = rule.get("score_max")
-        for label, value in (("评分下限", score_min), ("评分上限", score_max)):
-            if value is None:
-                continue
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-                raise ValueError(f"{label}必须是 0 到 100 之间的数字")
-            if value < 0 or value > 100:
-                raise ValueError(f"{label}必须是 0 到 100 之间的数字")
-        if score_min is not None and score_max is not None and score_min > score_max:
-            raise ValueError("评分下限不能大于评分上限")
-    elif rule.get("type") == "ladder":
-        # 连板梯队封单监控: 需 metric + threshold + direction(up/down), 不用 conditions
-        if rule.get("metric", "sealed_vol") not in LADDER_METRICS:
-            raise ValueError(f"metric 必须是 {LADDER_METRICS} 之一")
-        if rule.get("direction", "up") not in LADDER_DIRECTIONS:
-            raise ValueError(f"direction 必须是 {LADDER_DIRECTIONS} 之一 (up=涨停炸板, down=跌停翘板)")
-        thr = rule.get("threshold")
-        if not isinstance(thr, (int, float)) or thr < 0:
-            raise ValueError("threshold 必须是非负数字 (封单 ≤ 此值时报警)")
-    elif rule.get("type") == "sector":
-        kind = rule.get("sector_kind")
-        if kind not in SECTOR_KINDS:
-            raise ValueError(f"sector_kind 必须是 {SECTOR_KINDS} 之一")
-        targets = rule.get("sector_targets")
-        if not isinstance(targets, list) or not targets:
-            raise ValueError("板块监控至少选择一个监控对象")
-        if len(targets) > 20:
-            raise ValueError("板块监控对象最多 20 个")
-        for target in targets:
-            if not isinstance(target, dict) or not target.get("key") or not target.get("name"):
-                raise ValueError("板块监控对象格式错误")
-            if target.get("kind") != kind:
-                raise ValueError("板块监控对象类型必须一致")
-        if rule.get("sector_trigger") not in SECTOR_TRIGGERS:
-            raise ValueError(f"sector_trigger 必须是 {SECTOR_TRIGGERS} 之一")
-        if rule.get("direction") not in LADDER_DIRECTIONS:
-            raise ValueError("板块监控 direction 必须是 up 或 down")
-        threshold_pct = rule.get("threshold_pct")
-        if not isinstance(threshold_pct, (int, float)) or not 0 < threshold_pct <= 20:
-            raise ValueError("板块监控阈值必须大于 0 且不超过 20%")
-        if rule.get("sector_trigger") == "momentum" and rule.get("window_minutes") not in SECTOR_WINDOWS:
-            raise ValueError(f"板块异动窗口必须是 {sorted(SECTOR_WINDOWS)} 分钟之一")
-    elif rule.get("type") == "abnormal":
-        # 异动边缘监控: threshold_pct = 接近度阈值% (|偏离值|/规则阈值), 不用 conditions
-        if rule.get("asset_type", "stock") != "stock":
-            raise ValueError("异动监控仅支持个股 (偏离值仅对个股计算)")
-        if rule.get("direction", "both") not in ABNORMAL_DIRECTIONS:
-            raise ValueError(f"异动监控 direction 必须是 {ABNORMAL_DIRECTIONS} 之一")
-        if rule.get("abnormal_window", "any") not in ABNORMAL_WINDOWS:
-            raise ValueError(f"异动监控窗口必须是 {sorted(ABNORMAL_WINDOWS)} 之一")
-        threshold_pct = rule.get("threshold_pct")
-        if not isinstance(threshold_pct, (int, float)) or not 1 <= threshold_pct <= 150:
-            raise ValueError("异动接近度阈值必须是 1 到 150 之间的百分比数字")
-    elif rule.get("type") == "volume_delta":
-        # 轮询放量监控: 相邻两次全市场快照的成交量/成交额差值, 不用 conditions
-        if rule.get("asset_type", "stock") != "stock":
-            raise ValueError("轮询放量监控仅支持个股 (依赖全市场股票快照)")
-        if rule.get("scope", "all") == "sector":
-            raise ValueError("轮询放量监控不支持板块作用域")
-        if rule.get("metric", "volume") not in VD_METRICS:
-            raise ValueError(f"metric 必须是 {VD_METRICS} 之一 (volume=手数, amount=金额)")
-        if rule.get("metric", "volume") == "amount":
-            thr = rule.get("threshold_amount")
-            if isinstance(thr, bool) or not isinstance(thr, (int, float)) or not math.isfinite(thr) or thr < 1:
-                raise ValueError("threshold_amount 必须是 >=1 的数字 (单轮成交额增量, 单位元)")
+def _validate_index_rule(rule: dict) -> None:
+    """指数规则: 仅 signal/price + symbols 作用域 + 不含分时信号。"""
+    if rule.get("type") not in ("signal", "price"):
+        raise ValueError("指数监控仅支持 signal/price 类型 (无涨跌停/策略/封单语义)")
+    if rule.get("scope") != "symbols":
+        raise ValueError("指数监控仅支持指定标的 (scope=symbols)")
+    if uses_intraday_signals(rule):
+        raise ValueError("指数无本地分钟K数据, 不支持分时信号条件")
+
+
+def _validate_strategy_rule(rule: dict) -> None:
+    """策略类型: 需要 strategy_id + direction, conditions 可空。"""
+    if not rule.get("strategy_id"):
+        raise ValueError("策略类型规则必须指定 strategy_id")
+    if rule.get("direction", "entry") not in DIRECTIONS:
+        raise ValueError(f"direction 必须是 {DIRECTIONS} 之一")
+    notify_events = rule.get("notify_events")
+    if not isinstance(notify_events, list) or not notify_events:
+        raise ValueError("策略类型规则至少选择一个通知事件")
+    invalid_events = set(notify_events) - STRATEGY_NOTIFY_EVENTS
+    if invalid_events:
+        raise ValueError(f"notify_events 包含非法事件: {sorted(invalid_events)}")
+    score_min = rule.get("score_min")
+    score_max = rule.get("score_max")
+    for label, value in (("评分下限", score_min), ("评分上限", score_max)):
+        if value is None:
+            continue
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(value)
+        ):
+            raise ValueError(f"{label}必须是 0 到 100 之间的数字")
+        if value < 0 or value > 100:
+            raise ValueError(f"{label}必须是 0 到 100 之间的数字")
+    if score_min is not None and score_max is not None and score_min > score_max:
+        raise ValueError("评分下限不能大于评分上限")
+
+
+def _validate_ladder_rule(rule: dict) -> None:
+    """连板梯队封单监控: 需 metric + threshold + direction(up/down), 不用 conditions。"""
+    if rule.get("metric", "sealed_vol") not in LADDER_METRICS:
+        raise ValueError(f"metric 必须是 {LADDER_METRICS} 之一")
+    if rule.get("direction", "up") not in LADDER_DIRECTIONS:
+        raise ValueError(f"direction 必须是 {LADDER_DIRECTIONS} 之一 (up=涨停炸板, down=跌停翘板)")
+    thr = rule.get("threshold")
+    if not isinstance(thr, int | float) or thr < 0:
+        raise ValueError("threshold 必须是非负数字 (封单 ≤ 此值时报警)")
+
+
+def _validate_sector_rule(rule: dict) -> None:
+    """板块监控: sector_kind/targets/trigger/direction/threshold/window。"""
+    kind = rule.get("sector_kind")
+    if kind not in SECTOR_KINDS:
+        raise ValueError(f"sector_kind 必须是 {SECTOR_KINDS} 之一")
+    targets = rule.get("sector_targets")
+    if not isinstance(targets, list) or not targets:
+        raise ValueError("板块监控至少选择一个监控对象")
+    if len(targets) > 20:
+        raise ValueError("板块监控对象最多 20 个")
+    for target in targets:
+        if not isinstance(target, dict) or not target.get("key") or not target.get("name"):
+            raise ValueError("板块监控对象格式错误")
+        if target.get("kind") != kind:
+            raise ValueError("板块监控对象类型必须一致")
+    if rule.get("sector_trigger") not in SECTOR_TRIGGERS:
+        raise ValueError(f"sector_trigger 必须是 {SECTOR_TRIGGERS} 之一")
+    if rule.get("direction") not in LADDER_DIRECTIONS:
+        raise ValueError("板块监控 direction 必须是 up 或 down")
+    threshold_pct = rule.get("threshold_pct")
+    if not isinstance(threshold_pct, int | float) or not 0 < threshold_pct <= 20:
+        raise ValueError("板块监控阈值必须大于 0 且不超过 20%")
+    if (
+        rule.get("sector_trigger") == "momentum"
+        and rule.get("window_minutes") not in SECTOR_WINDOWS
+    ):
+        raise ValueError(f"板块异动窗口必须是 {sorted(SECTOR_WINDOWS)} 分钟之一")
+
+
+def _validate_abnormal_rule(rule: dict) -> None:
+    """异动边缘监控: 个股限定 + direction/window/接近度阈值, 不用 conditions。"""
+    if rule.get("asset_type", "stock") != "stock":
+        raise ValueError("异动监控仅支持个股 (偏离值仅对个股计算)")
+    if rule.get("direction", "both") not in ABNORMAL_DIRECTIONS:
+        raise ValueError(f"异动监控 direction 必须是 {ABNORMAL_DIRECTIONS} 之一")
+    if rule.get("abnormal_window", "any") not in ABNORMAL_WINDOWS:
+        raise ValueError(f"异动监控窗口必须是 {sorted(ABNORMAL_WINDOWS)} 之一")
+    threshold_pct = rule.get("threshold_pct")
+    if not isinstance(threshold_pct, int | float) or not 1 <= threshold_pct <= 150:
+        raise ValueError("异动接近度阈值必须是 1 到 150 之间的百分比数字")
+
+
+def _validate_vd_basic_filter(bf: object) -> None:
+    """轮询放量的 basic_filter 字段白名单与取值校验。"""
+    if bf is None:
+        return
+    if not isinstance(bf, dict):
+        raise ValueError("basic_filter 必须是对象")
+    for key, value in bf.items():
+        if key == "exclude_st":
+            if not isinstance(value, bool):
+                raise ValueError("basic_filter.exclude_st 必须是布尔值")
+        elif key in (
+            "price_min",
+            "price_max",
+            "market_cap_min",
+            "float_cap_min",
+            "float_cap_max",
+            "amount_min",
+        ):
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int | float)
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"basic_filter.{key} 必须是正数字或 null")
         else:
-            thr = rule.get("threshold_volume")
-            if isinstance(thr, bool) or not isinstance(thr, (int, float)) or not math.isfinite(thr) or thr < 1:
-                raise ValueError("threshold_volume 必须是 >=1 的数字 (单轮成交量增量, 单位手)")
-        bf = rule.get("basic_filter")
-        if bf is not None:
-            if not isinstance(bf, dict):
-                raise ValueError("basic_filter 必须是对象")
-            for key, value in bf.items():
-                if key == "exclude_st":
-                    if not isinstance(value, bool):
-                        raise ValueError("basic_filter.exclude_st 必须是布尔值")
-                elif key in ("price_min", "price_max", "market_cap_min", "float_cap_min",
-                             "float_cap_max", "amount_min"):
-                    if value is not None and (
-                        isinstance(value, bool) or not isinstance(value, (int, float))
-                        or not math.isfinite(value) or value <= 0
-                    ):
-                        raise ValueError(f"basic_filter.{key} 必须是正数字或 null")
-                else:
-                    raise ValueError(f"basic_filter 不支持字段: {key}")
-    elif rule.get("type") == "date":
-        # 日期提醒: 纯日历, 锚定标的 (scope=symbols) 避免无对象的空提醒
-        remind = rule.get("remind_date")
-        if not isinstance(remind, str) or not remind.strip():
-            raise ValueError("日期提醒规则必须指定 remind_date")
-        try:
-            date.fromisoformat(remind.strip())
-        except ValueError:
-            raise ValueError(f"remind_date 必须是 YYYY-MM-DD 日期: {remind!r}") from None
-        lead = rule.get("lead_days", 0)
-        if isinstance(lead, bool) or not isinstance(lead, int) or lead < 0:
-            raise ValueError("lead_days 必须是非负整数 (提前提醒天数)")
-        if rule.get("conditions"):
-            raise ValueError("日期提醒规则不支持行情 conditions")
-    else:
-        # 信号/价格/市场类型: 需要 conditions
-        conds = rule.get("conditions")
-        if not isinstance(conds, list) or len(conds) == 0:
-            raise ValueError("conditions 不能为空")
-        if len(conds) > 8:
-            raise ValueError("conditions 最多 8 条")
-        if rule.get("logic", "and") not in LOGICS:
-            raise ValueError(f"logic 必须是 {LOGICS} 之一")
-        for i, c in enumerate(conds):
-            if not isinstance(c, dict):
-                raise ValueError(f"第 {i+1} 个条件格式错误")
-            field = c.get("field", "")
-            op = c.get("op", "")
-            if op == "truth":
-                # 布尔信号: field 必须是 signal_/csg_ 前缀
-                if not _is_signal_field(field):
-                    raise ValueError(f"第 {i+1} 个条件: op=truth 时 field 必须是信号列 (signal_/csg_ 前缀): {field!r}")
-            elif op in OPS:
-                # 阈值比较: field 必须在白名单, 需要 value
-                if field not in ALLOWED_FIELDS:
-                    raise ValueError(f"第 {i+1} 个条件: 阈值字段 {field!r} 不在白名单")
-                if not isinstance(c.get("value"), (int, float)):
-                    raise ValueError(f"第 {i+1} 个条件: value 必须是数字")
-            else:
-                raise ValueError(f"第 {i+1} 个条件: op {op!r} 非法 (应为 truth 或 {OPS})")
+            raise ValueError(f"basic_filter 不支持字段: {key}")
 
-    # scope 校验
+
+def _validate_volume_delta_rule(rule: dict) -> None:
+    """轮询放量监控: metric/阈值/basic_filter 字段白名单, 不用 conditions。"""
+    if rule.get("asset_type", "stock") != "stock":
+        raise ValueError("轮询放量监控仅支持个股 (依赖全市场股票快照)")
+    if rule.get("scope", "all") == "sector":
+        raise ValueError("轮询放量监控不支持板块作用域")
+    if rule.get("metric", "volume") not in VD_METRICS:
+        raise ValueError(f"metric 必须是 {VD_METRICS} 之一 (volume=手数, amount=金额)")
+    if rule.get("metric", "volume") == "amount":
+        thr = rule.get("threshold_amount")
+        if (
+            isinstance(thr, bool)
+            or not isinstance(thr, int | float)
+            or not math.isfinite(thr)
+            or thr < 1
+        ):
+            raise ValueError("threshold_amount 必须是 >=1 的数字 (单轮成交额增量, 单位元)")
+    else:
+        thr = rule.get("threshold_volume")
+        if (
+            isinstance(thr, bool)
+            or not isinstance(thr, int | float)
+            or not math.isfinite(thr)
+            or thr < 1
+        ):
+            raise ValueError("threshold_volume 必须是 >=1 的数字 (单轮成交量增量, 单位手)")
+    _validate_vd_basic_filter(rule.get("basic_filter"))
+
+
+def _validate_date_rule(rule: dict) -> None:
+    """日期提醒: 纯日历, 锚定标的 (scope=symbols) 避免无对象的空提醒。"""
+    remind = rule.get("remind_date")
+    if not isinstance(remind, str) or not remind.strip():
+        raise ValueError("日期提醒规则必须指定 remind_date")
+    try:
+        date.fromisoformat(remind.strip())
+    except ValueError:
+        raise ValueError(f"remind_date 必须是 YYYY-MM-DD 日期: {remind!r}") from None
+    lead = rule.get("lead_days", 0)
+    if isinstance(lead, bool) or not isinstance(lead, int) or lead < 0:
+        raise ValueError("lead_days 必须是非负整数 (提前提醒天数)")
+    if rule.get("conditions"):
+        raise ValueError("日期提醒规则不支持行情 conditions")
+
+
+def _validate_conditions(rule: dict) -> None:
+    """信号/价格/市场类型: conditions 列表、logic 与每条条件字段/op。"""
+    conds = rule.get("conditions")
+    if not isinstance(conds, list) or len(conds) == 0:
+        raise ValueError("conditions 不能为空")
+    if len(conds) > 8:
+        raise ValueError("conditions 最多 8 条")
+    if rule.get("logic", "and") not in LOGICS:
+        raise ValueError(f"logic 必须是 {LOGICS} 之一")
+    for i, c in enumerate(conds):
+        if not isinstance(c, dict):
+            raise ValueError(f"第 {i + 1} 个条件格式错误")
+        field = c.get("field", "")
+        op = c.get("op", "")
+        if op == "truth":
+            # 布尔信号: field 必须是 signal_/csg_ 前缀
+            if not _is_signal_field(field):
+                raise ValueError(
+                    f"第 {i + 1} 个条件: op=truth 时 field 必须是信号列 (signal_/csg_ 前缀): {field!r}"
+                )
+        elif op in OPS:
+            # 阈值比较: field 必须在白名单, 需要 value
+            if field not in ALLOWED_FIELDS:
+                raise ValueError(f"第 {i + 1} 个条件: 阈值字段 {field!r} 不在白名单")
+            if not isinstance(c.get("value"), int | float):
+                raise ValueError(f"第 {i + 1} 个条件: value 必须是数字")
+        else:
+            raise ValueError(f"第 {i + 1} 个条件: op {op!r} 非法 (应为 truth 或 {OPS})")
+
+
+def _validate_scope(rule: dict) -> None:
+    """作用域校验: symbols/watchlist_group/sector 与分时信号标的约束。"""
     if rule.get("scope", "symbols") not in SCOPES:
         raise ValueError(f"scope 必须是 {SCOPES} 之一")
     if rule.get("scope") == "symbols":
@@ -285,9 +344,13 @@ def validate(rule: dict) -> None:
     # 一条本意针对某板块的规则会对全市场每只命中都触发(告警风暴)。在板块 JOIN
     # 落地前, 拒绝创建 sector 规则(fail-closed), 避免用户建出会刷屏的规则。
     if rule.get("scope") == "sector":
-        raise ValueError("scope=sector 暂未支持(板块 JOIN 未实现),请改用 scope=symbols 指定标的或 scope=all")
+        raise ValueError(
+            "scope=sector 暂未支持(板块 JOIN 未实现),请改用 scope=symbols 指定标的或 scope=all"
+        )
 
-    # 其余枚举
+
+def _validate_common_enums(rule: dict) -> None:
+    """其余枚举: severity 与 cooldown_seconds。"""
     if rule.get("severity", "info") not in SEVERITIES:
         raise ValueError(f"severity 必须是 {SEVERITIES} 之一")
     cd = rule.get("cooldown_seconds", 3600)
@@ -295,13 +358,37 @@ def validate(rule: dict) -> None:
         raise ValueError("cooldown_seconds 必须是非负整数")
 
 
-def normalize(rule: dict) -> dict:
-    """补全默认字段,返回规范化后的规则 (不校验)。"""
-    r = dict(rule)
+def validate(rule: dict) -> None:
+    """校验一条监控规则,非法则抛 ValueError (含中文信息)。"""
+    _validate_common(rule)
+    if rule.get("asset_type") == "index":
+        _validate_index_rule(rule)
+    rule_type = rule.get("type")
+    if rule_type == "strategy":
+        _validate_strategy_rule(rule)
+    elif rule_type == "ladder":
+        _validate_ladder_rule(rule)
+    elif rule_type == "sector":
+        _validate_sector_rule(rule)
+    elif rule_type == "abnormal":
+        _validate_abnormal_rule(rule)
+    elif rule_type == "volume_delta":
+        _validate_volume_delta_rule(rule)
+    elif rule_type == "date":
+        _validate_date_rule(rule)
+    else:
+        _validate_conditions(rule)
+    _validate_scope(rule)
+    _validate_common_enums(rule)
+
+
+def _normalize_common_defaults(r: dict) -> None:
     r.setdefault("enabled", True)
     r.setdefault("asset_type", "stock")
     # sector/abnormal 默认全市场 (sector 随后强制 all; abnormal 支持指定标的)
-    r.setdefault("scope", "all" if r.get("type") in {"sector", "abnormal", "volume_delta"} else "symbols")
+    r.setdefault(
+        "scope", "all" if r.get("type") in {"sector", "abnormal", "volume_delta"} else "symbols"
+    )
     r.setdefault("symbols", [])
     r.setdefault("group_id", None)
     # watchlist_group 作用域: 成员动态来自分组, symbols 不参与; 其他作用域清掉残留 group_id
@@ -319,8 +406,19 @@ def normalize(rule: dict) -> dict:
     # direction 默认值: ladder/sector 用 "up", abnormal 用 "both", 其余用 "entry"
     r.setdefault(
         "direction",
-        "up" if r.get("type") in {"ladder", "sector"} else "both" if r.get("type") == "abnormal" else "entry",
+        "up"
+        if r.get("type") in {"ladder", "sector"}
+        else "both"
+        if r.get("type") == "abnormal"
+        else "entry",
     )
+    r.setdefault("conditions", [])
+    # ladder 专属默认字段
+    r.setdefault("metric", "sealed_vol")
+    r.setdefault("threshold", 0)
+
+
+def _normalize_type_specific(r: dict) -> None:
     if r.get("type") == "strategy":
         r.setdefault("score_min", None)
         r.setdefault("score_max", None)
@@ -333,10 +431,7 @@ def normalize(rule: dict) -> dict:
         r.pop("notify_events", None)
         r.pop("score_min", None)
         r.pop("score_max", None)
-    r.setdefault("conditions", [])
-    # ladder 专属默认字段
-    r.setdefault("metric", "sealed_vol")
-    r.setdefault("threshold", 0)
+
     # volume_delta 专属默认字段 (轮询放量): 冷却期默认 300s 而非 3600s --
     # 持续放量会连续多轮达标, 1 小时只提醒一次太迟钝。
     if r.get("type") == "volume_delta":
@@ -356,6 +451,9 @@ def normalize(rule: dict) -> dict:
         r.setdefault("remind_date", None)
         r["lead_days"] = int(r.get("lead_days") or 0)
         r["cooldown_seconds"] = 86400
+
+
+def _normalize_webhook_and_meta(r: dict) -> None:
     # abnormal 专属默认字段 (异动边缘监控)
     r.setdefault("abnormal_window", "any")
     r.setdefault("logic", "and")
@@ -375,7 +473,15 @@ def normalize(rule: dict) -> dict:
         r["webhook_channels"] = [
             c for c in r["webhook_channels"] if c in ("feishu", "wecom", "custom", "email")
         ]
-    r.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    r.setdefault("created_at", datetime.now(UTC).isoformat())
+
+
+def normalize(rule: dict) -> dict:
+    """补全默认字段,返回规范化后的规则 (不校验)。"""
+    r = dict(rule)
+    _normalize_common_defaults(r)
+    _normalize_type_specific(r)
+    _normalize_webhook_and_meta(r)
     return r
 
 
@@ -394,7 +500,9 @@ def strategy_rule_id(strategy_id: str) -> str:
     return f"{STRATEGY_RULE_PREFIX}{strategy_id}"
 
 
-def migrate_strategy_monitors(data_dir: Path, strategy_ids: list[str], strategy_names: dict[str, str]) -> list[dict]:
+def migrate_strategy_monitors(
+    data_dir: Path, strategy_ids: list[str], strategy_names: dict[str, str]
+) -> list[dict]:
     """把 preferences.strategy_monitor_ids 里的策略,同步生成/更新 type=strategy 规则。
 
     幂等: 已存在的策略规则会被更新 (方向/名称),不会重复创建。
@@ -414,7 +522,7 @@ def migrate_strategy_monitors(data_dir: Path, strategy_ids: list[str], strategy_
     for r in existing:
         rid = r.get("id", "")
         if rid.startswith(STRATEGY_RULE_PREFIX):
-            sid = rid[len(STRATEGY_RULE_PREFIX):]
+            sid = rid[len(STRATEGY_RULE_PREFIX) :]
             if sid:
                 existing_strategy_rules[sid] = r
 
@@ -425,18 +533,20 @@ def migrate_strategy_monitors(data_dir: Path, strategy_ids: list[str], strategy_
         name = strategy_names.get(sid, sid)
         rule = existing_strategy_rules.get(sid)
         if rule is None:
-            rule = normalize({
-                "id": rule_id,
-                "name": f"策略监控 · {name}",
-                "type": "strategy",
-                "scope": "all",
-                "strategy_id": sid,
-                "direction": "entry",
-                "notify_events": ["pool_entry", "pool_exit"],
-                "conditions": [],
-                "cooldown_seconds": 3600,
-                "enabled": True,
-            })
+            rule = normalize(
+                {
+                    "id": rule_id,
+                    "name": f"策略监控 · {name}",
+                    "type": "strategy",
+                    "scope": "all",
+                    "strategy_id": sid,
+                    "direction": "entry",
+                    "notify_events": ["pool_entry", "pool_exit"],
+                    "conditions": [],
+                    "cooldown_seconds": 3600,
+                    "enabled": True,
+                }
+            )
         else:
             rule = dict(rule)
             rule["enabled"] = True

@@ -191,7 +191,9 @@ def _merge_adj_factor_store(
             .sort(["symbol", "trade_date"])
         )
     if store is not None:
+        # B5：生产路径 CK 为唯一落盘目标；本地 all.parquet 只服务离线脚本/单测。
         store.write_adj_factor(new_data, etf=etf)
+        return merged.height - before, changed_symbols
     out.parent.mkdir(parents=True, exist_ok=True)
     _rootmod._atomic_write_parquet(merged, out)
     return merged.height - before, changed_symbols

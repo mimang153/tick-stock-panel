@@ -1,4 +1,5 @@
 """#516 内存保护 — /health 可观测性、重任务内存准入、worker RSS 上限配置。"""
+
 from __future__ import annotations
 
 import json
@@ -22,16 +23,20 @@ class _VM:
 # ── /health 内存块 ────────────────────────────────────────────────────
 
 
-def test_health_reports_memory_snapshot():
+@pytest.mark.parametrize("path", ["/health", "/api/health"])
+def test_health_reports_memory_snapshot(path):
     app = FastAPI()
     app.include_router(routes_api.router)
-    body = TestClient(app).get("/health").json()
+    body = TestClient(app).get(path).json()
     assert body["status"] == "ok"
     mem = body["memory"]
     assert mem["rss_bytes"] > 0
     assert mem["system_total_bytes"] > 0
     assert mem["system_available_bytes"] >= 0
     assert 0 <= mem["system_used_pct"] <= 100
+    assert body["ck_status"] == body["clickhouse"]["status"]
+    assert body["cache_status"] == body["cache"]["status"]
+    assert body["cache_backend"] == body["cache"]["backend"]
 
 
 # ── 重任务内存准入 (psutil 在 _memory_admission_ok 内函数级 import,
@@ -113,9 +118,10 @@ def test_backtest_rss_limit_pref_roundtrip_and_clamp(_isolated_prefs):
 
     assert preferences.set_backtest_worker_rss_limit_gib(8) == 8
     assert preferences.get_backtest_worker_rss_limit_gib() == 8
-    assert json.loads(_isolated_prefs.read_text(encoding="utf-8"))[
-        "backtest_worker_rss_limit_gib"
-    ] == 8
+    assert (
+        json.loads(_isolated_prefs.read_text(encoding="utf-8"))["backtest_worker_rss_limit_gib"]
+        == 8
+    )
 
     # 越界钳制: 0 是合法值 (不限制), 负数按 0、超上限按 64 收口
     assert preferences.set_backtest_worker_rss_limit_gib(-3) == 0

@@ -3,6 +3,7 @@
 同一记录只有在日K校验及依赖重算均完成后才移除; 重启/取消/实时刷新不会绕过它。
 读取仅 stat + 小 JSON 缓存, 不在策略或行情热路径扫描 Parquet。
 """
+
 from __future__ import annotations
 
 import json
@@ -39,13 +40,17 @@ def _read(path: str, mtime: int, size: int) -> dict:
             date.fromisoformat(entry["day"])
             if entry["symbol"] is not None and not isinstance(entry["symbol"], str):
                 raise ValueError("invalid symbol")
-            if (not isinstance(entry["needs_raw"], bool)
-                    or not isinstance(entry.get("needs_enriched", True), bool)
-                    or entry["kind"] not in {"missing", "snapshot", "corrupt", "invalid"}
-                    or not isinstance(entry["reason"], str)):
+            if (
+                not isinstance(entry["needs_raw"], bool)
+                or not isinstance(entry.get("needs_enriched", True), bool)
+                or entry["kind"] not in {"missing", "snapshot", "corrupt", "invalid"}
+                or not isinstance(entry["reason"], str)
+            ):
                 raise ValueError("invalid repair state")
         revisions = value.get("revisions", {})
-        if not isinstance(revisions, dict) or any(not isinstance(v, str) for v in revisions.values()):
+        if not isinstance(revisions, dict) or any(
+            not isinstance(v, str) for v in revisions.values()
+        ):
             raise ValueError("invalid revision")
         return value
     except (OSError, ValueError, TypeError, KeyError) as exc:
@@ -53,6 +58,7 @@ def _read(path: str, mtime: int, size: int) -> dict:
 
 
 def snapshot(root: Path) -> dict:
+    """读取待重算状态快照; 结构损坏时返回空状态而非抛错。"""
     path = _path(root)
     try:
         info = path.stat()
@@ -64,6 +70,7 @@ def snapshot(root: Path) -> dict:
 
 
 def revision(root: Path, asset_type: str = "stock") -> str:
+    """返回资产及其基准指数的合并修订号, 供缓存键判断依赖是否已重算。"""
     revisions = snapshot(root).get("revisions", {})
     own = revisions.get(asset_type, "0")
     benchmark = revisions.get("index", "0") if asset_type in {"stock", "etf"} else "0"
@@ -80,12 +87,16 @@ def _save(root: Path, old: dict, entries: list[dict]) -> None:
         return
     revisions = dict(old.get("revisions", {}))
     for asset in ASSET_LABELS:
-        if ([e for e in entries if e["asset_type"] == asset]
-                != [e for e in old["entries"] if e["asset_type"] == asset]):
+        if [e for e in entries if e["asset_type"] == asset] != [
+            e for e in old["entries"] if e["asset_type"] == asset
+        ]:
             revisions[asset] = uuid.uuid4().hex
     path = _path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, json.dumps({"version": 1, "entries": entries, "revisions": revisions}, ensure_ascii=False))
+    atomic_write_text(
+        path,
+        json.dumps({"version": 1, "entries": entries, "revisions": revisions}, ensure_ascii=False),
+    )
 
 
 def _issue_entries(issues) -> dict:
@@ -96,9 +107,15 @@ def _issue_entries(issues) -> dict:
         if issue.kind == "unconfirmed":
             continue
         for symbol in issue.symbols or (None,):
-            entry = {"asset_type": TABLE_FAMILY[issue.table], "day": issue.day.isoformat(),
-                     "symbol": symbol, "needs_raw": True, "needs_enriched": True,
-                     "kind": issue.kind, "reason": issue.reason}
+            entry = {
+                "asset_type": TABLE_FAMILY[issue.table],
+                "day": issue.day.isoformat(),
+                "symbol": symbol,
+                "needs_raw": True,
+                "needs_enriched": True,
+                "kind": issue.kind,
+                "reason": issue.reason,
+            }
             found[_key(entry)] = entry
     return found
 
@@ -115,6 +132,7 @@ def record_issues(root: Path, issues) -> None:
 
 
 def record_scan(root: Path, issues, *, assets: list[str], start: date, end: date) -> None:
+    """登记一次自检发现的异常; 已覆盖窗口内不再异常的旧记录会被清除。"""
     found = _issue_entries(issues)
     with _LOCK:
         old = snapshot(root)
@@ -124,28 +142,49 @@ def record_scan(root: Path, issues, *, assets: list[str], start: date, end: date
             if key in found:
                 continue
             entry = dict(entry)
-            if entry["asset_type"] in assets and start.isoformat() <= entry["day"] <= end.isoformat():
+            if (
+                entry["asset_type"] in assets
+                and start.isoformat() <= entry["day"] <= end.isoformat()
+            ):
                 entry["needs_raw"] = False
             entries.append(entry)
         entries.extend(found.values())
         _save(root, old, entries)
 
 
-def complete(root: Path, asset_type: str, *, start: date, symbols: list[str] | None,
-             days: set[date] | None = None) -> None:
+def complete(
+    root: Path,
+    asset_type: str,
+    *,
+    start: date,
+    symbols: list[str] | None,
+    days: set[date] | None = None,
+) -> None:
+    """标记指定范围已重算完成: 原始日K与依赖指标均就绪才移除异常记录。"""
     selected_days = {d.isoformat() for d in days} if days is not None else None
     with _LOCK:
         old = snapshot(root)
-        entries = [e for e in old["entries"] if not (
-            e["asset_type"] == asset_type and e["day"] >= start.isoformat()
-            and (selected_days is None or e["day"] in selected_days)
-            and (symbols is None or e["symbol"] in symbols)
-        )]
+        entries = [
+            e
+            for e in old["entries"]
+            if not (
+                e["asset_type"] == asset_type
+                and e["day"] >= start.isoformat()
+                and (selected_days is None or e["day"] in selected_days)
+                and (symbols is None or e["symbol"] in symbols)
+            )
+        ]
         _save(root, old, entries)
 
 
-def mark_enriched_ready(root: Path, asset_type: str, *, start: date, symbols: list[str] | None,
-                        days: set[date] | None = None) -> None:
+def mark_enriched_ready(
+    root: Path,
+    asset_type: str,
+    *,
+    start: date,
+    symbols: list[str] | None,
+    days: set[date] | None = None,
+) -> None:
     """基础指标已经发布; 共享市场统计可读取它们, 对外计算仍等整个修补完成。"""
     selected_days = {d.isoformat() for d in days} if days is not None else None
     with _LOCK:
@@ -153,9 +192,12 @@ def mark_enriched_ready(root: Path, asset_type: str, *, start: date, symbols: li
         entries = []
         for item in old["entries"]:
             entry = dict(item)
-            if (entry["asset_type"] == asset_type and entry["day"] >= start.isoformat()
-                    and (selected_days is None or entry["day"] in selected_days)
-                    and (symbols is None or entry["symbol"] in symbols)):
+            if (
+                entry["asset_type"] == asset_type
+                and entry["day"] >= start.isoformat()
+                and (selected_days is None or entry["day"] in selected_days)
+                and (symbols is None or entry["symbol"] in symbols)
+            ):
                 entry.update(needs_raw=False, needs_enriched=False)
             entries.append(entry)
         _save(root, old, entries)
@@ -167,24 +209,45 @@ def clear_assets(root: Path, assets: set[str]) -> None:
         if assets == set(ASSET_LABELS):
             path = _path(root)
             path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_text(path, json.dumps({"version": 1, "entries": [],
-                "revisions": {asset: uuid.uuid4().hex for asset in assets}}))
+            atomic_write_text(
+                path,
+                json.dumps(
+                    {
+                        "version": 1,
+                        "entries": [],
+                        "revisions": {asset: uuid.uuid4().hex for asset in assets},
+                    }
+                ),
+            )
             return
         old = snapshot(root)
         _save(root, old, [e for e in old["entries"] if e["asset_type"] not in assets])
 
 
 def assert_usable(
-    root: Path, asset_type: str = "stock", *, symbols: list[str] | None = None, end: date | None = None,
+    root: Path,
+    asset_type: str = "stock",
+    *,
+    symbols: list[str] | None = None,
+    end: date | None = None,
     enriched_only: bool = False,
 ) -> None:
+    """存在未重算完的日K异常时抛出 DailyIntegrityError, 阻止下游读到错数据。"""
     end = end or date.max
     for entry in snapshot(root)["entries"]:
         if enriched_only and not entry["needs_raw"] and not entry.get("needs_enriched", True):
             continue
         dependency = entry["asset_type"] == "index" and asset_type in {"stock", "etf"}
-        if ((entry["asset_type"] == asset_type or dependency) and entry["day"] <= end.isoformat()
-                and (dependency or symbols is None or entry["symbol"] is None or entry["symbol"] in symbols)):
+        if (
+            (entry["asset_type"] == asset_type or dependency)
+            and entry["day"] <= end.isoformat()
+            and (
+                dependency
+                or symbols is None
+                or entry["symbol"] is None
+                or entry["symbol"] in symbols
+            )
+        ):
             raise DailyIntegrityError(
                 f"{ASSET_LABELS[entry['asset_type']]}日K在 {entry['day']} 有未完成修补或重算, "
                 "请到 数据→自检/修补 完成后再计算"

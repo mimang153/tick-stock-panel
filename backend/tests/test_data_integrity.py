@@ -729,9 +729,9 @@ def test_pipeline_self_heals_snapshot_day(tmp_path, monkeypatch, ck_runtime):
     assert batch_calls and batch_calls[0]["start"] == yesterday
     assert result["integrity_repair_from"] == yesterday.isoformat()
     assert result["integrity_issues"] >= 1
-    # 坏 enriched 分区被删后当"新日期"重算写回 (无 prune 时 Step 2 走 skip 不写)
-    enriched_left = sorted(p.name for p in (tmp_path / "kline_daily_enriched").glob("date=*"))
-    assert enriched_left == [f"date={yesterday.isoformat()}", f"date={today.isoformat()}"]
+    # 坏 enriched 分区被删后当"新日期"重算写回（CK-only 发布，读源为 CK）
+    enriched_left = [d.isoformat() for d in ck_runtime.list_daily_dates("kline_daily_enriched")]
+    assert enriched_left == [yesterday.isoformat(), today.isoformat()]
     assert result["enriched_days"] > 0
 
 

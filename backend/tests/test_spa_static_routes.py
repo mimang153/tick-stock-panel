@@ -3,6 +3,7 @@
 Docker/桌面安装包由 FastAPI 托管 frontend/dist。favicon.svg 等根级资源若被
 SPA 兜底返回 index.html, 浏览器会因 MIME 不符丢弃图标, 页签显示默认占位图。
 """
+
 from __future__ import annotations
 
 import mimetypes
@@ -69,14 +70,25 @@ def test_index_html_direct_request_stays_uncached(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("prefix", ["", "/assets"])
-@pytest.mark.parametrize(("suffix", "media_type"), [
-    (".js", "text/javascript"), (".mjs", "text/javascript"),
-    (".css", "text/css"), (".wasm", "application/wasm"),
-    (".json", "application/json"), (".svg", "image/svg+xml"),
-    (".woff", "font/woff"), (".woff2", "font/woff2"),
-])
+@pytest.mark.parametrize(
+    ("suffix", "media_type"),
+    [
+        (".js", "text/javascript"),
+        (".mjs", "text/javascript"),
+        (".css", "text/css"),
+        (".wasm", "application/wasm"),
+        (".json", "application/json"),
+        (".svg", "image/svg+xml"),
+        (".woff", "font/woff"),
+        (".woff2", "font/woff2"),
+    ],
+)
 def test_frontend_mime_is_independent_of_system_mapping(
-    tmp_path: Path, monkeypatch, prefix: str, suffix: str, media_type: str,
+    tmp_path: Path,
+    monkeypatch,
+    prefix: str,
+    suffix: str,
+    media_type: str,
 ) -> None:
     client = _client(tmp_path)
     # 注册表/其他库污染全局表后，静态响应仍须使用前端资源的标准类型。
@@ -128,9 +140,13 @@ def test_entry_urls_bypass_legacy_wrong_mime_cache(tmp_path, monkeypatch):
 def test_frontend_static_preserves_conditional_head_and_range_requests(tmp_path):
     client = _client(tmp_path)
     response = client.get("/assets/index-abc123.js")
-    assert client.get(
-        "/assets/index-abc123.js", headers={"If-None-Match": response.headers["etag"]},
-    ).status_code == 304
+    assert (
+        client.get(
+            "/assets/index-abc123.js",
+            headers={"If-None-Match": response.headers["etag"]},
+        ).status_code
+        == 304
+    )
     head = client.head("/assets/index-abc123.js")
     assert head.status_code == 200
     assert head.content == b""

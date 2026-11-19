@@ -2,6 +2,7 @@
 
 业务代码只依赖 CapabilitySet,不读 tiers.yaml,不感知"档位"。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11,28 +12,29 @@ from enum import StrEnum
 class Cap(StrEnum):
     """所有 capability 的命名常量。新增能力时只在这里加一行。"""
 
-    QUOTE_BY_SYMBOL        = "quote.by_symbol"
-    QUOTE_BATCH            = "quote.batch"
-    QUOTE_POOL             = "quote.pool"
-    KLINE_DAILY_BY_SYMBOL  = "kline.daily.by_symbol"
-    KLINE_DAILY_BATCH      = "kline.daily.batch"
+    QUOTE_BY_SYMBOL = "quote.by_symbol"
+    QUOTE_BATCH = "quote.batch"
+    QUOTE_POOL = "quote.pool"
+    KLINE_DAILY_BY_SYMBOL = "kline.daily.by_symbol"
+    KLINE_DAILY_BATCH = "kline.daily.batch"
     KLINE_MINUTE_BY_SYMBOL = "kline.minute.by_symbol"
-    KLINE_MINUTE_BATCH     = "kline.minute.batch"
-    INTRADAY               = "intraday"
-    INTRADAY_BATCH         = "intraday.batch"
-    INTRADAY_UNIVERSE      = "intraday.universe"
-    DEPTH5                 = "depth5"
-    DEPTH5_BATCH           = "depth5.batch"
-    WEBSOCKET              = "websocket"
-    FINANCIAL              = "financial"
-    ADJ_FACTOR             = "adj_factor"
+    KLINE_MINUTE_BATCH = "kline.minute.batch"
+    INTRADAY = "intraday"
+    INTRADAY_BATCH = "intraday.batch"
+    INTRADAY_UNIVERSE = "intraday.universe"
+    DEPTH5 = "depth5"
+    DEPTH5_BATCH = "depth5.batch"
+    WEBSOCKET = "websocket"
+    FINANCIAL = "financial"
+    ADJ_FACTOR = "adj_factor"
 
 
 @dataclass(slots=True, frozen=True)
 class CapabilityLimits:
     """单个 capability 的运行时限制。"""
-    rpm: int | None = None        # 次/分钟,None 表示未知或不限
-    batch: int | None = None      # 标的/次
+
+    rpm: int | None = None  # 次/分钟,None 表示未知或不限
+    batch: int | None = None  # 标的/次
     subscribe: int | None = None  # WS 订阅上限
 
 
@@ -74,10 +76,14 @@ class CapabilitySet:
         }
 
 
-class CapabilityDenied(Exception):
+class CapabilityDeniedError(Exception):
     """请求的 capability 当前不可用。"""
 
     def __init__(self, cap: Cap, suggestion: str | None = None) -> None:
         self.cap = cap
         self.suggestion = suggestion or f"加购『{cap}』能力可解锁"
         super().__init__(f"capability not available: {cap}; {self.suggestion}")
+
+
+# 保留历史导出名，main.py 的异常处理器与调用方导入路径不变
+CapabilityDenied = CapabilityDeniedError

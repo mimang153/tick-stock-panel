@@ -12,14 +12,23 @@
 不发起真实网络请求: TickFlow 侧边界函数与 _write_minute_partition 均
 monkeypatch 替换; 自定义源侧用内存 fake provider 走真实边界包装。
 """
+
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
+from typing import Any, cast
 
 import polars as pl
 
 from app.services import minute_refresh, preferences
 from app.services.minute_refresh import MinuteRefreshService, _in_continuous_session
+
+
+def _record(result, log, *items):
+    """记录本次调用参数后返回既定结果(替代 append(x) or result 惯用法)。"""
+    log.extend(items)
+    return result
 
 
 def _isolated_prefs(tmp_path, monkeypatch):
@@ -46,11 +55,16 @@ class _FakeAppState:
 
 
 class _FakeRepo:
-    def __init__(self, symbols: list[str]):
+    def __init__(self, symbols: list[str], writes: list | None = None):
         import threading
         from pathlib import Path
+
         self._inst = pl.DataFrame({"symbol": symbols})
         self.store = type("S", (), {"data_dir": Path(".")})()
+        self._ck_writes = writes if writes is not None else []
+        self.storage = SimpleNamespace(
+            write_minute=lambda table, df: _record(df.height, self._ck_writes, df)
+        )
         # 与真实仓库同契约: 分区读-改-写必须持仓库写锁
         self._write_lock = threading.Lock()
 
@@ -65,36 +79,49 @@ def test_continuous_session_boundaries():
     wk = datetime(2026, 8, 25, 10, 0)  # 周二
     assert _in_continuous_session(wk)
     assert not _in_continuous_session(datetime(2026, 8, 25, 9, 29))
-    assert not _in_continuous_session(datetime(2026, 8, 25, 11, 31))   # 午休
-    assert _in_continuous_session(datetime(2026, 8, 25, 13, 0))        # 午后恢复
-    assert _in_continuous_session(datetime(2026, 8, 25, 15, 0))        # 收盘瞬时
+    assert not _in_continuous_session(datetime(2026, 8, 25, 11, 31))  # 午休
+    assert _in_continuous_session(datetime(2026, 8, 25, 13, 0))  # 午后恢复
+    assert _in_continuous_session(datetime(2026, 8, 25, 15, 0))  # 收盘瞬时
     assert not _in_continuous_session(datetime(2026, 8, 25, 15, 1))
-    assert not _in_continuous_session(datetime(2026, 8, 22, 10, 0))    # 周六
+    assert not _in_continuous_session(datetime(2026, 8, 22, 10, 0))  # 周六
 
 
 # ── 门控链 ──────────────────────────────────────────────────────────
 
 
-def _svc(tmp_path, monkeypatch, *, enabled=True, capability=True, in_hours=True,
-         full_minute_provider="tickflow", custom=None):
+def _svc(
+    tmp_path,
+    monkeypatch,
+    *,
+    enabled=True,
+    capability=True,
+    in_hours=True,
+    full_minute_provider="tickflow",
+    custom=None,
+):
     """custom 非 None 时模拟「full_minute 路由到声明该数据集的自定义源」:
     resolver 直接返回 fake provider (注册表在测试环境未加载)。"""
     _isolated_prefs(tmp_path, monkeypatch)
     preferences.save({"minute_refresh_enabled": enabled})
     monkeypatch.setattr(
-        preferences, "get_full_minute_data_provider", lambda: full_minute_provider,
+        preferences,
+        "get_full_minute_data_provider",
+        lambda: full_minute_provider,
     )
     if custom is not None:
         monkeypatch.setattr(
             "app.services.kline_sync._resolve_full_minute_provider",
             lambda name: (custom, False, None),
         )
-    svc = MinuteRefreshService(_FakeRepo(["600000.SH"]))
+    writes: list = []
+    svc = MinuteRefreshService(_FakeRepo(["600000.SH"], writes))
+    cast(Any, svc)._ck_writes = writes
     svc.set_app_state(_FakeAppState(capability))
     monkeypatch.setattr(minute_refresh, "_in_continuous_session", lambda now=None: in_hours)
     # 交易日探针默认未知 (None → 放行): 隔离真实网络探测, holiday 分支在
     # test_trading_day.py 单独覆盖
     from app.services import trading_day
+
     monkeypatch.setattr(trading_day, "is_trading_day", lambda now=None: None)
     return svc
 
@@ -105,9 +132,11 @@ def test_gate_disabled(tmp_path, monkeypatch):
 
 def test_gate_full_minute_custom_provider_runs(tmp_path, monkeypatch):
     """全量分钟路由到自定义源: 不再让位 — 能力口径统一 (capset 增广后放行)。"""
+
     class _P:
         def get_intraday_batch(self, symbols, count=300, asset_type="stock"):
             return pl.DataFrame()
+
     svc = _svc(tmp_path, monkeypatch, full_minute_provider="myfm", custom=_P())
     assert svc._gate_reason() is None
     assert svc.active_provider() == "myfm"
@@ -135,32 +164,30 @@ def test_gate_pass(tmp_path, monkeypatch):
 
 def test_run_round_writes_partition_and_updates_status(tmp_path, monkeypatch):
     svc = _svc(tmp_path, monkeypatch)
-    minute_df = pl.DataFrame({
-        "symbol": ["600000.SH"],
-        "datetime": [datetime(2026, 8, 25, 1, 30)],
-        "open": [10.0], "high": [10.5], "low": [9.9], "close": [10.2],
-        "volume": [1000.0], "amount": [10200.0],
-    })
+    minute_df = pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "datetime": [datetime(2026, 8, 25, 1, 30)],
+            "open": [10.0],
+            "high": [10.5],
+            "low": [9.9],
+            "close": [10.2],
+            "volume": [1000.0],
+            "amount": [10200.0],
+        }
+    )
     calls: dict = {}
 
     def fake_burst(symbols, capset, *, count=300):
         calls["symbols"] = list(symbols)
         return (minute_df, 1)
 
-    def fake_write(df, minute_dir):
-        calls["dir"] = minute_dir
-        calls["rows"] = df.height
-        return df.height
-
-    monkeypatch.setattr(
-        "app.services.kline_sync.fetch_intraday_full_market_burst", fake_burst
-    )
-    monkeypatch.setattr("app.services.kline_sync._write_minute_partition", fake_write)
+    monkeypatch.setattr("app.services.kline_sync.fetch_intraday_full_market_burst", fake_burst)
 
     svc._run_round()
 
     assert calls["symbols"] == ["600000.SH"]
-    assert calls["rows"] == 1
+    assert len(svc._ck_writes) == 1 and svc._ck_writes[0].height == 1
     st = svc.status()
     assert st["rounds"] == 1
     assert st["last_rows"] == 1
@@ -191,8 +218,10 @@ def _patch_round(monkeypatch, *, lag, inc_df, burst_df):
     calls: dict = {"modes": []}
 
     monkeypatch.setattr(
-        minute_refresh.MinuteRefreshService, "_today_coverage_lag_minutes",
-        lambda self: lag, raising=True,
+        minute_refresh.MinuteRefreshService,
+        "_today_coverage_lag_minutes",
+        lambda self: lag,
+        raising=True,
     )
     monkeypatch.setattr(
         "app.services.kline_sync.fetch_intraday_universe_increment",
@@ -202,20 +231,22 @@ def _patch_round(monkeypatch, *, lag, inc_df, burst_df):
         "app.services.kline_sync.fetch_intraday_full_market_burst",
         lambda symbols, capset, *, count=300: (calls["modes"].append("full"), (burst_df, 28))[1],
     )
-    monkeypatch.setattr(
-        "app.services.kline_sync._write_minute_partition",
-        lambda df, minute_dir: df.height,
-    )
     return calls
 
 
 def _inc_df():
-    return pl.DataFrame({
-        "symbol": ["600000.SH", "000001.SZ"],
-        "datetime": [datetime(2026, 8, 25, 10, 0)] * 2,
-        "open": [10.0] * 2, "high": [10.5] * 2, "low": [9.9] * 2, "close": [10.2] * 2,
-        "volume": [1000.0] * 2, "amount": [10200.0] * 2,
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["600000.SH", "000001.SZ"],
+            "datetime": [datetime(2026, 8, 25, 10, 0)] * 2,
+            "open": [10.0] * 2,
+            "high": [10.5] * 2,
+            "low": [9.9] * 2,
+            "close": [10.2] * 2,
+            "volume": [1000.0] * 2,
+            "amount": [10200.0] * 2,
+        }
+    )
 
 
 def _full_df():
@@ -260,7 +291,7 @@ def test_consecutive_empty_rounds_escalate_to_full(tmp_path, monkeypatch):
     calls = _patch_round(
         monkeypatch,
         lag=0.2,
-        inc_df=pl.DataFrame(),   # 增量恒空 (模拟 universe 端点持续异常)
+        inc_df=pl.DataFrame(),  # 增量恒空 (模拟 universe 端点持续异常)
         burst_df=_full_df(),
     )
     svc._run_round()
@@ -283,11 +314,11 @@ class _FakeCustomProvider:
         # 未启用的方法置 None (实例属性遮蔽类方法) — getattr 返回 None → 边界
         # 包装按"未实现"处理, 与真实 provider 只暴露部分方法的形状一致
         if not batch:
-            self.get_intraday_batch = None
+            cast(Any, self).get_intraday_batch = None
         if not latest:
-            self.get_intraday_latest = None
+            cast(Any, self).get_intraday_latest = None
         if not minute:
-            self.get_minute = None
+            cast(Any, self).get_minute = None
 
     def get_intraday_batch(self, symbols, count=300, asset_type="stock"):
         self.calls["batch"] = list(symbols)
@@ -297,22 +328,31 @@ class _FakeCustomProvider:
         self.calls["latest"] = count
         return _inc_df()
 
-    def get_minute(self, symbols, start_time=None, end_time=None,
-                   asset_type="stock", freq="1m", on_chunk_done=None):
+    def get_minute(
+        self,
+        symbols,
+        start_time=None,
+        end_time=None,
+        asset_type="stock",
+        freq="1m",
+        on_chunk_done=None,
+    ):
         self.calls["minute"] = {
             "symbols": list(symbols),
-            "start": start_time, "end": end_time,
+            "start": start_time,
+            "end": end_time,
         }
         if on_chunk_done:
             on_chunk_done(1, 4)
         return _full_df()
 
 
-def _patch_write(monkeypatch) -> dict:
+def _patch_write(monkeypatch, svc) -> dict:
     calls = {"rows": None}
     monkeypatch.setattr(
-        "app.services.kline_sync._write_minute_partition",
-        lambda df, minute_dir: calls.update(rows=df.height) or df.height,
+        svc._repo.storage,
+        "write_minute",
+        lambda table, df: calls.update(rows=df.height) or df.height,
     )
     return calls
 
@@ -322,10 +362,11 @@ def test_custom_provider_full_round_via_intraday_batch(tmp_path, monkeypatch):
     provider = _FakeCustomProvider(batch=True)
     svc = _svc(tmp_path, monkeypatch, full_minute_provider="myfm", custom=provider)
     monkeypatch.setattr(
-        minute_refresh.MinuteRefreshService, "_today_coverage_lag_minutes",
+        minute_refresh.MinuteRefreshService,
+        "_today_coverage_lag_minutes",
         lambda self: None,  # 冷启动 → 全天修复
     )
-    write_calls = _patch_write(monkeypatch)
+    write_calls = _patch_write(monkeypatch, svc)
     svc._run_round()
     assert provider.calls["batch"] == ["600000.SH"]
     assert write_calls["rows"] == 2
@@ -340,10 +381,11 @@ def test_custom_provider_increment_round_via_latest(tmp_path, monkeypatch):
     provider = _FakeCustomProvider(batch=True, latest=True)
     svc = _svc(tmp_path, monkeypatch, full_minute_provider="myfm", custom=provider)
     monkeypatch.setattr(
-        minute_refresh.MinuteRefreshService, "_today_coverage_lag_minutes",
+        minute_refresh.MinuteRefreshService,
+        "_today_coverage_lag_minutes",
         lambda self: 0.2,
     )
-    _patch_write(monkeypatch)
+    _patch_write(monkeypatch, svc)
     svc._run_round()
     assert provider.calls == {"latest": 3}
     st = svc.status()
@@ -358,10 +400,11 @@ def test_custom_provider_latest_missing_forces_full_with_minute_fallback(tmp_pat
     provider = _FakeCustomProvider(minute=True)
     svc = _svc(tmp_path, monkeypatch, full_minute_provider="myfm", custom=provider)
     monkeypatch.setattr(
-        minute_refresh.MinuteRefreshService, "_today_coverage_lag_minutes",
+        minute_refresh.MinuteRefreshService,
+        "_today_coverage_lag_minutes",
         lambda self: 0.2,  # 覆盖新鲜 → 本应增量
     )
-    _patch_write(monkeypatch)
+    _patch_write(monkeypatch, svc)
     svc._run_round()
     # 增量退化为修复: 走 get_minute 回退 (chunk 回调统计请求数)
     assert "minute" in provider.calls
@@ -376,18 +419,19 @@ def test_custom_provider_unresolved_fails_closed(tmp_path, monkeypatch):
     """失效的 full_minute 自定义源不再静默降级并请求 TickFlow。"""
     svc = _svc(tmp_path, monkeypatch, full_minute_provider="not-registered")
     monkeypatch.setattr(
-        minute_refresh.MinuteRefreshService, "_today_coverage_lag_minutes",
+        minute_refresh.MinuteRefreshService,
+        "_today_coverage_lag_minutes",
         lambda self: 0.2,
     )
-    _patch_write(monkeypatch)
+    _patch_write(monkeypatch, svc)
     modes: list[str] = []
     monkeypatch.setattr(
         "app.services.kline_sync.fetch_intraday_universe_increment",
-        lambda *a, **k: (modes.append("tf-inc"), (_inc_df(), 1))[1],
+        lambda *a, **k: _record((_inc_df(), 1), modes, "tf-inc"),
     )
     monkeypatch.setattr(
         "app.services.kline_sync.fetch_intraday_full_market_burst",
-        lambda symbols, capset, *, count=300: (modes.append("tf-full"), (_full_df(), 28))[1],
+        lambda symbols, capset, *, count=300: _record((_full_df(), 28), modes, "tf-full"),
     )
     svc._run_round()
     assert modes == []
@@ -405,7 +449,7 @@ def test_unloaded_full_minute_provider_does_not_fall_back_to_tickflow(tmp_path, 
     calls: list[str] = []
     monkeypatch.setattr(
         "app.services.kline_sync.fetch_intraday_universe_increment",
-        lambda *args, **kwargs: (calls.append("tickflow"), (pl.DataFrame(), 1))[1],
+        lambda *args, **kwargs: _record((pl.DataFrame(), 1), calls, "tickflow"),
     )
     svc._run_round()
     assert calls == []
@@ -417,14 +461,18 @@ def test_custom_provider_without_full_minute_dataset_fails_closed(tmp_path, monk
     from app.data_providers import custom as custom_sources
 
     svc = _svc(tmp_path, monkeypatch, full_minute_provider="other")
-    provider = type("Provider", (), {"config": type("Config", (), {"datasets": {"minute": object()}})()})()
+    provider = type(
+        "Provider", (), {"config": type("Config", (), {"datasets": {"minute": object()}})()}
+    )()
     monkeypatch.setattr(custom_sources, "get_provider", lambda name: provider)
     calls: list[str] = []
     monkeypatch.setattr(
         "app.services.kline_sync.fetch_intraday_universe_increment",
-        lambda *args, **kwargs: (calls.append("tickflow"), (pl.DataFrame(), 1))[1],
+        lambda *args, **kwargs: _record((pl.DataFrame(), 1), calls, "tickflow"),
     )
-    monkeypatch.setattr(minute_refresh.MinuteRefreshService, "_today_coverage_lag_minutes", lambda self: 0.2)
+    monkeypatch.setattr(
+        minute_refresh.MinuteRefreshService, "_today_coverage_lag_minutes", lambda self: 0.2
+    )
 
     svc._run_round()
 
@@ -456,13 +504,16 @@ def test_refresh_preferences_defaults_and_clamp(tmp_path, monkeypatch):
     preferences.save({"minute_refresh_interval": 15})
     assert preferences.get_minute_refresh_interval() == 15
 
+
 def test_realtime_monitor_config_owns_refresh_keys(tmp_path, monkeypatch):
     """盘中增量配置归属实时监控端点 (set_realtime_monitor_config), 并 clamp 到 [3,120]。"""
     _isolated_prefs(tmp_path, monkeypatch)
-    saved = preferences.set_realtime_monitor_config({
-        "minute_refresh_enabled": True,
-        "minute_refresh_interval": 1,   # 越界 → clamp 到下限
-    })
+    saved = preferences.set_realtime_monitor_config(
+        {
+            "minute_refresh_enabled": True,
+            "minute_refresh_interval": 1,  # 越界 → clamp 到下限
+        }
+    )
     assert saved["minute_refresh_enabled"] is True
     assert saved["minute_refresh_interval"] == 3
     saved = preferences.set_realtime_monitor_config({"minute_refresh_interval": 400})

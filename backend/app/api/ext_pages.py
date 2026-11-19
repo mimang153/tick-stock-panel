@@ -3,6 +3,7 @@
 分发端点位于 /api 前缀下, 自动受集中鉴权中间件保护: 浏览器同源动态
 import 会携带登录 cookie, 与页面会话同一访问边界。
 """
+
 from __future__ import annotations
 
 import re
@@ -83,12 +84,16 @@ async def upload_page_pack(
 @router.get("")
 def list_page_packs(request: Request) -> list[PagePackMeta]:
     from app.extensions.packages import ExtensionPackageStore
-    return _store(request).list() + ExtensionPackageStore(request.app.state.repo.store.data_dir).runtime_pages(
+
+    return _store(request).list() + ExtensionPackageStore(
+        request.app.state.repo.store.data_dir
+    ).runtime_pages(
         getattr(request.app.state, "managed_extension_versions", {}),
     )
 
 
 # ── 源码导入: .tsx 编译为标准页面插件 (仅源码/桌面部署可发起) ──
+
 
 def _save_compiled(store: PagePackStore, pack_id: str, bundle: bytes) -> PagePackMeta:
     """编译产物落库 (save_upload 吃 Path, 中转临时文件)。"""
@@ -171,15 +176,19 @@ def get_page_pack_bundle(pack_id: str, request: Request) -> FileResponse:
     store = _store(request)
     if pack_id.startswith("package:"):
         from app.extensions.packages import ExtensionPackageStore
+
         try:
             bundle = ExtensionPackageStore(request.app.state.repo.store.data_dir).runtime_bundle(
-                pack_id, getattr(request.app.state, "managed_extension_versions", {}),
+                pack_id,
+                getattr(request.app.state, "managed_extension_versions", {}),
             )
         except (ValueError, OSError, KeyError, TypeError):
             bundle = None
         if bundle is None:
             raise HTTPException(404, "配套后端尚未就绪，页面未启用")
-        return FileResponse(bundle, media_type="text/javascript", headers={"Cache-Control": "no-store"})
+        return FileResponse(
+            bundle, media_type="text/javascript", headers={"Cache-Control": "no-store"}
+        )
     try:
         meta = store.get(pack_id)
     except ValueError as e:

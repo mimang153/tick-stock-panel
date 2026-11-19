@@ -3,6 +3,7 @@
 删除端点的 config_id 来自 URL path 参数, 不经创建端点的 pattern 校验;
 若直接拼接路径, `../victim` 可让 rmtree 删除 ext_data 之外的目录。
 """
+
 from __future__ import annotations
 
 import json
@@ -14,12 +15,14 @@ def _write_config(data_dir, config_id: str) -> None:
     d = data_dir / "ext_data" / config_id
     d.mkdir(parents=True, exist_ok=True)
     (d / "config.json").write_text(
-        json.dumps({
-            "id": config_id,
-            "label": "测试",
-            "mode": "snapshot",
-            "fields": [{"name": "score"}],
-        }),
+        json.dumps(
+            {
+                "id": config_id,
+                "label": "测试",
+                "mode": "snapshot",
+                "fields": [{"name": "score"}],
+            }
+        ),
         encoding="utf-8",
     )
 

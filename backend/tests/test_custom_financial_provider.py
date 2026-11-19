@@ -5,6 +5,7 @@ shares): 请求时注入 table 参数由上游分发; shares 表额外注入 lat
 字段只要求映射出 symbol, 指标列按 canonical 口径宽表透传, 无
 period_end 的帧由同步层合并链路自然过滤。
 """
+
 from __future__ import annotations
 
 import polars as pl
@@ -18,15 +19,22 @@ def _provider(**overrides) -> GenericHTTPProvider:
         "url": "http://example.test/financial",
         "response_path": "data",
         "field_map": {
-            "symbol": "symbol", "period_end": "period_end",
+            "symbol": "symbol",
+            "period_end": "period_end",
             "announce_date": "announce_date",
-            "revenue": "revenue", "net_income": "net_income",
+            "revenue": "revenue",
+            "net_income": "net_income",
         },
         **overrides,
     }
-    return GenericHTTPProvider(config_from_dict({
-        "name": "eltdx", "datasets": {"financial": cfg},
-    }))
+    return GenericHTTPProvider(
+        config_from_dict(
+            {
+                "name": "eltdx",
+                "datasets": {"financial": cfg},
+            }
+        )
+    )
 
 
 def test_financial_request_injects_table_parameter(monkeypatch):
@@ -35,9 +43,15 @@ def test_financial_request_injects_table_parameter(monkeypatch):
 
     def fake_request(cfg, **kwargs):
         captured.update(kwargs)
-        return [{"symbol": "600000.SH", "period_end": "2026-06-30",
-                 "announce_date": "2026-08-30",
-                 "revenue": 1.0, "net_income": 0.1}]
+        return [
+            {
+                "symbol": "600000.SH",
+                "period_end": "2026-06-30",
+                "announce_date": "2026-08-30",
+                "revenue": 1.0,
+                "net_income": 0.1,
+            }
+        ]
 
     monkeypatch.setattr(provider, "_request_rows", fake_request)
     df = provider.get_financials("income", ["600000.SH"])
@@ -53,7 +67,8 @@ def test_financial_shares_request_injects_latest_flag(monkeypatch):
     provider = _provider()
     captured: dict = {}
     monkeypatch.setattr(
-        provider, "_request_rows",
+        provider,
+        "_request_rows",
         lambda cfg, **kwargs: (captured.update(kwargs), [])[1],
     )
 
@@ -82,10 +97,14 @@ def test_financial_test_dataset_probes_metrics_table(monkeypatch):
     provider = _provider()
     captured: dict = {}
     monkeypatch.setattr(
-        provider, "_request_rows",
-        lambda cfg, **kwargs: (captured.update(kwargs), [
-            {"symbol": "600000.SH", "period_end": "2026-06-30"},
-        ])[1],
+        provider,
+        "_request_rows",
+        lambda cfg, **kwargs: (
+            captured.update(kwargs),
+            [
+                {"symbol": "600000.SH", "period_end": "2026-06-30"},
+            ],
+        )[1],
     )
 
     out = provider.test_dataset("financial", ["600000.SH"])
@@ -102,13 +121,23 @@ def test_financial_sparse_column_survives_schema_inference(monkeypatch):
     append ComputeError → 整表拉空 (fuyao 插件同因踩坑)。
     """
     provider = _provider()
-    rows = [
-        {"symbol": f"00000{i}.SZ", "period_end": "2026-06-30",
-         "announce_date": "2026-08-30", "revenue": None}
+    rows: list[dict] = [
+        {
+            "symbol": f"00000{i}.SZ",
+            "period_end": "2026-06-30",
+            "announce_date": "2026-08-30",
+            "revenue": None,
+        }
         for i in range(100)
     ]
-    rows.append({"symbol": "600519.SH", "period_end": "2026-06-30",
-                 "announce_date": "2026-08-30", "revenue": 5.0e10})
+    rows.append(
+        {
+            "symbol": "600519.SH",
+            "period_end": "2026-06-30",
+            "announce_date": "2026-08-30",
+            "revenue": 5.0e10,
+        }
+    )
     monkeypatch.setattr(provider, "_request_rows", lambda cfg, **kwargs: rows)
 
     df = provider.get_financials("metrics", ["600519.SH"])
@@ -119,13 +148,22 @@ def test_financial_sparse_column_survives_schema_inference(monkeypatch):
 def test_duplicate_mapped_targets_are_rejected():
     """两个外部字段映射同一内部列: rename 阶段 DuplicateError → 整表拉空,
     validate 必须在保存时拦截 (前端映射行允许选重)。"""
-    provider = GenericHTTPProvider(config_from_dict({
-        "name": "eltdx",
-        "datasets": {"financial": {
-            "url": "http://example.test/financial",
-            "field_map": {"symbol": "symbol", "eps": "eps_basic",
-                          "eps_dil": "eps_basic"},  # eps_dil 与 eps 同目标
-        }},
-    }))
+    provider = GenericHTTPProvider(
+        config_from_dict(
+            {
+                "name": "eltdx",
+                "datasets": {
+                    "financial": {
+                        "url": "http://example.test/financial",
+                        "field_map": {
+                            "symbol": "symbol",
+                            "eps": "eps_basic",
+                            "eps_dil": "eps_basic",
+                        },  # eps_dil 与 eps 同目标
+                    }
+                },
+            }
+        )
+    )
     errors = provider.validate()
     assert "financial: duplicate mapped target fields: eps_basic" in errors

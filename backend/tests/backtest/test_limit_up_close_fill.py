@@ -7,9 +7,11 @@
 修复: close_t 口径下凡收盘涨停(limit_up_locked, 含一字)一律拦截;
 open_t+1 口径按次日开盘成交, 保持只拦次日一字板的既有行为。
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import Any, cast
 
 import polars as pl
 
@@ -26,23 +28,37 @@ def _panel(limit_day_idx: int | None, one_price: bool) -> pl.DataFrame:
             prev_close = 10.0 + (i - 1) * 0.05
             limit = round(prev_close * 1.1, 2)
             if one_price:
-                o = h = l = c = limit
+                o = h = low = c = limit
             else:
-                o, l = px, px - 0.1
+                o, low = px, px - 0.1
                 h = c = limit
-            rows.append({
-                "symbol": "A", "date": start + timedelta(days=i),
-                "open": o, "high": h, "low": l, "close": c,
-                "volume": 100_000,
-                "signal_limit_up": True, "signal_limit_down": False,
-            })
+            rows.append(
+                {
+                    "symbol": "A",
+                    "date": start + timedelta(days=i),
+                    "open": o,
+                    "high": h,
+                    "low": low,
+                    "close": c,
+                    "volume": 100_000,
+                    "signal_limit_up": True,
+                    "signal_limit_down": False,
+                }
+            )
         else:
-            rows.append({
-                "symbol": "A", "date": start + timedelta(days=i),
-                "open": px, "high": px + 0.02, "low": px - 0.02, "close": px,
-                "volume": 100_000,
-                "signal_limit_up": False, "signal_limit_down": False,
-            })
+            rows.append(
+                {
+                    "symbol": "A",
+                    "date": start + timedelta(days=i),
+                    "open": px,
+                    "high": px + 0.02,
+                    "low": px - 0.02,
+                    "close": px,
+                    "volume": 100_000,
+                    "signal_limit_up": False,
+                    "signal_limit_down": False,
+                }
+            )
     return pl.DataFrame(rows).sort(["symbol", "date"])
 
 
@@ -53,8 +69,10 @@ def _run(panel: pl.DataFrame, signal_day: date, matching: str):
     )
     exit_mask = pl.Series([False] * len(panel), dtype=pl.Boolean)
     return BacktestEngine(repo=None).simulate_independent_candidates(  # type: ignore[arg-type]
-        panel, entry_mask, exit_mask,
-        MatcherConfig(matching=matching, fees_pct=0, slippage_bps=0, max_hold_days=1),
+        panel,
+        entry_mask,
+        exit_mask,
+        MatcherConfig(matching=cast(Any, matching), fees_pct=0, slippage_bps=0, max_hold_days=1),
     )
 
 

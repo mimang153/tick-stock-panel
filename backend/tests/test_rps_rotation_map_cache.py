@@ -4,6 +4,7 @@
 600s 内第二次调用命中缓存返回 DataFrame, 调用方按元组解包会把两列
 拆成两个 Series, 概念/行业分析二次访问必报错 (issue 截图定位)。
 """
+
 from __future__ import annotations
 
 import types
@@ -31,20 +32,22 @@ def _patch_ext(monkeypatch, rows: list[dict]) -> None:
     config = types.SimpleNamespace(id="ext_gn_ths")
     monkeypatch.setattr(rps_rotation.ExtConfigStore, "load_all", lambda self: [config])
     monkeypatch.setattr(
-        rps_rotation, "_dimension_field",
+        rps_rotation,
+        "_dimension_field",
         lambda cfg, kind: "所属概念" if kind == "concept" else None,
     )
     monkeypatch.setattr(rps_rotation, "_read_ext_rows", lambda data_dir, cfg, field: rows)
-    monkeypatch.setattr(
-        rps_rotation, "_symbol_keys", lambda row, cfg: [row["symbol"].upper()]
-    )
+    monkeypatch.setattr(rps_rotation, "_symbol_keys", lambda row, cfg: [row["symbol"].upper()])
 
 
 def test_map_cache_hit_returns_same_tuple(tmp_path, monkeypatch):
-    _patch_ext(monkeypatch, [
-        {"symbol": "s1.SH", "所属概念": "人工智能"},
-        {"symbol": "s2.SH", "所属概念": "芯片"},
-    ])
+    _patch_ext(
+        monkeypatch,
+        [
+            {"symbol": "s1.SH", "所属概念": "人工智能"},
+            {"symbol": "s2.SH", "所属概念": "芯片"},
+        ],
+    )
     first = rps_rotation._load_concept_map_df(_fake_repo(tmp_path), "concept")
     assert isinstance(first, tuple) and len(first) == 2
     map_df, count = first
@@ -59,9 +62,12 @@ def test_map_cache_hit_returns_same_tuple(tmp_path, monkeypatch):
 
 
 def test_map_cache_isolated_by_kind(tmp_path, monkeypatch):
-    _patch_ext(monkeypatch, [
-        {"symbol": "s1.SH", "所属概念": "人工智能"},
-    ])
+    _patch_ext(
+        monkeypatch,
+        [
+            {"symbol": "s1.SH", "所属概念": "人工智能"},
+        ],
+    )
     repo = _fake_repo(tmp_path)
     concept = rps_rotation._load_concept_map_df(repo, "concept")
     industry = rps_rotation._load_concept_map_df(repo, "industry")

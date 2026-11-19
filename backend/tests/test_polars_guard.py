@@ -5,6 +5,7 @@
 - 总闸与 background 车道确实约束并发上限;
 - background 车道占满时 interactive 仍能拿到保留闸位 (页面不被后台计算饿死)。
 """
+
 from __future__ import annotations
 
 import threading

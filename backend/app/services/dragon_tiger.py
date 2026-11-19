@@ -77,9 +77,7 @@ def _provider():
 
 def _fetch_boards(provider, d: date_cls) -> dict:
     """三榜取齐。任一榜失败抛 FuyaoError (整日失败, 不留半套缓存)。"""
-    return {
-        bt: _boards_of(provider, bt, d.isoformat()) for bt in _BOARDS
-    }
+    return {bt: _boards_of(provider, bt, d.isoformat()) for bt in _BOARDS}
 
 
 def _boards_of(provider, board_type: str, iso: str | None) -> dict:
@@ -143,7 +141,9 @@ def normalize_stock_items(items: object) -> list[dict]:
     if dropped:
         logger.warning(
             "龙虎榜 %d 条标的缺少可识别代码 (thscode/ticker 均不可用), 已跳过: %s",
-            len(dropped), dropped[:5])
+            len(dropped),
+            dropped[:5],
+        )
     return out
 
 
@@ -254,8 +254,7 @@ def get_dragon_tiger(data_dir: Path, target: date_cls | None = None) -> dict:
                     if cached_prev is not None:
                         base = dict(cached_prev)
                         base.pop("state", None)
-                        return {**base, "state": "fallback_prev",
-                                "requested_date": explicit}
+                        return {**base, "state": "fallback_prev", "requested_date": explicit}
                     raw_prev = _fetch_boards(provider, prev)
                     base = {
                         "requested_date": prev.isoformat(),
@@ -264,8 +263,7 @@ def get_dragon_tiger(data_dir: Path, target: date_cls | None = None) -> dict:
                     }
                     with contextlib.suppress(OSError):
                         _store_cache(_cache_path(data_dir, prev), {**base, "state": "ok"})
-                    return {**base, "state": "fallback_prev",
-                            "requested_date": explicit}
+                    return {**base, "state": "fallback_prev", "requested_date": explicit}
                 except FuyaoError:
                     pass
         logger.warning("龙虎榜拉取失败: %s", e)
@@ -286,30 +284,49 @@ def build_recap_context(data_dir: Path) -> str:
 
         top_buy = sorted(
             [i for i in items if (i.get("net_value") or 0) > 0],
-            key=lambda x: x.get("net_value") or 0, reverse=True,
+            key=lambda x: x.get("net_value") or 0,
+            reverse=True,
         )[:5]
         if top_buy:
-            lines.append("净买入居前: " + "; ".join(
-                f"{i.get('name')}({i.get('thscode')}) 净买{float(i.get('net_value') or 0)/1e8:.2f}亿"
-                f" 涨跌{(i.get('change') or 0)*100:.1f}%"
-                + (" [3日榜]" if i.get("range_days") == 3 else "")
-                for i in top_buy))
+            lines.append(
+                "净买入居前: "
+                + "; ".join(
+                    f"{i.get('name')}({i.get('thscode')}) 净买{float(i.get('net_value') or 0) / 1e8:.2f}亿"
+                    f" 涨跌{(i.get('change') or 0) * 100:.1f}%"
+                    + (" [3日榜]" if i.get("range_days") == 3 else "")
+                    for i in top_buy
+                )
+            )
         top_sell = sorted(
             [i for i in items if (i.get("net_value") or 0) < 0],
             key=lambda x: x.get("net_value") or 0,
         )[:5]
         if top_sell:
-            lines.append("净卖出居前: " + "; ".join(
-                f"{i.get('name')} 净卖{abs(float(i.get('net_value') or 0))/1e8:.2f}亿"
-                for i in top_sell))
+            lines.append(
+                "净卖出居前: "
+                + "; ".join(
+                    f"{i.get('name')} 净卖{abs(float(i.get('net_value') or 0)) / 1e8:.2f}亿"
+                    for i in top_sell
+                )
+            )
         if org_items:
-            lines.append("机构净买居前: " + "; ".join(
-                f"{i.get('name')} 机构净买{float(i.get('org_net_value') or 0)/1e8:.2f}亿"
-                for i in sorted(org_items, key=lambda x: x.get("org_net_value") or 0, reverse=True)[:5]))
+            lines.append(
+                "机构净买居前: "
+                + "; ".join(
+                    f"{i.get('name')} 机构净买{float(i.get('org_net_value') or 0) / 1e8:.2f}亿"
+                    for i in sorted(
+                        org_items, key=lambda x: x.get("org_net_value") or 0, reverse=True
+                    )[:5]
+                )
+            )
         if hm_items:
-            lines.append("活跃游资: " + "; ".join(
-                f"{h.get('name')} 净买{float(h.get('buying') or 0)/1e8:.2f}亿"
-                for h in sorted(hm_items, key=lambda x: x.get('buying') or 0, reverse=True)[:5]))
+            lines.append(
+                "活跃游资: "
+                + "; ".join(
+                    f"{h.get('name')} 净买{float(h.get('buying') or 0) / 1e8:.2f}亿"
+                    for h in sorted(hm_items, key=lambda x: x.get("buying") or 0, reverse=True)[:5]
+                )
+            )
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001 — 摘要失败不影响复盘主流程
         logger.debug("龙虎榜复盘摘要构建失败: %s", e)

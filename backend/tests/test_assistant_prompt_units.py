@@ -6,6 +6,7 @@ change_pct / amplitude 在 enriched 里是小数。提示词却写「涨跌幅/�
 (0.0366 = 3.66%), 表述时转为百分比」—— 模型照做会把换手率 5.2 说成 520%,
 把上证指数 +1.23 说成「上涨 123%」(与 #285 同一类单位错位)。
 """
+
 from __future__ import annotations
 
 import polars as pl
@@ -37,10 +38,18 @@ class _IndexQuoteService:
 
 async def test_index_quote_tool_returns_percent_units() -> None:
     """实际口径: get_indices 透传实时指数缓存, 涨跌幅已是百分数。"""
-    cache = QuoteService._build_index_quotes([{
-        "symbol": "000001.SH", "name": "上证指数", "last_price": 3850.0, "prev_close": 3803.23,
-        "change_pct": 0.0123, "amplitude": 0.0156,
-    }])
+    cache = QuoteService._build_index_quotes(
+        [
+            {
+                "symbol": "000001.SH",
+                "name": "上证指数",
+                "last_price": 3850.0,
+                "prev_close": 3803.23,
+                "change_pct": 0.0123,
+                "amplitude": 0.0156,
+            }
+        ]
+    )
     ctx = assistant_tools.ToolContext.build(quote_service=_IndexQuoteService(cache))
     payload = await assistant_tools.execute_assistant_tool("get_indices", {}, ctx)
 

@@ -3,9 +3,9 @@
 app/extensions/loader.py 用 importlib.import_module + pkgutil.iter_modules 在
 运行时发现 app/custom/*, 两条链路对 PyInstaller 静态分析都不可见; tsp.spec
 未声明时冻结产物里扩展静默消失(桌面版 AI 对话助手 405, 且无任何日志)。
-锁定双声明契约: 
-  - hiddenimports(collect_submodules) 进 PYZ —— 保 import_module 可导入; 
-  - datas 落盘到 app/custom —— frozen 下 app.__path__ 解析到 _internal/app, 
+锁定双声明契约:
+  - hiddenimports(collect_submodules) 进 PYZ —— 保 import_module 可导入;
+  - datas 落盘到 app/custom —— frozen 下 app.__path__ 解析到 _internal/app,
     保 pkgutil.iter_modules 可枚举(与 fuyao 插件同一处理方式)。
 """
 
@@ -16,9 +16,7 @@ from xml.etree import ElementTree
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SPEC_TEXT = (REPO_ROOT / "packaging" / "tsp.spec").read_text(encoding="utf-8")
 # 只断言代码行, 避免被注释里的字样误判为已声明
-SPEC_CODE = "\n".join(
-    line for line in SPEC_TEXT.splitlines() if not line.lstrip().startswith("#")
-)
+SPEC_CODE = "\n".join(line for line in SPEC_TEXT.splitlines() if not line.lstrip().startswith("#"))
 
 
 def test_spec_declares_custom_extensions():
@@ -28,7 +26,10 @@ def test_spec_declares_custom_extensions():
 
 
 def test_spec_carries_strategy_prompts_as_files():
-    assert '(str(ROOT / "backend" / "app" / "strategy" / "prompts"), "app/strategy/prompts")' in SPEC_CODE
+    assert (
+        '(str(ROOT / "backend" / "app" / "strategy" / "prompts"), "app/strategy/prompts")'
+        in SPEC_CODE
+    )
 
 
 def test_spec_declares_builtin_plugin_fuyao():
@@ -50,7 +51,8 @@ def test_installer_launches_desktop_only_once():
     text = (REPO_ROOT / "packaging" / "tsp.iss").read_text(encoding="utf-8")
     section = text.split("[Run]", 1)[1].split("[UninstallRun]", 1)[0]
     launches = [
-        line for line in section.splitlines()
+        line
+        for line in section.splitlines()
         if line.startswith("Filename:") and "{#MyAppExeName}" in line
     ]
     assert len(launches) == 1
@@ -65,8 +67,7 @@ def test_installer_deploys_dotnet_config_beside_executable():
     config_name = f"{exe_name.group(1)}.config"
     section = text.split("[Files]", 1)[1].split("[Icons]", 1)[0]
     entries = [
-        line for line in section.splitlines()
-        if line.startswith(f'Source: "{config_name}";')
+        line for line in section.splitlines() if line.startswith(f'Source: "{config_name}";')
     ]
     assert len(entries) == 1, "Windows 安装包必须显式携带 EXE 配置文件"
     assert 'DestDir: "{app}";' in entries[0]

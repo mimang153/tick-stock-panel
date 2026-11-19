@@ -3,6 +3,7 @@
 The existing loader owns provider instances. This module owns immutable package
 versions and activation state only; it never installs into the host environment.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -16,6 +17,7 @@ import tempfile
 import types
 from contextlib import contextmanager
 from pathlib import Path
+from typing import cast
 
 import yaml
 from packaging.version import Version
@@ -35,10 +37,12 @@ _started: set[str] = set()
 
 
 def root() -> Path:
+    """返回插件包根目录。"""
     return settings.data_dir / "plugins"
 
 
 def directory(name: str) -> Path:
+    """校验标识并返回插件目录，拒绝符号链接。"""
     if not NAME.fullmatch(name):
         raise ValueError("插件标识非法")
     path = root() / name
@@ -49,6 +53,7 @@ def directory(name: str) -> Path:
 
 @contextmanager
 def mutation():
+    """以独占事务保护插件安装状态的读改写，避免并发交叉覆盖。"""
     root().mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(root() / ".management.sqlite", timeout=5)
     try:
@@ -60,6 +65,7 @@ def mutation():
 
 
 def read_state(name: str) -> dict | None:
+    """读取插件安装状态；未安装返回 None。"""
     if not NAME.fullmatch(name):
         return None
     path = directory(name) / "state.json"
@@ -72,11 +78,13 @@ def read_state(name: str) -> dict | None:
 
 
 def write_state(name: str, state: dict):
+    """原子写入插件安装状态。"""
     directory(name).mkdir(parents=True, exist_ok=True)
     atomic_write_text(directory(name) / "state.json", json.dumps(state, ensure_ascii=False))
 
 
 def version_dir(name: str, version: str) -> Path:
+    """校验版本并返回插件版本目录，拒绝符号链接。"""
     if not VERSION.fullmatch(version):
         raise ValueError("插件版本非法")
     path = directory(name) / "versions" / version
@@ -86,6 +94,7 @@ def version_dir(name: str, version: str) -> Path:
 
 
 def manifest(name: str, version: str | None = None) -> dict | None:
+    """读取并校验已安装插件清单，未安装返回 None。"""
     state = read_state(name)
     if state is None:
         return None
@@ -97,7 +106,42 @@ def manifest(name: str, version: str | None = None) -> dict | None:
     return doc
 
 
+def _validate_text_fields(doc: dict) -> None:
+    """校验清单中的可选文本字段类型与长度。"""
+    for key in (
+        "display_name",
+        "description",
+        "api_key_env",
+        "homepage",
+        "key_manage_url",
+        "author",
+        "billing",
+        "billing_note",
+        "install_hint",
+    ):
+        if key in doc and (not isinstance(doc[key], str) or len(doc[key]) > 4000):
+            raise ValueError(f"{key} 必须是文本且不超过 4000 字符")
+    for key in ("homepage_label", "key_manage_label"):
+        if key in doc and (not isinstance(doc[key], str) or len(doc[key]) > 200):
+            raise ValueError(f"{key} 必须是文本且不超过 200 字符")
+
+
+def _validate_urls_and_notes(doc: dict) -> None:
+    """校验环境变量名、HTTPS 链接与说明列表。"""
+    if doc.get("api_key_env") and not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", doc["api_key_env"]):
+        raise ValueError("api_key_env 必须是大写环境变量名")
+    for key in ("homepage", "key_manage_url"):
+        if doc.get(key) and not doc[key].startswith("https://"):
+            raise ValueError(f"{key} 必须使用 HTTPS")
+    if "usage_notes" in doc and (
+        not isinstance(doc["usage_notes"], list)
+        or any(not isinstance(x, str) for x in doc["usage_notes"])
+    ):
+        raise ValueError("usage_notes 必须是文本列表")
+
+
 def validate_manifest(doc: dict):
+    """静态校验 plugin.yaml 结构；绝不执行上传代码。"""
     if not isinstance(doc, dict):
         raise ValueError("plugin.yaml 必须是对象")
     if not NAME.fullmatch(str(doc.get("name", ""))):
@@ -111,21 +155,14 @@ def validate_manifest(doc: dict):
         if (field == "entry" or doc.get(field)) and not ENTRY.fullmatch(str(doc.get(field, ""))):
             raise ValueError(f"{field} 应使用包内相对模块引用，例如 provider:MyProvider")
     datasets = doc.get("datasets")
-    if not isinstance(datasets, list) or not datasets or any(not isinstance(x, str) or x not in DATASETS for x in datasets):
+    if (
+        not isinstance(datasets, list)
+        or not datasets
+        or any(not isinstance(x, str) or x not in DATASETS for x in datasets)
+    ):
         raise ValueError("datasets 必须声明已支持的数据集")
-    for key in ("display_name", "description", "api_key_env", "homepage", "key_manage_url", "author", "billing", "billing_note", "install_hint"):
-        if key in doc and (not isinstance(doc[key], str) or len(doc[key]) > 4000):
-            raise ValueError(f"{key} 必须是文本且不超过 4000 字符")
-    for key in ("homepage_label", "key_manage_label"):
-        if key in doc and (not isinstance(doc[key], str) or len(doc[key]) > 200):
-            raise ValueError(f"{key} 必须是文本且不超过 200 字符")
-    if doc.get("api_key_env") and not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", doc["api_key_env"]):
-        raise ValueError("api_key_env 必须是大写环境变量名")
-    for key in ("homepage", "key_manage_url"):
-        if doc.get(key) and not doc[key].startswith("https://"):
-            raise ValueError(f"{key} 必须使用 HTTPS")
-    if "usage_notes" in doc and (not isinstance(doc["usage_notes"], list) or any(not isinstance(x, str) for x in doc["usage_notes"])):
-        raise ValueError("usage_notes 必须是文本列表")
+    _validate_text_fields(doc)
+    _validate_urls_and_notes(doc)
     if doc.get("runtime", "none") not in ("none", "python"):
         raise ValueError("外部安装暂只支持 none/python 运行时，不安装额外运行时")
     if doc.get("hidden"):
@@ -151,18 +188,28 @@ def inspect_archive(data: bytes) -> tuple[dict, dict[str, bytes]]:
                 raise ValueError(f"Python 文件语法错误: {name}") from exc
     errors = compatibility(doc)
     from . import loader
-    if (loader.plugins_dir() / doc["name"]).exists() or doc["name"] == "tickflow" or any(
-        (loader.data_sources_dir() / f"{doc['name']}{suffix}").exists() for suffix in (".yaml", ".yml")
+
+    if (
+        (loader.plugins_dir() / doc["name"]).exists()
+        or doc["name"] == "tickflow"
+        or any(
+            (loader.data_sources_dir() / f"{doc['name']}{suffix}").exists()
+            for suffix in (".yaml", ".yml")
+        )
     ):
         raise ValueError("插件名称与内置插件或 HTTP 数据源冲突")
     state = read_state(doc["name"])
     digest = hashlib.sha256(data).hexdigest()
     if state and doc["version"] in state["hashes"] and state["hashes"][doc["version"]] != digest:
         raise ValueError("相同版本已有不同内容，请提升版本号")
-    return {"manifest": doc, "digest": digest, "errors": errors,
-            "pending_version": state.get("pending") if state else None,
-            "revision": hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest(),
-            "installed_version": state["active"] if state else None}, files
+    return {
+        "manifest": doc,
+        "digest": digest,
+        "errors": errors,
+        "pending_version": state.get("pending") if state else None,
+        "revision": hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest(),
+        "installed_version": state["active"] if state else None,
+    }, files
 
 
 def import_module(doc: dict, module: str):
@@ -184,6 +231,30 @@ def load_entry(doc: dict, entry: str):
     return getattr(import_module(doc, module), attr)
 
 
+def _validate_provider_capabilities(provider, doc: dict) -> None:
+    """校验 Provider 名称、数据集声明与必需数据方法齐备。"""
+    if provider.name != doc["name"] or set(provider.config.datasets) != set(doc["datasets"]):
+        raise ValueError("Provider 名称/能力声明与清单不一致")
+    required = {
+        "daily": "get_daily",
+        "adj_factor": "get_adj_factors",
+        "minute": "get_minute",
+        "realtime": "get_realtime",
+        "depth5": "get_depth_batch",
+        "financial": "get_financials",
+    }
+    for dataset in doc["datasets"]:
+        methods = (
+            ("get_intraday_batch", "get_minute")
+            if dataset == "full_minute"
+            else (required[dataset],)
+        )
+        if not any(callable(getattr(provider, method, None)) for method in methods):
+            raise ValueError(f"缺少 {dataset} 数据方法")
+    if not callable(getattr(provider, "close", None)):
+        raise ValueError("Provider 缺少 close 方法")
+
+
 def build_provider(doc: dict):
     issues = compatibility(doc)
     if issues:
@@ -196,25 +267,22 @@ def build_provider(doc: dict):
         if not callable(getattr(module, "probe_api_key", None)):
             raise ValueError("声明 API Key 的插件必须提供 probe_api_key")
     from app import secrets_store
-    if doc.get("api_key_env") and not secrets_store.get_env_backed_secret(f"{doc['name']}_api_key", doc["api_key_env"]):
+
+    if doc.get("api_key_env") and not secrets_store.get_env_backed_secret(
+        f"{doc['name']}_api_key", doc["api_key_env"]
+    ):
         return None, "待配置 API Key"
     if doc.get("check"):
         check = load_entry(doc, doc["check"])()
         ok, reason = check if isinstance(check, tuple) else (check, "不可用")
         if not ok:
-            key = secrets_store.get_env_backed_secret(f"{doc['name']}_api_key", doc.get("api_key_env", ""))
+            key = secrets_store.get_env_backed_secret(
+                f"{doc['name']}_api_key", doc.get("api_key_env", "")
+            )
             return None, str(reason).replace(key, "[已隐藏]") if key else str(reason)
     provider = factory()
     try:
-        if provider.name != doc["name"] or set(provider.config.datasets) != set(doc["datasets"]):
-            raise ValueError("Provider 名称/能力声明与清单不一致")
-        required = {"daily": "get_daily", "adj_factor": "get_adj_factors", "minute": "get_minute", "realtime": "get_realtime", "depth5": "get_depth_batch", "financial": "get_financials"}
-        for dataset in doc["datasets"]:
-            methods = ("get_intraday_batch", "get_minute") if dataset == "full_minute" else (required[dataset],)
-            if not any(callable(getattr(provider, method, None)) for method in methods):
-                raise ValueError(f"缺少 {dataset} 数据方法")
-        if not callable(getattr(provider, "close", None)):
-            raise ValueError("Provider 缺少 close 方法")
+        _validate_provider_capabilities(provider, doc)
     except Exception:
         close = getattr(provider, "close", None)
         if callable(close):
@@ -223,8 +291,45 @@ def build_provider(doc: dict):
     return provider, "已就绪"
 
 
+def _write_version_files(target: Path, files: dict[str, bytes]) -> bool:
+    """原子写入版本目录；目录已存在时返回 False 且不改写内容。"""
+    created = not target.exists()
+    if created:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=".stage-", dir=target.parent))
+        try:
+            for filename, payload in files.items():
+                dest = staging / filename
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(payload)
+            staging.rename(target)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging)
+    return created
+
+
+def _publish_install(name, doc, version, digest, created, target, provider, reason) -> None:
+    """发布安装记录并上线 Provider；写入失败时回滚状态与新建目录。"""
+    from . import loader
+
+    try:
+        write_state(
+            name, {"schema": 1, "active": version, "hashes": {version: digest}, "enabled": True}
+        )
+    except OSError:
+        if provider is not None:
+            provider.close()
+        if created:
+            shutil.rmtree(target)
+        raise
+    _started.add(str(directory(name).resolve()))
+    loader.publish_external(doc, provider, reason)
+
+
 def install(data: bytes, digest: str, revision: str | None = None) -> dict:
     from . import loader
+
     with mutation():
         preview, files = inspect_archive(data)
         if preview["digest"] != digest:
@@ -243,21 +348,12 @@ def install(data: bytes, digest: str, revision: str | None = None) -> dict:
         if state and Version(version) <= Version(state["active"]):
             raise ValueError("升级需要更高版本；退回旧版本请使用回退操作")
         target = version_dir(name, version)
-        if target.exists() and any(not (target / filename).is_file() or (target / filename).read_bytes() != payload for filename, payload in files.items()):
+        if target.exists() and any(
+            not (target / filename).is_file() or (target / filename).read_bytes() != payload
+            for filename, payload in files.items()
+        ):
             raise ValueError("该版本目录已有其他内容，请提升版本号")
-        created = not target.exists()
-        if created:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            staging = Path(tempfile.mkdtemp(prefix=".stage-", dir=target.parent))
-            try:
-                for filename, payload in files.items():
-                    dest = staging / filename
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(payload)
-                staging.rename(target)
-            finally:
-                if staging.exists():
-                    shutil.rmtree(staging)
+        created = _write_version_files(target, files)
         if state:
             state["hashes"][version] = digest
             state["pending"] = version
@@ -269,91 +365,115 @@ def install(data: bytes, digest: str, revision: str | None = None) -> dict:
             provider, reason = build_provider(doc)
         except Exception as exc:
             raise ValueError("插件加载失败，请检查开发文档中的 Provider 契约") from exc
-        try:
-            write_state(name, {"schema": 1, "active": version, "hashes": {version: digest}, "enabled": True})
-        except OSError:
-            if provider is not None:
-                provider.close()
-            if created:
-                shutil.rmtree(target)
-            raise
-        _started.add(str(directory(name).resolve()))
-        loader.publish_external(doc, provider, reason)
+        _publish_install(name, doc, version, digest, created, target, provider, reason)
         return {"name": name, "message": "安装完成，请配置并选择启用能力"}
 
 
 def referenced_by(name: str) -> list[str]:
     from app.data_providers.capabilities import CAPABILITY_REGISTRY
     from app.services import preferences
+
     prefs = preferences.load()
-    return [cap["label"] for cap in CAPABILITY_REGISTRY if cap["field"] and str(prefs.get(cap["field"], "")).lower() == name]
+    return [
+        cap["label"]
+        for cap in CAPABILITY_REGISTRY
+        if cap["field"] and str(prefs.get(cap["field"], "")).lower() == name
+    ]
 
 
-def manage(name: str, action: str, *, reset_routes: bool = False) -> dict:
+def _prepare_manage(name, state, action, reset_routes):
+    """校验操作前置条件并计算需要改动的能力路由。"""
     from app.data_providers.capabilities import CAPABILITY_REGISTRY
     from app.services import preferences
 
+    original_state = state.copy()
+    original_routes = {}
+    route_updates = {}
+    if reset_routes and action != "remove":
+        raise ValueError("只有卸载操作可以同时恢复能力的默认来源")
+    if action in ("disable", "remove"):
+        refs = referenced_by(name)
+        if refs and not reset_routes:
+            raise ValueError(f"请先切换这些能力的数据源：{'、'.join(refs)}")
+    if reset_routes:
+        prefs = preferences.load()
+        for cap in CAPABILITY_REGISTRY:
+            field = cap["field"]
+            if field and str(prefs.get(field, "")).lower() == name:
+                original_routes[field] = prefs[field]
+                route_updates[field] = cap["default"]
+    return original_state, original_routes, route_updates
+
+
+def _apply_manage_state(state, action) -> None:
+    """将 enable/disable/rollback/remove 等操作应用到安装状态。"""
+    if action == "rollback":
+        if not state.get("previous"):
+            raise ValueError("没有可回退版本")
+        state["pending"] = state["previous"]
+    elif action == "cancel-update":
+        state.pop("pending", None)
+    elif action == "remove":
+        state["remove"] = True
+        state["enabled"] = False
+    elif action in ("enable", "disable"):
+        if state.get("remove"):
+            raise ValueError("插件正在等待卸载，请先重启")
+        state["enabled"] = action == "enable"
+    else:
+        raise ValueError("不支持的插件操作")
+
+
+def _apply_manage_changes(
+    name, action, state, original_state, original_routes, route_updates
+) -> None:
+    """持久化状态并刷新插件，失败时回滚状态与路由。"""
+    from app.services import preferences
+
     from . import loader
+
+    write_state(name, state)
+    try:
+        if route_updates:
+            preferences.save(route_updates)
+    except Exception:
+        # Do not stop the live provider if the routing change cannot persist.
+        write_state(name, original_state)
+        raise
+    if action in ("enable", "disable", "remove"):
+        try:
+            loader.refresh_plugin(name)
+        except Exception:
+            write_state(name, original_state)
+            if original_routes:
+                preferences.save(original_routes)
+            loader.refresh_plugin(name)
+            raise
+    else:
+        loader.refresh_external_metadata(name)
+
+
+def manage(name: str, action: str, *, reset_routes: bool = False) -> dict:
+    from app.services import preferences
+
     with mutation(), preferences.mutation():
         state = read_state(name)
         if not state:
             raise ValueError("外部插件不存在")
-        original_state = state.copy()
-        original_routes = {}
-        route_updates = {}
-        if reset_routes and action != "remove":
-            raise ValueError("只有卸载操作可以同时恢复能力的默认来源")
-        if action in ("disable", "remove"):
-            refs = referenced_by(name)
-            if refs and not reset_routes:
-                raise ValueError(f"请先切换这些能力的数据源：{'、'.join(refs)}")
-        if reset_routes:
-            prefs = preferences.load()
-            for cap in CAPABILITY_REGISTRY:
-                field = cap["field"]
-                if field and str(prefs.get(field, "")).lower() == name:
-                    original_routes[field] = prefs[field]
-                    route_updates[field] = cap["default"]
-        if action == "rollback":
-            if not state.get("previous"):
-                raise ValueError("没有可回退版本")
-            state["pending"] = state["previous"]
-        elif action == "cancel-update":
-            state.pop("pending", None)
-        elif action == "remove":
-            state["remove"] = True
-            state["enabled"] = False
-        elif action in ("enable", "disable"):
-            if state.get("remove"):
-                raise ValueError("插件正在等待卸载，请先重启")
-            state["enabled"] = action == "enable"
-        else:
-            raise ValueError("不支持的插件操作")
-        write_state(name, state)
-        try:
-            if route_updates:
-                preferences.save(route_updates)
-        except Exception:
-            # Do not stop the live provider if the routing change cannot persist.
-            write_state(name, original_state)
-            raise
-        if action in ("enable", "disable", "remove"):
-            try:
-                loader.refresh_plugin(name)
-            except Exception:
-                write_state(name, original_state)
-                if original_routes:
-                    preferences.save(original_routes)
-                loader.refresh_plugin(name)
-                raise
-        else:
-            loader.refresh_external_metadata(name)
+        original_state, original_routes, route_updates = _prepare_manage(
+            name, state, action, reset_routes
+        )
+        _apply_manage_state(state, action)
+        _apply_manage_changes(name, action, state, original_state, original_routes, route_updates)
         if action == "remove":
             message = "插件已停用，重启后删除插件文件；已保存的 Key 保留"
             if route_updates:
                 message = "引用此插件的能力已恢复默认来源。" + message
             return {"name": name, "message": message}
-        return {"name": name, "message": "操作完成" + ("，重启后生效" if action == "rollback" else "")}
+        return {
+            "name": name,
+            "message": "操作完成" + ("，重启后生效" if action == "rollback" else ""),
+        }
 
 
 def discover():
@@ -361,6 +481,7 @@ def discover():
     if not root().exists():
         return
     from . import loader
+
     for path in sorted(root().iterdir()):
         if not path.is_dir() or not NAME.fullmatch(path.name) or path.is_symlink():
             continue
@@ -381,7 +502,7 @@ def discover():
                         pending = state["pending"]
                         try:
                             candidate = manifest(name, pending)
-                            provider, _ = build_provider(candidate)
+                            provider, _ = build_provider(cast(dict, candidate))
                             if provider:
                                 provider.close()
                             state["previous"], state["active"] = state["active"], pending
@@ -392,8 +513,13 @@ def discover():
                         write_state(name, state)
                 doc = manifest(name)
                 # Never let external packages shadow built-in or user YAML providers.
-                if (loader.plugins_dir() / name).exists() or name == "tickflow" or any(
-                    (loader.data_sources_dir() / f"{name}{suffix}").exists() for suffix in (".yaml", ".yml")
+                if (
+                    (loader.plugins_dir() / name).exists()
+                    or name == "tickflow"
+                    or any(
+                        (loader.data_sources_dir() / f"{name}{suffix}").exists()
+                        for suffix in (".yaml", ".yml")
+                    )
                 ):
                     raise ValueError("插件名称冲突")
                 loader.refresh_plugin(name, manifest_doc=doc)

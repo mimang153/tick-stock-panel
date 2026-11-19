@@ -1,9 +1,14 @@
-"""Share overlapping minute gap pulls, retaining the existing provider/write contract."""
+"""Share overlapping minute gap pulls, retaining the existing provider/write contract.
+
+Cross-window requests for the same symbol/day share one in-flight sync so two
+UI panels never fetch or write the same minute partition concurrently.
+"""
+
 from __future__ import annotations
 
 import logging
 from datetime import datetime
-from pathlib import Path
+from typing import Literal, cast
 
 import polars as pl
 
@@ -11,9 +16,28 @@ from app.services import kline_sync, minute_adjust
 from app.services.shared_work import SharedWork, WorkBusyError
 
 logger = logging.getLogger(__name__)
-_work = SharedWork("minute.pull", max_pending=8192, max_entries=8192,
-                   max_bytes=32 * 1024 * 1024, size_of=lambda frame: frame.estimated_size())
+_work = SharedWork(
+    "minute.pull",
+    max_pending=8192,
+    max_entries=8192,
+    max_bytes=32 * 1024 * 1024,
+    size_of=lambda frame: frame.estimated_size(),
+)
 _sync_work = SharedWork("minute.sync", max_pending=32, max_entries=128)
+
+
+def _minute_table(asset_type: str) -> str:
+    return "kline_etf_minute" if asset_type == "etf" else "kline_minute"
+
+
+def _store_for(repo):
+    """B5：生产分钟路径只认 CK 门面，存储未初始化即失败，不回退本地 Parquet。"""
+    store = getattr(repo, "storage", None)
+    if store is not None:
+        return store
+    from app.storage.runtime import require_storage
+
+    return require_storage().store
 
 
 def sync_history(repo, capset, symbol: str, asset_type: str, days: int, *, on_updated=None) -> int:
@@ -22,14 +46,30 @@ def sync_history(repo, capset, symbol: str, asset_type: str, days: int, *, on_up
     from app.services.heavy_job_limiter import shared_heavy_job_limiter
 
     source = kline_sync.minute_source_stamp()
-    key = (str(repo.store.data_dir.resolve()), capset, asset_type, symbol, days, cn_today(),
-           source, minute_adjust.minute_basis_is_raw(repo.store.data_dir))
+    store = _store_for(repo)
+    version = store.latest_minute_datetime(_minute_table(asset_type))
+    key = (
+        str(repo.store.data_dir.resolve()),
+        capset,
+        asset_type,
+        symbol,
+        days,
+        cn_today(),
+        source,
+        version,
+        minute_adjust.minute_basis_is_raw(repo.store.data_dir),
+    )
 
     def run():
         with shared_heavy_job_limiter.slot("normal", timeout=30):
             try:
                 return kline_sync.sync_and_persist_minute(
-                    [symbol], repo, capset, days=days, force_full_days=True, asset_type=asset_type,
+                    [symbol],
+                    repo,
+                    capset,
+                    days=days,
+                    force_full_days=True,
+                    asset_type=cast(Literal["stock", "index", "etf"], asset_type),
                     expected_source=source,
                 )
             finally:
@@ -44,40 +84,66 @@ def cache_info() -> dict:
     return _work.cache_info()
 
 
-def pull(repo, symbols: list[str], *, asset_type: str, start: datetime, end: datetime,
-         batch_size: int, rpm: int, raw_basis: bool, on_updated=None) -> pl.DataFrame:
-    root = Path(repo.store.data_dir)
+def pull(
+    repo,
+    symbols: list[str],
+    *,
+    asset_type: str,
+    start: datetime,
+    end: datetime,
+    batch_size: int,
+    rpm: int,
+    raw_basis: bool,
+    on_updated=None,
+) -> pl.DataFrame:
+    store = _store_for(repo)
+    table = _minute_table(asset_type)
     source = kline_sync.minute_source_stamp()
-    folder = root / ("kline_etf_minute" if asset_type == "etf" else "kline_minute")
-    partition = folder / f"date={start.date()}"
-    local_version = tuple((p.name, p.stat().st_mtime_ns, p.stat().st_size)
-                          for p in sorted(partition.glob("*.parquet")))
-    prefix = (str(root.resolve()), source, asset_type, raw_basis, start, end, local_version)
+    version = store.latest_minute_datetime(table)
+    prefix = (
+        str(repo.store.data_dir.resolve()),
+        source,
+        asset_type,
+        raw_basis,
+        start,
+        end,
+        version,
+    )
     keys = [(*prefix, symbol) for symbol in symbols]
 
     def fetch(owned):
         wanted = [key[-1] for key in owned]
         frame = kline_sync.sync_minute_batch(
-            wanted, start_time=start, end_time=end, batch_size=batch_size, rpm=rpm,
-            asset_type=asset_type, raw_basis=raw_basis,
+            wanted,
+            start_time=start,
+            end_time=end,
+            batch_size=batch_size,
+            rpm=rpm,
+            asset_type=cast(Literal["stock", "index", "etf"], asset_type),
+            raw_basis=raw_basis,
         )
         persisted = False
-        with repo._write_lock:
-            if (source != kline_sync.minute_source_stamp()
-                    or minute_adjust.minute_basis_is_raw(root) != raw_basis):
-                raise WorkBusyError("分钟数据源或价格基准已变化，请重新加载")
-            if not frame.is_empty():
-                try:
-                    kline_sync._write_minute_partition(frame, folder)
-                    persisted = True
-                except Exception:  # noqa: BLE001 -- callers can still use the valid live rows
-                    logger.warning("minute-batch 补拉落盘失败 (降级为仅返回)", exc_info=True)
+        if (
+            source != kline_sync.minute_source_stamp()
+            or minute_adjust.minute_basis_is_raw(repo.store.data_dir) != raw_basis
+        ):
+            raise WorkBusyError("分钟数据源或价格基准已变化，请重新加载")
+        if not frame.is_empty():
+            try:
+                store.write_minute(table, frame)
+                persisted = True
+            except Exception:  # noqa: BLE001 - 落库失败降级为仅返回帧, 不让单批失败中断合并
+                logger.warning("minute-batch CK 落库失败 (降级为仅返回)", exc_info=True)
         if persisted and on_updated:
             try:
                 on_updated("minute")
-            except Exception:  # noqa: BLE001 -- notification failure must not discard persisted rows
+            except Exception:  # noqa: BLE001 - 通知失败不影响已落库数据, 保持降级
                 logger.warning("minute-batch 数据更新通知失败", exc_info=True)
-        parts = {part["symbol"][0]: part for part in frame.partition_by("symbol")} if not frame.is_empty() else {}
+        parts = (
+            {part["symbol"][0]: part for part in frame.partition_by("symbol")}
+            if not frame.is_empty()
+            else {}
+        )
         return {key: parts.get(key[-1], pl.DataFrame()) for key in owned}
 
     values = _work.run_many(keys, fetch, ttl_s=2)

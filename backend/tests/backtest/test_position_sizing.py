@@ -1,7 +1,9 @@
 """仓位策略契约与注册表 — 校验/冒烟/包装器往返/隔离加载。"""
+
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -19,6 +21,7 @@ def _result(weights, scale=1.0):
 
 
 # ── normalize_result ────────────────────────────────────────
+
 
 def test_normalize_accepts_and_normalizes() -> None:
     weights, scale = normalize_result(_result([2.0, 1.0, 1.0]), 3)
@@ -53,6 +56,7 @@ def test_normalize_rejects_non_result_type() -> None:
 
 
 # ── 冒烟 ──────────────────────────────────────────────────
+
 
 def test_smoke_ok_for_equal_policy() -> None:
     def compute(ctx):
@@ -94,14 +98,25 @@ def test_context_is_frozen_and_causal_shape() -> None:
 
 # ── 包装器往返与注册表 ─────────────────────────────────────
 
+
 def test_render_parse_roundtrip() -> None:
     meta = {
         "id": "up_rt_check",
         "label": "往返测试",
         "description": "desc",
-        "params": [{"id": "w", "label": "窗口", "type": "int", "default": 10, "min": 1, "max": 60, "step": 1}],
+        "params": [
+            {
+                "id": "w",
+                "label": "窗口",
+                "type": "int",
+                "default": 10,
+                "min": 1,
+                "max": 60,
+                "step": 1,
+            }
+        ],
     }
-    code = pp.TEMPLATE_VOL_TARGET["code"]
+    code = cast(str, pp.TEMPLATE_VOL_TARGET["code"])
     assert pp.render_policy_file(meta, code)
     meta2, code2 = pp.parse_policy_file(pp.render_policy_file(meta, code))
     assert meta2 == meta
@@ -129,8 +144,8 @@ def test_validate_rejects_missing_compute(tmp_path: Path) -> None:
 
 
 def test_save_list_get_delete_cycle(tmp_path: Path) -> None:
-    meta = dict(pp.TEMPLATE_VOL_TARGET["meta"], id="up_vol_test")
-    saved = pp.save_policy(tmp_path, meta, pp.TEMPLATE_VOL_TARGET["code"])
+    meta = dict(cast(Any, pp.TEMPLATE_VOL_TARGET["meta"]), id="up_vol_test")
+    saved = pp.save_policy(tmp_path, meta, cast(str, pp.TEMPLATE_VOL_TARGET["code"]))
     assert saved["ok"], saved["issues"]
     assert saved["id"] == "up_vol_test"
     views, errors = pp.list_policies(tmp_path)
@@ -163,7 +178,7 @@ def test_broken_file_isolated_not_fatal(tmp_path: Path) -> None:
     (d / "up_good.py").write_text(
         pp.render_policy_file(
             {"id": "up_good", "label": "好策略", "params": []},
-            pp.TEMPLATE_BLANK["code"],
+            cast(str, pp.TEMPLATE_BLANK["code"]),
         ),
         encoding="utf-8",
     )
@@ -178,7 +193,7 @@ def test_duplicate_id_rejected(tmp_path: Path) -> None:
     d = tmp_path / pp.POLICY_DIR
     d.mkdir(parents=True)
     code = pp.render_policy_file(
-        {"id": "up_dup", "label": "重复", "params": []}, pp.TEMPLATE_BLANK["code"]
+        {"id": "up_dup", "label": "重复", "params": []}, cast(str, pp.TEMPLATE_BLANK["code"])
     )
     (d / "a.py").write_text(code, encoding="utf-8")
     (d / "b.py").write_text(code, encoding="utf-8")

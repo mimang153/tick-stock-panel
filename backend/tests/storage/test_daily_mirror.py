@@ -1,8 +1,7 @@
-"""B2 第一步：日K/除权 过渡期双写 CK（设计文档 §8.4）。
+"""DES-002：显式注入 storage 时日K/enriched 写 CK 权威表。
 
-parquet 仍是页面读取源，CK 侧只做镜像写入：
-- 6 张日K表（stock/index/etf × daily/enriched）按 (symbol, date) 由 ReplacingMergeTree 收敛
-- 未注入 CK（进程级 runtime 也没初始化）时降级为只写 parquet，不打断既有链路
+- 日K表按 (symbol, date) 由 ReplacingMergeTree 收敛
+- 未注入 CK（进程级 runtime 也没初始化）时降级为只写 parquet，兼容离线工具
 """
 
 from __future__ import annotations
@@ -37,14 +36,12 @@ def _daily(symbol: str, close: float, day: date = DAY) -> pl.DataFrame:
     )
 
 
-def test_append_daily_writes_both_parquet_and_ck(repo, store):
+def test_append_daily_writes_ck_only(repo, store):
     repo.append_daily(_daily("600000.SH", 10.0))
 
-    # parquet 仍是唯一读取源（页面不受影响）
     part = repo.store.data_dir / "kline_daily" / f"date={DAY}" / "part.parquet"
-    assert part.exists()
+    assert not part.exists()
 
-    # CK 镜像写入生效
     got = store.read_daily("kline_daily", symbols=["600000.SH"])
     assert got.height == 1
     assert got["close"][0] == 10.0
@@ -60,7 +57,7 @@ def test_repeat_append_converges_to_latest_in_ck(repo, store):
     assert got["close"][0] == 11.0
 
 
-def test_append_enriched_mirrors_storage_columns_only(repo, store):
+def test_append_enriched_writes_ck_storage_columns_only(repo, store):
     df = _daily("600000.SH", 10.0).with_columns(
         pl.lit(9.5).alias("raw_close"),
         pl.lit(0.01).alias("turnover_rate"),
@@ -74,7 +71,7 @@ def test_append_enriched_mirrors_storage_columns_only(repo, store):
     assert "name" not in got.columns
     assert got["raw_close"][0] == 9.5
     part = repo.store.data_dir / "kline_daily_enriched" / f"date={DAY}" / "part.parquet"
-    assert "name" not in pl.read_parquet(part).columns
+    assert not part.exists()
 
 
 def test_flush_live_daily_asset_mirrors(repo, store):

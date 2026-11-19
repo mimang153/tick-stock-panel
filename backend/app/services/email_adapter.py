@@ -3,6 +3,7 @@
 Transport failures are isolated from alert persistence and SSE delivery. SMTP credentials
 are supplied by the caller from ``secrets_store`` and never logged here.
 """
+
 from __future__ import annotations
 
 import logging
@@ -72,7 +73,7 @@ def send_email(
 
     last_err = ""
     for attempt in range(1, max_attempts + 1):
-        smtp = None
+        smtp: smtplib.SMTP | None = None
         try:
             if security == "ssl":
                 smtp = smtplib.SMTP_SSL(host, port, timeout=10)
@@ -88,11 +89,11 @@ def send_email(
             # Delivery already succeeded; a failed QUIT must not retry and duplicate the email.
             try:
                 smtp.quit()
-            except Exception:
+            except Exception:  # noqa: BLE001 - 邮件已投递,QUIT 失败不得重试导致重复发信
                 with suppress(Exception):
                     smtp.close()
             return True
-        except Exception as exc:  # SMTP/network errors must not escape
+        except Exception as exc:  # noqa: BLE001 - SMTP/网络错误在此收敛,交由上层记录
             last_err = str(exc)
             if smtp is not None:
                 with suppress(Exception):

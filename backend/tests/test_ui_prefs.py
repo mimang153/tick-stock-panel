@@ -7,6 +7,7 @@ _find_free_port(3018) 取第一个空闲端口并以 http://127.0.0.1:{port} 加
 
 这里锁住后端契约: 白名单、标量类型护栏、null 删除、体积上限、GET 可见。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -37,12 +38,14 @@ def test_defaults_empty(prefs_file):
 
 
 def test_set_and_get_roundtrip(prefs_file):
-    saved = preferences.set_ui_prefs({
-        "alert_toast_max": 5,
-        "voice_broadcast_enabled": True,
-        "page_zoom": 1.15,
-        "stock_external_template": "https://x/{code}",
-    })
+    saved = preferences.set_ui_prefs(
+        {
+            "alert_toast_max": 5,
+            "voice_broadcast_enabled": True,
+            "page_zoom": 1.15,
+            "stock_external_template": "https://x/{code}",
+        }
+    )
     assert saved["alert_toast_max"] == 5
     assert saved["voice_broadcast_enabled"] is True
     assert saved["page_zoom"] == 1.15
@@ -103,11 +106,16 @@ def test_strategy_pool_survives_preferences_reload_and_explicit_empty(prefs_file
     from app.api.settings import UiPrefsIn, get_preferences, update_ui_prefs
 
     pool = '["custom_daily", "custom_minute"]'
-    assert update_ui_prefs(UiPrefsIn(strategy_pool=pool))["ui_prefs"]["strategy_pool"] == pool
+    assert (
+        update_ui_prefs(UiPrefsIn.model_validate({"strategy_pool": pool}))["ui_prefs"][
+            "strategy_pool"
+        ]
+        == pool
+    )
     preferences._invalidate_cache()
     assert get_preferences()["ui_prefs"]["strategy_pool"] == pool
 
-    update_ui_prefs(UiPrefsIn(strategy_pool="[]"))
+    update_ui_prefs(UiPrefsIn.model_validate({"strategy_pool": "[]"}))
     preferences._invalidate_cache()
     assert get_preferences()["ui_prefs"]["strategy_pool"] == "[]"
 
@@ -155,7 +163,7 @@ def test_concurrent_ui_updates_do_not_overwrite_the_strategy_pool(prefs_file, mo
 def test_theme_persists_across_preferences_reload(prefs_file, theme):
     from app.api.settings import UiPrefsIn, get_preferences, update_ui_prefs
 
-    assert update_ui_prefs(UiPrefsIn(theme=theme))["ui_prefs"]["theme"] == theme
+    assert update_ui_prefs(UiPrefsIn.model_validate({"theme": theme}))["ui_prefs"]["theme"] == theme
     preferences._invalidate_cache()
     assert get_preferences()["ui_prefs"]["theme"] == theme
     preferences.set_ui_prefs({"theme": None})

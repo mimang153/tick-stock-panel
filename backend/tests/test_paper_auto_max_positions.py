@@ -4,6 +4,8 @@
 - 已占槽 (当前持仓 + 待成交买单) 达上限后, 新标的买入信号被跳过
 - 已持仓标的加仓不受限; 卖出信号不受限
 - max_positions = 0 (默认) 不限制
+
+DES-005: 账户/规则/台账按 account_id 存 PG，测试用 conftest 唯一 id 隔离。
 """
 
 from __future__ import annotations
@@ -53,69 +55,77 @@ def _ev(symbol: str, price: float = 10.0) -> dict:
     return {"source": "strategy", "strategy_id": "strat_1", "symbol": symbol, "price": price}
 
 
-def test_max_positions_blocks_new_symbol(data_dir: Path):
+def test_max_positions_blocks_new_symbol(data_dir: Path, paper_account_id: str):
     """上限 1: 第一标的信号开仓 (pending 占槽) 后, 第二标的的买入信号被跳过。"""
-    paper.create_account(data_dir, 1_000_000)
-    paper_auto.create_auto_rule(data_dir, _rule(max_positions=1))
+    aid = paper_account_id
+    paper.create_account(data_dir, 1_000_000, account_id=aid)
+    paper_auto.create_auto_rule(data_dir, _rule(max_positions=1), account_id=aid)
 
-    created = paper_auto.on_rule_events(data_dir, [_ev(SYM), _ev(SYM2, 12.0)])
+    created = paper_auto.on_rule_events(data_dir, [_ev(SYM), _ev(SYM2, 12.0)], account_id=aid)
     assert len(created) == 1 and created[0]["symbol"] == SYM
 
     # 钩子撮合后: 只持有 SYM
-    paper.evaluate_intraday(data_dir, {SYM: 10.0, SYM2: 12.0})
-    positions = paper.load_positions(data_dir)
+    paper.evaluate_intraday(data_dir, {SYM: 10.0, SYM2: 12.0}, account_id=aid)
+    positions = paper.load_positions(data_dir, account_id=aid)
     assert positions[SYM]["qty"] > 0
     assert SYM2 not in positions or positions[SYM2]["qty"] == 0
 
 
-def test_max_positions_allows_rebuy_held_symbol(data_dir: Path):
+def test_max_positions_allows_rebuy_held_symbol(data_dir: Path, paper_account_id: str):
     """上限 1: 已持仓标的再加仓不受限 (回测语义: 加仓不占新槽)。"""
-    paper.create_account(data_dir, 1_000_000)
-    paper_auto.create_auto_rule(data_dir, _rule(max_positions=1))
+    aid = paper_account_id
+    paper.create_account(data_dir, 1_000_000, account_id=aid)
+    paper_auto.create_auto_rule(data_dir, _rule(max_positions=1), account_id=aid)
 
-    assert len(paper_auto.on_rule_events(data_dir, [_ev(SYM)])) == 1
-    paper.evaluate_intraday(data_dir, {SYM: 10.0})  # 成交建仓 (1万/10元 = 1000股)
-    assert paper.load_positions(data_dir)[SYM]["qty"] == 1000
-    assert len(paper_auto.on_rule_events(data_dir, [_ev(SYM)])) == 1  # 加仓通过
-    paper.evaluate_intraday(data_dir, {SYM: 10.0})
-    assert paper.load_positions(data_dir)[SYM]["qty"] == 2000
+    assert len(paper_auto.on_rule_events(data_dir, [_ev(SYM)], account_id=aid)) == 1
+    paper.evaluate_intraday(data_dir, {SYM: 10.0}, account_id=aid)  # 成交建仓 (1万/10元 = 1000股)
+    assert paper.load_positions(data_dir, account_id=aid)[SYM]["qty"] == 1000
+    assert len(paper_auto.on_rule_events(data_dir, [_ev(SYM)], account_id=aid)) == 1  # 加仓通过
+    paper.evaluate_intraday(data_dir, {SYM: 10.0}, account_id=aid)
+    assert paper.load_positions(data_dir, account_id=aid)[SYM]["qty"] == 2000
 
 
-def test_max_positions_pending_buy_occupies_slot(data_dir: Path):
+def test_max_positions_pending_buy_occupies_slot(data_dir: Path, paper_account_id: str):
     """待成交买单占槽: next_open 单未成交时, 新标的信号同样被跳过。"""
-    paper.create_account(data_dir, 1_000_000)
-    paper_auto.create_auto_rule(data_dir, _rule(max_positions=1, order_type="next_open"))
+    aid = paper_account_id
+    paper.create_account(data_dir, 1_000_000, account_id=aid)
+    paper_auto.create_auto_rule(
+        data_dir, _rule(max_positions=1, order_type="next_open"), account_id=aid
+    )
 
-    created = paper_auto.on_rule_events(data_dir, [_ev(SYM), _ev(SYM2, 12.0)])
+    created = paper_auto.on_rule_events(data_dir, [_ev(SYM), _ev(SYM2, 12.0)], account_id=aid)
     # 同批: 第一单 pending 占槽 → 第二标的跳过
     assert len(created) == 1 and created[0]["order_type"] == "next_open"
-    assert created is not None
-    assert paper.get_order(data_dir, created[0]["id"])["status"] == "pending"  # type: ignore[index]
+    assert paper.get_order(data_dir, created[0]["id"], account_id=aid)["status"] == "pending"  # type: ignore[index]
 
 
-def test_max_positions_zero_means_unlimited(data_dir: Path):
+def test_max_positions_zero_means_unlimited(data_dir: Path, paper_account_id: str):
     """0 (默认) 不限制: 多标的照常开仓。"""
-    paper.create_account(data_dir, 1_000_000)
-    paper_auto.create_auto_rule(data_dir, _rule(max_positions=0))
+    aid = paper_account_id
+    paper.create_account(data_dir, 1_000_000, account_id=aid)
+    paper_auto.create_auto_rule(data_dir, _rule(max_positions=0), account_id=aid)
 
-    assert len(paper_auto.on_rule_events(data_dir, [_ev(SYM), _ev(SYM2, 12.0)])) == 2
+    assert (
+        len(paper_auto.on_rule_events(data_dir, [_ev(SYM), _ev(SYM2, 12.0)], account_id=aid)) == 2
+    )
 
 
-def test_max_positions_does_not_limit_sell(data_dir: Path, monkeypatch):
+def test_max_positions_does_not_limit_sell(data_dir: Path, monkeypatch, paper_account_id: str):
     """卖出方向不受 max_positions 约束 (T+1: 次一交易日才可卖)。"""
-    paper.create_account(data_dir, 1_000_000)
+    aid = paper_account_id
+    paper.create_account(data_dir, 1_000_000, account_id=aid)
     # 先建仓两标的各 1000 股 (即时单 + 钩子撮合; 卖出按金额 1万/价10 = 1000 股)
     for sym in (SYM, SYM2):
-        order, err = paper.create_order(data_dir, sym, "buy", qty=1000, ref_price=10.0)
+        _, err = paper.create_order(data_dir, sym, "buy", qty=1000, ref_price=10.0, account_id=aid)
         assert err is None
-    paper.evaluate_intraday(data_dir, {SYM: 10.0, SYM2: 10.0})
+    paper.evaluate_intraday(data_dir, {SYM: 10.0, SYM2: 10.0}, account_id=aid)
     # 推进到次一交易日, 绕开 T+1 可卖限制
     next_day = datetime.combine(DAY + timedelta(days=1), time(10, 0), tzinfo=CN_TZ)
     monkeypatch.setattr(paper, "cn_now", lambda: next_day)
     monkeypatch.setattr(paper, "cn_today", lambda: next_day.date())
-    paper_auto.create_auto_rule(data_dir, _rule(side="sell", max_positions=1))
+    paper_auto.create_auto_rule(data_dir, _rule(side="sell", max_positions=1), account_id=aid)
 
-    created = paper_auto.on_rule_events(data_dir, [_ev(SYM), _ev(SYM2, 10.0)])
+    created = paper_auto.on_rule_events(data_dir, [_ev(SYM), _ev(SYM2, 10.0)], account_id=aid)
     assert len(created) == 2 and all(o["side"] == "sell" for o in created)
 
 
@@ -124,7 +134,7 @@ def test_rule_validation_rejects_bad_max_positions(tmp_path: Path):
         paper_auto.create_auto_rule(tmp_path, _rule(max_positions=-1))
     with pytest.raises(ValueError, match="max_positions"):
         paper_auto.create_auto_rule(tmp_path, _rule(max_positions=1.5))
-    # 旧规则文件缺字段 → normalize 补 0 (不限), 不破坏存量
+    # 旧规则缺字段 → normalize 补 0 (不限), 不破坏存量
     rule = paper_auto.normalize_rule(_rule())
     assert rule["max_positions"] == 0
 
@@ -139,40 +149,45 @@ def _ev_typed(etype: str, symbol: str, price: float = 10.0) -> dict:
     }
 
 
-def test_auto_side_follows_signal_direction(data_dir: Path, monkeypatch):
+def test_auto_side_follows_signal_direction(data_dir: Path, monkeypatch, paper_account_id: str):
     """side=auto: 入场信号买入, 出场信号全平 — 一条规则表达完整策略周期。"""
-    paper.create_account(data_dir, 1_000_000)
-    paper_auto.create_auto_rule(data_dir, _rule(side="auto"))
+    aid = paper_account_id
+    paper.create_account(data_dir, 1_000_000, account_id=aid)
+    paper_auto.create_auto_rule(data_dir, _rule(side="auto"), account_id=aid)
 
     # 入场信号 → 买入
-    created = paper_auto.on_rule_events(data_dir, [_ev_typed("buy_signal", SYM)])
+    created = paper_auto.on_rule_events(data_dir, [_ev_typed("buy_signal", SYM)], account_id=aid)
     assert len(created) == 1 and created[0]["side"] == "buy"
-    paper.evaluate_intraday(data_dir, {SYM: 10.0})
-    assert paper.load_positions(data_dir)[SYM]["qty"] == 1000
+    paper.evaluate_intraday(data_dir, {SYM: 10.0}, account_id=aid)
+    assert paper.load_positions(data_dir, account_id=aid)[SYM]["qty"] == 1000
 
     # 次日出场信号 → 全平 (T+1)
     next_day = datetime.combine(DAY + timedelta(days=1), time(10, 0), tzinfo=CN_TZ)
     monkeypatch.setattr(paper, "cn_now", lambda: next_day)
     monkeypatch.setattr(paper, "cn_today", lambda: next_day.date())
-    created = paper_auto.on_rule_events(data_dir, [_ev_typed("sell_signal", SYM)])
+    created = paper_auto.on_rule_events(data_dir, [_ev_typed("sell_signal", SYM)], account_id=aid)
     assert len(created) == 1 and created[0]["side"] == "sell" and created[0]["qty"] == 1000
 
     # 未持仓时出场信号 → 跳过
-    paper.evaluate_intraday(data_dir, {SYM: 10.0})
-    assert paper_auto.on_rule_events(data_dir, [_ev_typed("pool_exit", SYM)]) == []
+    paper.evaluate_intraday(data_dir, {SYM: 10.0}, account_id=aid)
+    assert paper_auto.on_rule_events(data_dir, [_ev_typed("pool_exit", SYM)], account_id=aid) == []
 
 
-def test_auto_side_pool_entry_exit(data_dir: Path, monkeypatch):
+def test_auto_side_pool_entry_exit(data_dir: Path, monkeypatch, paper_account_id: str):
     """auto 同样认进池/移出池事件 (结果池口径的策略)。"""
-    paper.create_account(data_dir, 1_000_000)
-    paper_auto.create_auto_rule(data_dir, _rule(side="auto"))
+    aid = paper_account_id
+    paper.create_account(data_dir, 1_000_000, account_id=aid)
+    paper_auto.create_auto_rule(data_dir, _rule(side="auto"), account_id=aid)
 
-    assert len(paper_auto.on_rule_events(data_dir, [_ev_typed("pool_entry", SYM)])) == 1
-    paper.evaluate_intraday(data_dir, {SYM: 10.0})
+    assert (
+        len(paper_auto.on_rule_events(data_dir, [_ev_typed("pool_entry", SYM)], account_id=aid))
+        == 1
+    )
+    paper.evaluate_intraday(data_dir, {SYM: 10.0}, account_id=aid)
     next_day = datetime.combine(DAY + timedelta(days=1), time(10, 0), tzinfo=CN_TZ)
     monkeypatch.setattr(paper, "cn_now", lambda: next_day)
     monkeypatch.setattr(paper, "cn_today", lambda: next_day.date())
-    created = paper_auto.on_rule_events(data_dir, [_ev_typed("pool_exit", SYM)])
+    created = paper_auto.on_rule_events(data_dir, [_ev_typed("pool_exit", SYM)], account_id=aid)
     assert len(created) == 1 and created[0]["qty"] == 1000
 
 

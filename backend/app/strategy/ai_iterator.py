@@ -5,6 +5,7 @@
 不自动上线。复用 ai_generator.AIStrategyGenerator 做生成与校验, 复用
 services.tool_catalog 做工具目录 + 回测桥。
 """
+
 from __future__ import annotations
 
 import uuid
@@ -14,7 +15,7 @@ from typing import Any
 
 from app.services import tool_catalog
 from app.services.ai_provider import generate_ai_text_with_tools
-from app.strategy.ai_generator import AIStrategyGenerator, _SYSTEM_PREFIX, find_meta_assignment
+from app.strategy.ai_generator import _SYSTEM_PREFIX, AIStrategyGenerator, find_meta_assignment
 
 # 每轮 (生成/诊断/修改一次) 内部的工具调用预算: 至少 2 次 LLM 调用
 # (1 次发起 run_backtest, 1 次读结果产出改进版), 留少量检索/换参余量。
@@ -62,77 +63,51 @@ class AIStrategyIterator:
             "final_meta": dict,
         }
         """
-        generator = AIStrategyGenerator(execution_backend=execution_backend, data_dir=Path(data_dir))
+        generator = AIStrategyGenerator(
+            execution_backend=execution_backend, data_dir=Path(data_dir)
+        )
+        draft_id, current_code, current_meta = await self._generate_initial_draft(
+            generator, prompt, engine, data_dir
+        )
         tools = tool_catalog.build_tool_schemas()
-
-        # 1. 生成 v1 (复用现有单次生成 + 结构修复)
-        result = await generator.generate(prompt)
-        if generator.needs_structural_repair(result):
-            result = await generator.repair_code(result["code"], result["error"])
-        if not result.get("valid"):
-            raise ValueError(f"初始策略生成失败: {result.get('error')}")
-
-        draft_id = self._alloc_draft_id(engine)
-        code, meta = result["code"], result["meta"]
-        self._save_draft(engine, data_dir, draft_id, code, meta)
-        current_code, current_meta = code, {**meta, "id": draft_id}
 
         rounds: list[dict[str, Any]] = []
         final_backtested = False  # final 版(当前 current_code)是否已有回测证据
         for round_no in range(1, self._max_rounds + 1):
-            backtests: list[dict] = []
-            full = await generate_ai_text_with_tools(
-                self._iteration_messages(generator, current_code, prompt, draft_id),
-                tools,
-                execute_tool=self._make_execute_tool(engine, data_dir, draft_id, backtests, repo=repo),
-                max_rounds=_CYCLE_TOOL_BUDGET,
-                temperature=0.3,
-                max_tokens=None,
+            full, payload = await self._run_iteration_cycle(
+                generator, current_code, prompt, draft_id, tools, engine, data_dir, repo
             )
-            # stats 是本轮「改动前」的 current_code 回测基准。
-            # 只接收执行器实际返回的当前草稿结果，模型漏调或回测了其他策略时补测。
-            payload = backtests[-1] if backtests else await self._run_backtest(
-                data_dir, draft_id, engine=engine, repo=repo,
+            (
+                round_record,
+                should_break,
+                final_backtested,
+                current_code,
+                current_meta,
+            ) = self._resolve_iteration_round(
+                generator,
+                round_no,
+                full,
+                payload,
+                current_code,
+                current_meta,
+                engine,
+                data_dir,
+                draft_id,
             )
-            evidence = _backtest_evidence(payload)
-            final_text = _last_assistant_content(full)
-            improved = generator.validate_code(final_text)
-            if not improved.get("valid"):
-                rounds.append({
-                    "round": round_no,
-                    **evidence,
-                    "change_summary": f"改进版校验失败: {improved.get('error')}",
-                })
-                final_backtested = True  # final 仍是 current_code, 已被本轮回测
+            rounds.append(round_record)
+            if should_break:
                 break
-
-            new_code, new_meta = improved["code"], improved["meta"]
-            if new_code.strip() == current_code.strip():
-                rounds.append({
-                    "round": round_no,
-                    **evidence,
-                    "change_summary": "代码未变化，迭代停止" if evidence["backtest_error"] else "无改动, 视为收敛",
-                })
-                final_backtested = True  # 当前代码已有本轮回测结果，失败原因随证据返回。
-                break
-
-            self._save_draft(engine, data_dir, draft_id, new_code, new_meta)
-            current_code, current_meta = new_code, {**new_meta, "id": draft_id}
-            rounds.append({
-                "round": round_no,
-                **evidence,
-                "change_summary": _extract_summary(final_text),
-            })
-            final_backtested = False  # 本轮改进了 current_code, 新的 final 尚未回测
 
         # 循环耗尽且末轮是改进版时, final 版从未被回测, 补一次作为末行证据
         if not final_backtested:
             final_payload = await self._run_backtest(data_dir, draft_id, engine=engine, repo=repo)
-            rounds.append({
-                "round": len(rounds) + 1,
-                **_backtest_evidence(final_payload),
-                "change_summary": "最终版回测",
-            })
+            rounds.append(
+                {
+                    "round": len(rounds) + 1,
+                    **_backtest_evidence(final_payload),
+                    "change_summary": "最终版回测",
+                }
+            )
 
         return {
             "draft_strategy_id": draft_id,
@@ -141,12 +116,115 @@ class AIStrategyIterator:
             "final_meta": current_meta,
         }
 
+    async def _generate_initial_draft(
+        self, generator: AIStrategyGenerator, prompt: str, engine, data_dir: str
+    ) -> tuple[str, str, dict[str, Any]]:
+        # 1. 生成 v1 (复用现有单次生成 + 结构修复)
+        result = await generator.generate(prompt)
+        if generator.needs_structural_repair(result):
+            result = await generator.repair_code(result["code"], result["error"])
+        if not result.get("valid"):
+            raise ValueError(f"初始策略生成失败: {result.get('error')}")
+        draft_id = self._alloc_draft_id(engine)
+        code, meta = result["code"], result["meta"]
+        self._save_draft(engine, data_dir, draft_id, code, meta)
+        return draft_id, code, {**meta, "id": draft_id}
+
+    async def _run_iteration_cycle(
+        self,
+        generator: AIStrategyGenerator,
+        current_code: str,
+        prompt: str,
+        draft_id: str,
+        tools,
+        engine,
+        data_dir: str,
+        repo,
+    ) -> tuple[Any, dict]:
+        backtests: list[dict] = []
+        full = await generate_ai_text_with_tools(
+            self._iteration_messages(generator, current_code, prompt, draft_id),
+            tools,
+            execute_tool=self._make_execute_tool(engine, data_dir, draft_id, backtests, repo=repo),
+            max_rounds=_CYCLE_TOOL_BUDGET,
+            temperature=0.3,
+            max_tokens=None,
+        )
+        # stats 是本轮「改动前」的 current_code 回测基准。
+        # 只接收执行器实际返回的当前草稿结果，模型漏调或回测了其他策略时补测。
+        payload = (
+            backtests[-1]
+            if backtests
+            else await self._run_backtest(data_dir, draft_id, engine=engine, repo=repo)
+        )
+        return full, payload
+
+    def _resolve_iteration_round(
+        self,
+        generator: AIStrategyGenerator,
+        round_no: int,
+        full,
+        payload: dict,
+        current_code: str,
+        current_meta: dict[str, Any],
+        engine,
+        data_dir: str,
+        draft_id: str,
+    ) -> tuple[dict[str, Any], bool, bool, str, dict[str, Any]]:
+        evidence = _backtest_evidence(payload)
+        final_text = _last_assistant_content(full)
+        improved = generator.validate_code(final_text)
+        if not improved.get("valid"):
+            return (
+                {
+                    "round": round_no,
+                    **evidence,
+                    "change_summary": f"改进版校验失败: {improved.get('error')}",
+                },
+                True,
+                True,  # final 仍是 current_code, 已被本轮回测
+                current_code,
+                current_meta,
+            )
+
+        new_code, new_meta = improved["code"], improved["meta"]
+        if new_code.strip() == current_code.strip():
+            return (
+                {
+                    "round": round_no,
+                    **evidence,
+                    "change_summary": "代码未变化，迭代停止"
+                    if evidence["backtest_error"]
+                    else "无改动, 视为收敛",
+                },
+                True,
+                True,  # 当前代码已有本轮回测结果，失败原因随证据返回。
+                current_code,
+                current_meta,
+            )
+
+        self._save_draft(engine, data_dir, draft_id, new_code, new_meta)
+        return (
+            {
+                "round": round_no,
+                **evidence,
+                "change_summary": _extract_summary(final_text),
+            },
+            False,
+            False,  # 本轮改进了 current_code, 新的 final 尚未回测
+            new_code,
+            {**new_meta, "id": draft_id},
+        )
+
     async def _run_backtest(self, data_dir: str, draft_id: str, *, engine=None, repo=None) -> dict:
         """补测当前草稿，并保留失败原因供迭代证据展示。"""
         try:
             return await tool_catalog.execute_tool(
-                tool_catalog.RUN_BACKTEST, {"strategy_id": draft_id},
-                engine=engine, repo=repo, data_dir=data_dir,
+                tool_catalog.RUN_BACKTEST,
+                {"strategy_id": draft_id},
+                engine=engine,
+                repo=repo,
+                data_dir=data_dir,
             )
         except Exception as exc:  # noqa: BLE001 — 草稿仍可返回给用户查看和修正
             return {"ok": False, "error": str(exc) or "回测执行失败"}
@@ -193,9 +271,13 @@ class AIStrategyIterator:
             {"role": "user", "content": user},
         ]
 
-    def _make_execute_tool(self, engine, data_dir: str, draft_id: str, backtests: list[dict], *, repo=None):
+    def _make_execute_tool(
+        self, engine, data_dir: str, draft_id: str, backtests: list[dict], *, repo=None
+    ):
         async def _execute(name: str, args: dict) -> dict:
-            payload = await tool_catalog.execute_tool(name, args, engine=engine, repo=repo, data_dir=data_dir)
+            payload = await tool_catalog.execute_tool(
+                name, args, engine=engine, repo=repo, data_dir=data_dir
+            )
             if name == tool_catalog.RUN_BACKTEST and args.get("strategy_id") == draft_id:
                 backtests.append(payload)
             return payload

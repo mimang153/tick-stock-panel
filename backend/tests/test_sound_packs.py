@@ -104,6 +104,7 @@ def test_delete_and_path_traversal_guard(client: TestClient, tmp_path: Path):
 
     # 守卫函数直测: 路径分隔符/点点/空白名一律 400
     from fastapi import HTTPException
+
     pack_dir = tmp_path / "sound_packs"
     for crafted in ("../x.wav", "a/b.wav", "..", " x.wav ", ""):
         with pytest.raises(HTTPException) as exc:

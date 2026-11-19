@@ -1,10 +1,11 @@
 """对比批量创建 + compare 对比增量字段 契约测试。
 
 镜像 test_paper_api.py: 只挂 paper 路由的裸 FastAPI app; data_dir 用 tmp_path。
+DES-005: 账户/规则/净值在 PG 中按 account_id 隔离。
 """
+
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,20 +25,31 @@ def _client(tmp_path: Path) -> TestClient:
     return TestClient(app)
 
 
-def test_arena_batch_create_accounts_and_rules(tmp_path: Path):
+def test_arena_batch_create_accounts_and_rules(tmp_path: Path, paper_pg, request):
     """批量创建: 同本金/同费率 N 个账户, 各绑一条启用的自动跟单规则。"""
     c = _client(tmp_path)
-    r = c.post("/api/paper/arena/batch_create", json={
-        "initial_cash": 200000,
-        "name_prefix": "对比-",
-        "sources": [
-            {"name": "均线多头", "match_kind": "strategy", "match_id": "sg_macd_golden"},
-            {"match_kind": "rule", "match_id": "mrule_high_volume", "side": "sell", "size_value": 20},
-        ],
-    })
+    r = c.post(
+        "/api/paper/arena/batch_create",
+        json={
+            "initial_cash": 200000,
+            "name_prefix": "对比-",
+            "sources": [
+                {"name": "均线多头", "match_kind": "strategy", "match_id": "sg_macd_golden"},
+                {
+                    "match_kind": "rule",
+                    "match_id": "mrule_high_volume",
+                    "side": "sell",
+                    "size_value": 20,
+                },
+            ],
+        },
+    )
     assert r.status_code == 200, r.text
     created = r.json()["created"]
     assert len(created) == 2
+    # 账户 id 由服务端生成并落在 PG，注册清理避免污染共享库
+    for row in created:
+        request.addfinalizer(lambda aid=row["account"]: paper_pg.delete_account(aid))
     assert created[0]["name"] == "对比-均线多头"
     # 未提供 name 的来源回退 match_id
     assert created[1]["name"] == "对比-mrule_high_volume"
@@ -55,7 +67,9 @@ def test_arena_batch_create_accounts_and_rules(tmp_path: Path):
     r0 = c.get(f"/api/paper/auto_rules?account={ids[0]}").json()["rules"]
     assert len(r0) == 1 and r0[0]["enabled"] is True
     assert r0[0]["match_kind"] == "strategy" and r0[0]["match_id"] == "sg_macd_golden"
-    assert r0[0]["side"] == "buy" and r0[0]["size_mode"] == "pct_equity" and r0[0]["size_value"] == 10
+    assert (
+        r0[0]["side"] == "buy" and r0[0]["size_mode"] == "pct_equity" and r0[0]["size_value"] == 10
+    )
     r1 = c.get(f"/api/paper/auto_rules?account={ids[1]}").json()["rules"]
     assert r1[0]["side"] == "sell" and r1[0]["size_value"] == 20
 
@@ -63,50 +77,71 @@ def test_arena_batch_create_accounts_and_rules(tmp_path: Path):
     rows = {r["account"]: r for r in c.get("/api/paper/compare").json()["accounts"]}
     assert set(ids) <= set(rows)
     row = rows[ids[0]]
-    assert row["holdings_count"] == 0 and row["last_nav_date"] is None and row["day_change_pct"] is None
+    assert (
+        row["holdings_count"] == 0
+        and row["last_nav_date"] is None
+        and row["day_change_pct"] is None
+    )
     assert row["auto_enabled"] == 1
-    assert row["auto_rules"][0]["match_id"] == "sg_macd_golden" and row["auto_rules"][0]["enabled"] is True
+    assert (
+        row["auto_rules"][0]["match_id"] == "sg_macd_golden"
+        and row["auto_rules"][0]["enabled"] is True
+    )
 
 
 def test_arena_batch_create_validates_before_writing(tmp_path: Path):
     """任一来源非法 → 400 且不产生任何账户/规则 (fail-closed, 无半创建)。"""
     c = _client(tmp_path)
+    before = {r["account"] for r in c.get("/api/paper/compare").json()["accounts"]}
     for bad_sources in (
-        [{"match_kind": "strategy", "match_id": ""}],                      # match_id 为空
-        [{"match_kind": "nope", "match_id": "x"}],                         # match_kind 非法
-        [{"match_kind": "strategy", "match_id": "x", "size_value": -1}],   # size_value 非正
+        [{"match_kind": "strategy", "match_id": ""}],  # match_id 为空
+        [{"match_kind": "nope", "match_id": "x"}],  # match_kind 非法
+        [{"match_kind": "strategy", "match_id": "x", "size_value": -1}],  # size_value 非正
     ):
-        r = c.post("/api/paper/arena/batch_create", json={"initial_cash": 100000, "sources": bad_sources})
+        r = c.post(
+            "/api/paper/arena/batch_create", json={"initial_cash": 100000, "sources": bad_sources}
+        )
         assert r.status_code == 400, bad_sources
-    # 非法请求不应留下任何账户 (compare 只看已初始化账户)
-    assert c.get("/api/paper/compare").json()["accounts"] == []
+    # 非法请求不应留下任何账户 (PG 共享库: 与请求前快照一致)
+    assert {r["account"] for r in c.get("/api/paper/compare").json()["accounts"]} == before
 
     # 合法来源 + 非法本金同样整体拒绝
-    r = c.post("/api/paper/arena/batch_create", json={
-        "initial_cash": 0,
-        "sources": [{"match_kind": "strategy", "match_id": "x"}],
-    })
+    r = c.post(
+        "/api/paper/arena/batch_create",
+        json={
+            "initial_cash": 0,
+            "sources": [{"match_kind": "strategy", "match_id": "x"}],
+        },
+    )
     assert r.status_code == 400
-    assert c.get("/api/paper/compare").json()["accounts"] == []
+    assert {r["account"] for r in c.get("/api/paper/compare").json()["accounts"]} == before
 
 
 def test_arena_batch_create_bounds(tmp_path: Path):
     """空来源 / 超过 20 个来源 → 400。"""
     c = _client(tmp_path)
-    assert c.post("/api/paper/arena/batch_create", json={"initial_cash": 100000, "sources": []}).status_code == 400
+    assert (
+        c.post(
+            "/api/paper/arena/batch_create", json={"initial_cash": 100000, "sources": []}
+        ).status_code
+        == 400
+    )
     many = [{"match_kind": "strategy", "match_id": f"s{i}"} for i in range(21)]
-    assert c.post("/api/paper/arena/batch_create", json={"initial_cash": 100000, "sources": many}).status_code == 400
+    assert (
+        c.post(
+            "/api/paper/arena/batch_create", json={"initial_cash": 100000, "sources": many}
+        ).status_code
+        == 400
+    )
 
 
-def test_compare_arena_fields_with_nav(tmp_path: Path):
+def test_compare_arena_fields_with_nav(tmp_path: Path, paper_account_id: str, paper_pg):
     """day_change_pct / last_nav_date 按定版净值序列末两点计算。"""
     c = _client(tmp_path)
-    c.post("/api/paper/account", json={"initial_cash": 100000, "name": "甲"})
-    nav_dir = tmp_path / "paper" / "accounts" / "default" / "nav"
-    nav_dir.mkdir(parents=True, exist_ok=True)
-    with (nav_dir / "daily.jsonl").open("w", encoding="utf-8") as f:
-        f.write(json.dumps({"date": "2026-09-30", "nav": 100000.0}) + "\n")
-        f.write(json.dumps({"date": "2026-10-04", "nav": 101500.0}) + "\n")
-    row = c.get("/api/paper/compare").json()["accounts"][0]
+    c.post("/api/paper/account", json={"initial_cash": 100000, "account_id": paper_account_id})
+    paper_pg.append_nav(paper_account_id, "2026-09-30", {"date": "2026-09-30", "nav": 100000.0})
+    paper_pg.append_nav(paper_account_id, "2026-10-04", {"date": "2026-10-04", "nav": 101500.0})
+    rows = {r["account"]: r for r in c.get("/api/paper/compare").json()["accounts"]}
+    row = rows[paper_account_id]
     assert row["last_nav_date"] == "2026-10-04"
     assert row["day_change_pct"] == 1.5  # (101500/100000 - 1) * 100

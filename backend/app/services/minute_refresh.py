@@ -324,8 +324,6 @@ class MinuteRefreshService:
         return df, requests, fetch_ms
 
     def _write_round_data(self, df, mode: str, mode_label: str, fetch_ms: float, requests: int):
-        from app.services import kline_sync
-
         if df.is_empty():
             self._empty_rounds += 1
             self._state.last_error = f"intraday {mode} returned no data"
@@ -346,11 +344,13 @@ class MinuteRefreshService:
             self._state.basis_warned = True
         self._state.minute_basis_raw = basis_raw
         write_started = time.perf_counter()
-        with self._repo._write_lock:
-            written = kline_sync._write_minute_partition(
-                df, self._repo.store.data_dir / "kline_minute"
-            )
-        return written, (time.perf_counter() - write_started) * 1000
+        store = self._repo.storage
+        if store is None:
+            from app.storage.runtime import require_storage
+
+            store = require_storage().store
+        store.write_minute("kline_minute", df)
+        return df.height, (time.perf_counter() - write_started) * 1000
 
     def _run_round(self) -> None:
         t0 = time.perf_counter()

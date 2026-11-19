@@ -42,6 +42,8 @@
 ./dev.container.sh down          # 停止并移除容器（缓存与数据保留）
 ./dev.container.sh bash          # 进入 dev 容器
 ./dev.container.sh ck            # 进入 ClickHouse client（复用容器内账号，默认库连接）
+./dev.container.sh redis         # 检查宿主机 Redis 容器（等价于 ./redis-cache.sh check）
+./dev.container.sh redis up      # 幂等创建/启动宿主机 Redis 容器
 
 # 容器内跑测试 / 检查（与 CONTRIBUTING.md 的验证矩阵一致）
 docker exec -it tsp-dev bash -c "cd backend && uv run pytest tests/path/to/test_x.py -q"
@@ -112,6 +114,11 @@ pnpm 通过硬链接从 store 生成 `node_modules`，跨 bind mount 的硬链�
 | `CLICKHOUSE_URL` | `http://localhost:8123` | 源码直跑连的地址；dev 容器内由 compose 改写为 `http://clickhouse:8123` |
 | `CLICKHOUSE_DATABASE` | `tsp` | 库名；测试由 `tests/conftest.py` 强制为 `tsp_test` |
 | `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` | `tsp` / `tsp123456` | 同时用于创建 CK 用户与应用连接，两处必须一致 |
+| `CACHE_BACKEND` / `EVENT_BUS_BACKEND` / `COORDINATION_BACKEND` / `MINING_STORE_BACKEND` | `redis` | S4 起四后端默认 redis（跨 worker 共享），复用宿主机 Redis 容器；`BACKEND_EXTRAS` 需含 `cache-redis`。离线调试可改 `memory`；pytest 在 conftest 强制 memory |
+| `CACHE_REDIS_URL` / `CACHE_REDIS_URL_CONTAINER` | `redis://:123456@localhost:6379/0` / `redis://:123456@host.docker.internal:6379/0` | 源码直跑 / dev 容器内访问 Redis 的地址（含密码，与 `REDIS_PASSWORD` 一致） |
+| `REDIS_CONTAINER` / `REDIS_IMAGE` | 自动发现 / `redis:8-alpine` | `./redis-cache.sh up` 创建或复用宿主机容器 |
+| `REDIS_PORT` / `REDIS_DB` / `REDIS_PASSWORD` | `6379` / `0` / 空 | 容器端口、库和密码；密码同时写入两套 URL |
+| `REDIS_MAXMEMORY` / `REDIS_MAXMEMORY_POLICY` | `256mb` / `allkeys-lru` | 新建容器时写入 redis-server 参数 |
 
 其余配置（`TICKFLOW_API_KEY`、AI Key、`AUTH_PASSWORD` 等）与 [configuration.md](./configuration.md) 一致，`.env` 存在于仓库根目录即被 `dev.sh` 自动读取。
 

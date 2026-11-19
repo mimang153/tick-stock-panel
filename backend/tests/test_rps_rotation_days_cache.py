@@ -5,6 +5,7 @@ build_rps_rotation 只按 days 换算出的日历窗口读 enriched (days=7 只�
 再切到 30 日, 120s TTL 内会命中那份按 7 日窗口算出来的矩阵, 前端拿到的列数
 比请求的少。
 """
+
 from __future__ import annotations
 
 import types

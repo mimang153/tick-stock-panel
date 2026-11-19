@@ -10,6 +10,7 @@ lazy scan + filter + collect (页面首屏多路读), 叠加后台线程的批�
 用法:
     uv run python scripts/stress_polars_concurrency.py [--duration 180] [--threads 8]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,15 +31,44 @@ def _build_dataset(root: Path, symbols: int = 300, days: int = 120) -> None:
         eager=True,
     ).to_list()[:days]
     for d in dates:
-        df = pl.DataFrame({
-            "symbol": [f"{i:06d}.SZ" for i in range(symbols)],
-            "date": [d] * symbols,
-            "close": [10.0 + (i % 37) for i in range(symbols)],
-            "volume": [1_000.0 * (i + 1) for i in range(symbols)],
-        })
+        df = pl.DataFrame(
+            {
+                "symbol": [f"{i:06d}.SZ" for i in range(symbols)],
+                "date": [d] * symbols,
+                "close": [10.0 + (i % 37) for i in range(symbols)],
+                "volume": [1_000.0 * (i + 1) for i in range(symbols)],
+            }
+        )
         out = root / f"date={d.isoformat()}" / "part.parquet"
         out.parent.mkdir(parents=True, exist_ok=True)
         df.write_parquet(out)
+
+
+def _stress_worker(kind: str, glob: str, stop, lock, stats) -> None:
+    """单压测线程：按 kind 做裸 collect 并累计进度。"""
+    i = 0
+    while not stop.is_set():
+        i += 1
+        if kind == "interactive":
+            df = (
+                pl.scan_parquet(glob)
+                .filter(pl.col("symbol") == f"{(i * 7) % 300:06d}.SZ")
+                .sort("date")
+                .collect()
+            )
+        else:
+            df = (
+                pl.scan_parquet(glob)
+                .filter(pl.col("volume") > 100_000.0)
+                .group_by("symbol")
+                .agg(pl.col("close").mean().alias("avg_close"))
+                .sort("symbol")
+                .collect()
+            )
+        del df
+        with lock:
+            stats["collects"] += 1
+            stats["last_done"] = time.monotonic()
 
 
 def main() -> int:
@@ -58,37 +88,20 @@ def main() -> int:
         _build_dataset(root)
         glob = str(root / "**" / "*.parquet")
 
-        def worker(kind: str) -> None:
-            i = 0
-            while not stop.is_set():
-                i += 1
-                if kind == "interactive":
-                    df = (
-                        pl.scan_parquet(glob)
-                        .filter((pl.col("symbol") == f"{(i * 7) % 300:06d}.SZ"))
-                        .sort("date")
-                        .collect()
-                    )
-                else:
-                    df = (
-                        pl.scan_parquet(glob)
-                        .filter(pl.col("volume") > 100_000.0)
-                        .group_by("symbol")
-                        .agg(pl.col("close").mean().alias("avg_close"))
-                        .sort("symbol")
-                        .collect()
-                    )
-                del df
-                with lock:
-                    stats["collects"] += 1
-                    stats["last_done"] = time.monotonic()
-
-        print(f"stressing: {args.threads} threads for {args.duration:.0f}s "
-              f"(polars {pl.__version__})", flush=True)
+        print(
+            f"stressing: {args.threads} threads for {args.duration:.0f}s (polars {pl.__version__})",
+            flush=True,
+        )
         threads = [
             threading.Thread(
-                target=worker,
-                args=("interactive" if i % 2 == 0 else "background",),
+                target=_stress_worker,
+                args=(
+                    "interactive" if i % 2 == 0 else "background",
+                    glob,
+                    stop,
+                    lock,
+                    stats,
+                ),
                 daemon=True,
             )
             for i in range(args.threads)
@@ -115,8 +128,11 @@ def main() -> int:
         with lock:
             total = stats["collects"]
         if wedged or alive:
-            print(f"RESULT: DEADLOCK REPRODUCED — wedged={wedged}, "
-                  f"stuck_threads={len(alive)}/{args.threads}, total_collects={total}", flush=True)
+            print(
+                f"RESULT: DEADLOCK REPRODUCED — wedged={wedged}, "
+                f"stuck_threads={len(alive)}/{args.threads}, total_collects={total}",
+                flush=True,
+            )
             return 1
         print(f"RESULT: HEALTHY — {total} collects completed, all threads exited", flush=True)
         return 0

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """AI 策略迭代闭环的定向测试 (stub 生成器与工具循环, 不依赖真实 AI key 与数据)。
 
 覆盖三层:
@@ -6,6 +5,7 @@
   2. tool_catalog.build_tool_schemas + execute_tool 的 list_* 分发与未知工具
   3. AIStrategyIterator.iterate 完整状态流转 (收敛 / 校验失败 / 末轮改进补 final 回测)
 """
+
 from __future__ import annotations
 
 import ast
@@ -77,6 +77,7 @@ def _meta_id_of(code: str) -> str:
 
 # ── Part 1: _rewrite_meta_id ──────────────────────────────
 
+
 def test_rewrite_multiline_assign():
     out = _rewrite_meta_id(V1_CODE, "ai_abcd1234", META)
     ast.parse(out)  # 必须仍是合法 Python
@@ -109,6 +110,7 @@ def test_rewrite_insert_missing_id():
 
 
 # ── Part 2: tool_catalog ──────────────────────────────────
+
 
 def _stub_module(monkeypatch, fullname: str, **attrs) -> types.ModuleType:
     """往 sys.modules 塞 stub 模块 (monkeypatch 在测试后自动恢复)。"""
@@ -143,7 +145,10 @@ def test_build_tool_schemas():
     schemas = tool_catalog.build_tool_schemas()
     names = [s["function"]["name"] for s in schemas]
     assert names == [
-        "list_factors", "list_strategies", "list_data_capabilities", "run_backtest",
+        "list_factors",
+        "list_strategies",
+        "list_data_capabilities",
+        "run_backtest",
     ]
     for s in schemas:
         assert s["type"] == "function"
@@ -155,7 +160,8 @@ def test_execute_list_factors(monkeypatch):
         monkeypatch,
         "app.factors.registry",
         all_factors=lambda asset_type=None, stable_only=False: [
-            _FakeFactorSpec("f1"), _FakeFactorSpec("f2"),
+            _FakeFactorSpec("f1"),
+            _FakeFactorSpec("f2"),
         ],
     )
     result = asyncio.run(tool_catalog.execute_tool("list_factors", {}))
@@ -191,9 +197,19 @@ class _FakeEngine:
         self.reloads += 1
 
     def list_strategies(self, include_research=False):
-        return [{"id": "builtin_1", "name": "内置", "description": "", "tags": [],
-                 "asset_types": ["stock"], "timeframes": ["1d"], "execution_backend": "polars_expr",
-                 "source": "custom", "params": []}]
+        return [
+            {
+                "id": "builtin_1",
+                "name": "内置",
+                "description": "",
+                "tags": [],
+                "asset_types": ["stock"],
+                "timeframes": ["1d"],
+                "execution_backend": "polars_expr",
+                "source": "custom",
+                "params": [],
+            }
+        ]
 
 
 def test_execute_list_strategies():
@@ -210,6 +226,7 @@ def test_execute_unknown_tool():
 
 
 # ── Part 3: AIStrategyIterator.iterate 状态流转 ────────────
+
 
 class FakeGenerator:
     """替换 AIStrategyGenerator: generate 返回 v1, validate_code 对改进版返回 valid。"""
@@ -234,21 +251,38 @@ class FakeGenerator:
         raise AssertionError("不应进入 repair_code 分支")
 
 
+class _NoopGenerator(FakeGenerator):
+    """测试用: 不覆盖任何 generate/setup 行为的生成器桩。"""
+
+
 def _fake_tool_loop(call_log: list):
     """按调用次数返回对话: 第 1 轮 run_backtest→改进, 第 2 轮原样输出(收敛)。"""
+
     async def fake(messages, tools, *, execute_tool, max_rounds, temperature, max_tokens):
         call_log.append(len(call_log) + 1)
         draft_id = messages[-1]["content"].split("策略草稿已保存为 ", 1)[1].split("。", 1)[0]
         payload = await execute_tool("run_backtest", {"strategy_id": draft_id})
         if len(call_log) == 1:
             return [
-                {"role": "assistant", "content": None, "tool_calls": [{
-                    "id": "call_1", "type": "function",
-                    "function": {"name": "run_backtest",
-                                 "arguments": json.dumps({"strategy_id": "draft"})},
-                }]},
-                {"role": "tool", "tool_call_id": "call_1",
-                 "content": json.dumps(payload, ensure_ascii=False)},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "run_backtest",
+                                "arguments": json.dumps({"strategy_id": "draft"}),
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": json.dumps(payload, ensure_ascii=False),
+                },
                 {"role": "assistant", "content": "改进夏普\n```python\n" + V2_CODE + "\n```"},
             ]
         return [
@@ -261,9 +295,18 @@ def _fake_tool_loop(call_log: list):
 @pytest.fixture
 def successful_backtest(monkeypatch):
     async def execute(*args, **kwargs):
-        return {"ok": True, "result": {"stats": {
-            "sharpe": 1.5, "max_drawdown": -0.08, "win_rate": 0.55, "total_return": 0.12,
-        }}}
+        return {
+            "ok": True,
+            "result": {
+                "stats": {
+                    "sharpe": 1.5,
+                    "max_drawdown": -0.08,
+                    "win_rate": 0.55,
+                    "total_return": 0.12,
+                }
+            },
+        }
+
     monkeypatch.setattr(tool_catalog, "execute_tool", execute)
 
 
@@ -276,7 +319,9 @@ def test_iterate_full_flow(monkeypatch, successful_backtest):
     with tempfile.TemporaryDirectory() as tmp:
         result = asyncio.run(
             AIStrategyIterator(max_rounds=2).iterate(
-                "做一个均线多头策略", engine=engine, data_dir=tmp,
+                "做一个均线多头策略",
+                engine=engine,
+                data_dir=tmp,
             )
         )
         draft_id = result["draft_strategy_id"]
@@ -305,7 +350,9 @@ def test_iterate_full_flow(monkeypatch, successful_backtest):
     # 草稿文件 META.id 与文件名对齐, 且落盘的是改进后的 v2, research_only 已注入
     assert _meta_id_of(on_disk) == draft_id
     assert "vol_ma5" in on_disk
-    assert ast.literal_eval(find_meta_assignment(on_disk)[1]).get("research_only") is True
+    meta_assignment = find_meta_assignment(on_disk)
+    assert meta_assignment is not None
+    assert ast.literal_eval(meta_assignment[1]).get("research_only") is True
 
 
 def test_iterate_validation_failure_breaks(monkeypatch, successful_backtest):
@@ -314,7 +361,12 @@ def test_iterate_validation_failure_breaks(monkeypatch, successful_backtest):
 
     class BadGen(FakeGenerator):
         def validate_code(self, code):
-            return {"code": code, "meta": {}, "valid": False, "error": "找不到策略入口函数 filter()"}
+            return {
+                "code": code,
+                "meta": {},
+                "valid": False,
+                "error": "找不到策略入口函数 filter()",
+            }
 
     monkeypatch.setattr(it, "AIStrategyGenerator", BadGen)
     monkeypatch.setattr(it, "generate_ai_text_with_tools", _fake_tool_loop(call_log))
@@ -370,10 +422,14 @@ def test_failed_backtest_stays_visible_and_never_claims_convergence(monkeypatch,
 
     monkeypatch.setattr(tool_catalog, "execute_tool", execute)
     monkeypatch.setattr(it, "generate_ai_text_with_tools", loop)
-    result = asyncio.run(AIStrategyIterator().iterate(
-        "测试", engine=_FakeEngine(), data_dir=str(tmp_path),
-    ))
-    row, = result["rounds"]
+    result = asyncio.run(
+        AIStrategyIterator().iterate(
+            "测试",
+            engine=_FakeEngine(),
+            data_dir=str(tmp_path),
+        )
+    )
+    (row,) = result["rounds"]
     assert row["stats"] is None and row["backtest_error"] == error
     assert "收敛" not in row["change_summary"]
     assert len(calls) == 1
@@ -395,10 +451,14 @@ def test_omitted_or_unrelated_model_backtest_gets_real_draft_evidence(monkeypatc
 
     monkeypatch.setattr(tool_catalog, "execute_tool", execute)
     monkeypatch.setattr(it, "generate_ai_text_with_tools", loop)
-    result = asyncio.run(AIStrategyIterator().iterate(
-        "测试", engine=_FakeEngine(), data_dir=str(tmp_path),
-    ))
-    row, = result["rounds"]
+    result = asyncio.run(
+        AIStrategyIterator().iterate(
+            "测试",
+            engine=_FakeEngine(),
+            data_dir=str(tmp_path),
+        )
+    )
+    (row,) = result["rounds"]
     assert calls == ["other", result["draft_strategy_id"]]
     assert row["stats"] == {"n_trades": 0, "total_return": 0}
     assert row["backtest_error"] is None
@@ -415,19 +475,25 @@ def test_final_backtest_failure_is_in_final_row(monkeypatch, tmp_path):
 
     monkeypatch.setattr(tool_catalog, "execute_tool", execute)
     monkeypatch.setattr(it, "generate_ai_text_with_tools", loop)
-    result = asyncio.run(AIStrategyIterator(max_rounds=1).iterate(
-        "测试", engine=_FakeEngine(), data_dir=str(tmp_path),
-    ))
+    result = asyncio.run(
+        AIStrategyIterator(max_rounds=1).iterate(
+            "测试",
+            engine=_FakeEngine(),
+            data_dir=str(tmp_path),
+        )
+    )
     assert result["rounds"][-1]["backtest_error"] == "缺少日线数据"
     assert result["rounds"][-1]["change_summary"] == "最终版回测"
 
 
 def test_latest_backtest_error_replaces_earlier_success(monkeypatch, tmp_path):
     monkeypatch.setattr(it, "AIStrategyGenerator", FakeGenerator)
-    outcomes = iter([
-        {"ok": True, "result": {"stats": {"total_return": 0.5}}},
-        {"ok": False, "error": "第二次回测失败"},
-    ])
+    outcomes = iter(
+        [
+            {"ok": True, "result": {"stats": {"total_return": 0.5}}},
+            {"ok": False, "error": "第二次回测失败"},
+        ]
+    )
 
     async def execute(*args, **kwargs):
         return next(outcomes)
@@ -438,22 +504,31 @@ def test_latest_backtest_error_replaces_earlier_success(monkeypatch, tmp_path):
         await execute_tool("run_backtest", {"strategy_id": draft})
         # 对话中残留的成功结果也不能覆盖执行器最新的失败。
         return [
-            {"role": "tool", "content": json.dumps({"ok": True, "result": {"stats": {"total_return": 0.5}}})},
+            {
+                "role": "tool",
+                "content": json.dumps({"ok": True, "result": {"stats": {"total_return": 0.5}}}),
+            },
             {"role": "assistant", "content": V1_CODE},
         ]
 
     monkeypatch.setattr(tool_catalog, "execute_tool", execute)
     monkeypatch.setattr(it, "generate_ai_text_with_tools", loop)
-    result = asyncio.run(AIStrategyIterator().iterate(
-        "测试", engine=_FakeEngine(), data_dir=str(tmp_path),
-    ))
-    row, = result["rounds"]
+    result = asyncio.run(
+        AIStrategyIterator().iterate(
+            "测试",
+            engine=_FakeEngine(),
+            data_dir=str(tmp_path),
+        )
+    )
+    (row,) = result["rounds"]
     assert row["stats"] is None and row["backtest_error"] == "第二次回测失败"
     assert "收敛" not in row["change_summary"]
 
 
 @pytest.mark.parametrize("old_cli", [False, True])
-def test_codex_iterate_api_runs_shared_tools_and_saves_research_draft(monkeypatch, tmp_path, old_cli):
+def test_codex_iterate_api_runs_shared_tools_and_saves_research_draft(
+    monkeypatch, tmp_path, old_cli
+):
     from types import SimpleNamespace
 
     from fastapi import FastAPI
@@ -463,14 +538,15 @@ def test_codex_iterate_api_runs_shared_tools_and_saves_research_draft(monkeypatc
     from app.api.strategy import router
     from app.services import ai_provider
 
-    class Generator(FakeGenerator):
-        def __init__(self, **kwargs):
-            pass
-
-    monkeypatch.setattr(it, "AIStrategyGenerator", Generator)
-    monkeypatch.setattr(secrets_store, "load", lambda: {
-        "ai_provider": "codex_cli", "ai_codex_model": "test-model",
-    })
+    monkeypatch.setattr(it, "AIStrategyGenerator", _NoopGenerator)
+    monkeypatch.setattr(
+        secrets_store,
+        "load",
+        lambda: {
+            "ai_provider": "codex_cli",
+            "ai_codex_model": "test-model",
+        },
+    )
     monkeypatch.setattr(secrets_store, "get_ai_key", lambda: "")
     calls = []
 
@@ -479,12 +555,22 @@ def test_codex_iterate_api_runs_shared_tools_and_saves_research_draft(monkeypatc
             raise RuntimeError("unexpected argument '--output-schema'")
         payload = json.loads(messages[-1]["content"])
         if payload["messages"][-1]["role"] == "tool":
-            assert json.loads(payload["messages"][-1]["content"])["result"]["stats"]["sharpe"] == 1.5
+            assert (
+                json.loads(payload["messages"][-1]["content"])["result"]["stats"]["sharpe"] == 1.5
+            )
             return json.dumps({"content": V1_CODE, "tool_calls": []})
         draft = next((tmp_path / "strategies" / "ai").glob("ai_*.py"))
-        return json.dumps({"content": "先验证回测", "tool_calls": [{
-            "name": "run_backtest", "arguments": json.dumps({"strategy_id": draft.stem}),
-        }]})
+        return json.dumps(
+            {
+                "content": "先验证回测",
+                "tool_calls": [
+                    {
+                        "name": "run_backtest",
+                        "arguments": json.dumps({"strategy_id": draft.stem}),
+                    }
+                ],
+            }
+        )
 
     async def execute(name, args, **kwargs):
         calls.append((name, args))
@@ -497,9 +583,14 @@ def test_codex_iterate_api_runs_shared_tools_and_saves_research_draft(monkeypatc
     app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     app.state.strategy_engine = _FakeEngine()
     with TestClient(app) as client:
-        response = client.post("/api/strategies/ai/iterate", json={
-            "name": "Codex 迭代", "rules": "均线向上", "max_rounds": 1,
-        })
+        response = client.post(
+            "/api/strategies/ai/iterate",
+            json={
+                "name": "Codex 迭代",
+                "rules": "均线向上",
+                "max_rounds": 1,
+            },
+        )
     if old_cli:
         assert response.status_code == 400
         assert "升级本机 Codex CLI" in response.json()["detail"]
@@ -510,4 +601,6 @@ def test_codex_iterate_api_runs_shared_tools_and_saves_research_draft(monkeypatc
     assert calls == [("run_backtest", {"strategy_id": result["draft_strategy_id"]})]
     assert result["rounds"][0]["stats"]["sharpe"] == 1.5
     draft = tmp_path / "strategies" / "ai" / f"{result['draft_strategy_id']}.py"
-    assert ast.literal_eval(find_meta_assignment(draft.read_text())[1])["research_only"] is True
+    meta_assignment = find_meta_assignment(draft.read_text())
+    assert meta_assignment is not None
+    assert ast.literal_eval(meta_assignment[1])["research_only"] is True

@@ -1,4 +1,5 @@
 """同步/预热期不启动统计, 任务完成后在后台刷新并保留 null 契约。"""
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -125,7 +126,10 @@ async def test_status_endpoint_busy_skips_aggregates(monkeypatch, clean_caches, 
 
 @pytest.mark.parametrize("job_status", ["pending", "running"])
 async def test_status_marks_cold_stats_pending_until_refresh_finishes(
-    monkeypatch, clean_caches, tmp_path, job_status,
+    monkeypatch,
+    clean_caches,
+    tmp_path,
+    job_status,
 ):
     req = _req()
     req.app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))

@@ -4,6 +4,7 @@
 告警, 不影响启动 (对齐 CONTRIBUTING 第 4 节插件隔离要求)。生命周期状态:
 draft → active → watch → retired (P4 状态机, 存储字段就绪, 迁移逻辑见巡检设计)。
 """
+
 from __future__ import annotations
 
 import logging
@@ -49,6 +50,51 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _custom_spec(definition: dict, factor_id: str, label: str, status: str) -> FactorSpec:
+    formula = str(definition.get("formula", ""))
+    lang = str(definition.get("lang", "dsl")).strip().lower()
+    if lang not in ("dsl", "python"):
+        raise ValueError(f"未知 lang: {lang} (可选 dsl / python)")
+    if lang == "python":
+        compiled = compile_python_expression(formula)
+        if not compiled.ok:
+            first = compiled.errors[0]
+            raise ValueError(f"表达式无效 [{first.code}]: {first.message}")
+        declared_warmup = int(definition.get("warmup_bars", 0) or 0)
+        return FactorSpec(
+            id=factor_id,
+            label=label,
+            group=str(definition.get("group", "自定义")),
+            formula_text=formula,
+            kind="custom",
+            lang="python",
+            version=int(definition.get("version", 1)),
+            dependencies=compiled.dependencies,
+            input_windows=compiled.input_windows,
+            declared_warmup=max(1, declared_warmup),
+            warmup_bars=max(declared_warmup, compiled.warmup_bars),
+            direction=str(definition.get("direction", "none")),  # type: ignore[arg-type]
+            stability="stable" if status == "active" else "experimental",
+        )
+    dsl_compiled = compile_formula(formula)
+    if not dsl_compiled.ok:
+        first = dsl_compiled.errors[0]
+        raise ValueError(f"公式无效 [{first.code}]: {first.message}")
+    return FactorSpec(
+        id=factor_id,
+        label=label,
+        group=str(definition.get("group", "自定义")),
+        formula_text=formula,
+        kind="custom",
+        version=int(definition.get("version", 1)),
+        dependencies=frozenset(dsl_compiled.dependencies),
+        input_windows=dsl_compiled.input_windows,
+        warmup_bars=dsl_compiled.warmup_bars,
+        direction=str(definition.get("direction", "none")),  # type: ignore[arg-type]
+        stability="stable" if status == "active" else "experimental",
+    )
+
+
 def to_spec(definition: dict) -> FactorSpec:
     """定义 → FactorSpec; 校验失败抛 ValueError (调用方 fail-closed)。
 
@@ -68,50 +114,7 @@ def to_spec(definition: dict) -> FactorSpec:
         raise ValueError(f"status 必须是 {sorted(STATUSES)} 之一")
 
     if kind == "custom":
-        formula = str(definition.get("formula", ""))
-        lang = str(definition.get("lang", "dsl")).strip().lower()
-        if lang not in ("dsl", "python"):
-            raise ValueError(f"未知 lang: {lang} (可选 dsl / python)")
-        if lang == "python":
-            # T2 表达式级 Python (P3): 依赖由 ctx 构造期登记; 显式 warmup
-            # 只允许增大 (推断值是安全下限, 少算会失真)。
-            compiled = compile_python_expression(formula)
-            if not compiled.ok:
-                first = compiled.errors[0]
-                raise ValueError(f"表达式无效 [{first.code}]: {first.message}")
-            declared_warmup = int(definition.get("warmup_bars", 0) or 0)
-            return FactorSpec(
-                id=factor_id,
-                label=label,
-                group=str(definition.get("group", "自定义")),
-                formula_text=formula,
-                kind="custom",
-                lang="python",
-                version=int(definition.get("version", 1)),
-                dependencies=compiled.dependencies,
-                input_windows=compiled.input_windows,
-                declared_warmup=max(1, declared_warmup),
-                warmup_bars=max(declared_warmup, compiled.warmup_bars),
-                direction=str(definition.get("direction", "none")),  # type: ignore[arg-type]
-                stability="stable" if status == "active" else "experimental",
-            )
-        compiled = compile_formula(formula)
-        if not compiled.ok:
-            first = compiled.errors[0]
-            raise ValueError(f"公式无效 [{first.code}]: {first.message}")
-        return FactorSpec(
-            id=factor_id,
-            label=label,
-            group=str(definition.get("group", "自定义")),
-            formula_text=formula,
-            kind="custom",
-            version=int(definition.get("version", 1)),
-            dependencies=frozenset(compiled.dependencies),
-            input_windows=compiled.input_windows,
-            warmup_bars=compiled.warmup_bars,
-            direction=str(definition.get("direction", "none")),  # type: ignore[arg-type]
-            stability="stable" if status == "active" else "experimental",
-        )
+        return _custom_spec(definition, factor_id, label, status)
 
     if kind != "composite":
         raise ValueError(f"未知 kind: {kind}")
@@ -137,9 +140,7 @@ def to_spec(definition: dict) -> FactorSpec:
         components.append((member_id, weight))
     dependencies = factor_dependencies(members_raw)
     warmup = factor_warmup_bars(members_raw)
-    formula_text = " + ".join(
-        f"{weight:g}*zscore({member_id})" for member_id, weight in components
-    )
+    formula_text = " + ".join(f"{weight:g}*zscore({member_id})" for member_id, weight in components)
     return FactorSpec(
         id=factor_id,
         label=label,
@@ -188,11 +189,11 @@ def load_into_registry(data_dir: Path) -> list[str]:
             except ValueError as exc:
                 deferred.append(definition)
                 errors.append((definition, exc))
-            except Exception as exc:  # noqa: BLE001 — 单个损坏定义只隔离自身, 不阻断其余因子加载
-                logger.warning("custom factor 注册失败 %s: %s", definition.get("id"), exc)
+            except Exception as other_exc:  # noqa: BLE001 — 单个损坏定义只隔离自身, 不阻断其余因子加载
+                logger.warning("custom factor 注册失败 %s: %s", definition.get("id"), other_exc)
         if len(deferred) == len(pending):
-            for definition, exc in errors:
-                logger.warning("custom factor 注册失败 %s: %s", definition.get("id"), exc)
+            for definition, deferred_exc in errors:
+                logger.warning("custom factor 注册失败 %s: %s", definition.get("id"), deferred_exc)
             break
         pending = deferred
     return loaded
@@ -212,10 +213,12 @@ def _definition_dependencies(definition: dict) -> frozenset[str]:
     return to_spec(definition).dependencies
 
 
-register_kind(DefinitionKind(
-    kind="factor",
-    store=_STORE,
-    id_pattern=_FACTOR_ID_PATTERN,
-    validate=_validate_definition,
-    dependencies=_definition_dependencies,
-))
+register_kind(
+    DefinitionKind(
+        kind="factor",
+        store=_STORE,
+        id_pattern=_FACTOR_ID_PATTERN,
+        validate=_validate_definition,
+        dependencies=_definition_dependencies,
+    )
+)

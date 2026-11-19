@@ -1,4 +1,10 @@
-"""Normalize provider responses into internal Polars schemas."""
+"""Normalize provider responses into internal Polars schemas.
+
+to_polars handles dict/list/pandas/DataFrame vendor shapes; the normalize_*
+helpers rename vendor columns, enforce Beijing-wallclock dates and select only
+the canonical internal columns. Providers must not leak vendor field names.
+"""
+
 from __future__ import annotations
 
 import polars as pl
@@ -31,7 +37,9 @@ def to_polars(data) -> pl.DataFrame:
         return pl.DataFrame()
 
 
-def normalize_daily(data, default_symbol: str | None = None, source: str = "tickflow") -> pl.DataFrame:  # noqa: ARG001
+def normalize_daily(
+    data, default_symbol: str | None = None, source: str = "tickflow"
+) -> pl.DataFrame:
     df = to_polars(data)
     if df.is_empty():
         return df
@@ -59,7 +67,7 @@ def normalize_daily(data, default_symbol: str | None = None, source: str = "tick
     return df.select(keep) if keep else pl.DataFrame()
 
 
-def normalize_adj_factors(data, source: str = "tickflow") -> pl.DataFrame:  # noqa: ARG001
+def normalize_adj_factors(data, source: str = "tickflow") -> pl.DataFrame:
     df = to_polars(data)
     if df.is_empty():
         return df
@@ -70,7 +78,14 @@ def normalize_adj_factors(data, source: str = "tickflow") -> pl.DataFrame:  # no
     }
     df = df.rename({k: v for k, v in rename_map.items() if k in df.columns})
     if "trade_date" in df.columns:
-        if df.schema["trade_date"] in {pl.Int64, pl.Int32, pl.UInt64, pl.UInt32, pl.Float64, pl.Float32}:
+        if df.schema["trade_date"] in {
+            pl.Int64,
+            pl.Int32,
+            pl.UInt64,
+            pl.UInt32,
+            pl.Float64,
+            pl.Float32,
+        }:
             # 毫秒时间戳 → 北京墙钟日期 (直接 from_epoch().dt.date() 是 UTC 日期,
             # 除权事件时间戳为北京零点 = UTC 前一日 16:00, 会整体早一天)。
             df = df.with_columns(
@@ -89,7 +104,9 @@ def normalize_adj_factors(data, source: str = "tickflow") -> pl.DataFrame:  # no
     return df.select(keep).drop_nulls() if len(keep) == len(ADJ_FACTOR_COLS) else pl.DataFrame()
 
 
-def normalize_instruments(rows: list[dict], asset_type: str, source: str = "tickflow") -> pl.DataFrame:
+def normalize_instruments(
+    rows: list[dict], asset_type: str, source: str = "tickflow"
+) -> pl.DataFrame:
     if not rows:
         return pl.DataFrame()
     out: list[dict] = []
@@ -97,14 +114,21 @@ def normalize_instruments(rows: list[dict], asset_type: str, source: str = "tick
         symbol = item.get("symbol")
         if not symbol:
             continue
-        out.append({
-            "symbol": str(symbol),
-            "name": item.get("name") or str(symbol),
-            "code": item.get("code") or str(symbol).split(".")[0],
-            "exchange": item.get("exchange"),
-            "asset_type": asset_type,
-            "source": source,
-        })
+        out.append(
+            {
+                "symbol": str(symbol),
+                "name": item.get("name") or str(symbol),
+                "code": item.get("code") or str(symbol).split(".")[0],
+                "exchange": item.get("exchange"),
+                "asset_type": asset_type,
+                "source": source,
+            }
+        )
     if not out:
         return pl.DataFrame()
-    return pl.DataFrame(out).select(INSTRUMENT_COLS).unique(subset=["symbol"], keep="last").sort("symbol")
+    return (
+        pl.DataFrame(out)
+        .select(INSTRUMENT_COLS)
+        .unique(subset=["symbol"], keep="last")
+        .sort("symbol")
+    )

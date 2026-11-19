@@ -123,6 +123,7 @@ def _repair_write_frames(repo, targets, staging, backup_dir, removals, emit):
     from app.tickflow.repository import daily_dirname
 
     root = Path(repo.store.data_dir)
+    storage = getattr(repo, "storage", None)
     for i, target in enumerate(targets):
         emit(
             "sync_daily",
@@ -145,7 +146,11 @@ def _repair_write_frames(repo, targets, staging, backup_dir, removals, emit):
                 55,
                 f"已备份并清理 {target.day} 的非交易遗留记录 ({len(removals[target])} 只)",
             )
-        remaining = data_integrity.inspect_daily_partition(root, table, target.day)
+        if storage is not None:
+            repaired = storage.read_daily(table, start=target.day, end=target.day)
+            remaining = data_integrity.inspect_daily_frame(table, target.day, repaired)
+        else:
+            remaining = data_integrity.inspect_daily_partition(root, table, target.day)
         if remaining is not None:
             raise ValueError(f"{target.day} 日K仍未通过校验, 未进入指标计算")
         daily_health.record_scan(

@@ -1,4 +1,9 @@
-"""Backend extension registry with version checks and deterministic freezing."""
+"""Backend extension registry with version checks and deterministic freezing.
+
+注册先校验契约版本与 ID 唯一性，再一次性提交路由与格式化器。
+freeze 后注册表只读；mutable_copy 供单包启动暂存，失败可整包丢弃。
+"""
+
 from __future__ import annotations
 
 import re
@@ -106,9 +111,7 @@ class BackendExtensionRegistry:
         self._notification_formatters.extend(staged)
 
     def freeze(self) -> None:
-        self._notification_formatters.sort(
-            key=lambda item: (item.order, item.implementation_id)
-        )
+        self._notification_formatters.sort(key=lambda item: (item.order, item.implementation_id))
         self._frozen = True
 
     def mutable_copy(self) -> BackendExtensionRegistry:
@@ -126,7 +129,10 @@ class BackendExtensionRegistry:
         if not self._notification_formatters:
             return (
                 RegisteredImplementation(
-                    "core", "core.notification", DefaultNotificationFormatter(), 0,
+                    "core",
+                    "core.notification",
+                    DefaultNotificationFormatter(),
+                    0,
                 ),
             )
         return tuple(self._notification_formatters)

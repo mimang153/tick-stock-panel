@@ -1,4 +1,5 @@
 """看门狗触发逻辑测试 (不真退出进程)。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -29,7 +30,7 @@ async def _run_watchdog(probe_results, *, threshold=2, interval=0.01, timeout=0.
     wd.start()
     for _ in range(50):
         await asyncio.sleep(0.02)
-        if exits or wd._task.done():
+        if exits or (wd._task is not None and wd._task.done()):
             break
     await wd.stop()
     return exits

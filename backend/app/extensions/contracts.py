@@ -1,4 +1,5 @@
 """Stable, small-grained contracts for in-repository secondary development."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

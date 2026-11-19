@@ -53,8 +53,15 @@ class HeavyJobLimiter:
 
     _WEIGHTS: ClassVar[dict[HeavyJobKind, int]] = {"normal": 1, "mining": 2}
 
-    def __init__(self, capacity: int = 2, *, cancel_poll_interval: float = 0.05,
-                 max_waiters: int = 32, queue_timeout_s: float = 120) -> None:
+    def __init__(
+        self,
+        capacity: int = 2,
+        *,
+        cancel_poll_interval: float = 0.05,
+        max_waiters: int = 32,
+        queue_timeout_s: float = 120,
+        counter=None,
+    ) -> None:
         if capacity <= 0:
             raise ValueError("capacity must be positive")
         if cancel_poll_interval <= 0:
@@ -67,11 +74,20 @@ class HeavyJobLimiter:
         self._waiters: deque[object] = deque()
         self._local = threading.local()
         self._max_waiters, self._queue_timeout_s = max_waiters, queue_timeout_s
+        if counter is None:
+            from app.services.coordination import coordination
+
+            counter = coordination.limiter_counter
+        self._counter = counter
 
     def snapshot(self) -> dict:
         with self._condition:
-            return {"capacity": self.capacity, "in_use": self._used, "waiting": len(self._waiters),
-                    "max_waiters": self._max_waiters}
+            return {
+                "capacity": self.capacity,
+                "in_use": self._used,
+                "waiting": len(self._waiters),
+                "max_waiters": self._max_waiters,
+            }
 
     @property
     def in_use(self) -> int:
@@ -111,9 +127,12 @@ class HeavyJobLimiter:
                         self._waiters[0] is ticket
                         and self._used + weight <= self.capacity
                         and _memory_admission_ok()
+                        and self._counter.try_acquire(weight, self.capacity)
                     ):
+                        # 全局计数在 try_acquire 内已原子递增；本地计数仍驱动 FIFO 与重入。
                         self._used += weight
                         self._acquired[kind] += 1
+                        self._record_lease_acquire(kind, weight)
                         return True
 
                     remaining = None if deadline is None else deadline - time.monotonic()
@@ -140,7 +159,32 @@ class HeavyJobLimiter:
                 raise RuntimeError(f"cannot release unacquired {kind} capacity")
             self._acquired[kind] -= 1
             self._used -= weight
+            self._counter.release(weight)
+            self._record_lease_release()
             self._condition.notify_all()
+
+    def _record_lease_acquire(self, kind: str, weight: int) -> None:
+        """生成并记录容量租约（仅 redis 协调 + CK 就绪时落审计）。"""
+        from app.services import coordination_audit
+
+        if not coordination_audit.enabled():
+            return
+        import uuid
+
+        self._local.lease_id = str(uuid.uuid4())
+        owner = f"{os.uname().nodename if hasattr(os, 'uname') else 'host'}:{os.getpid()}"
+        coordination_audit.record_lease_acquire(self._local.lease_id, owner, kind, weight)
+
+    def _record_lease_release(self) -> None:
+        """释放并记录租约；无活跃租约（未启用审计）时为空操作。"""
+        from app.services import coordination_audit
+
+        lease_id = getattr(self._local, "lease_id", None)
+        if lease_id is None:
+            return
+        self._local.lease_id = None
+        if coordination_audit.enabled():
+            coordination_audit.record_lease_release(lease_id)
 
     @contextmanager
     def slot(

@@ -12,6 +12,7 @@
 设计: 失败静默降级, 绝不因推送失败阻断告警主流程 (落盘 / SSE 推送)。
      去重不在本层做, 复用 MonitorRuleEngine 的 cooldown。
 """
+
 from __future__ import annotations
 
 import base64
@@ -88,14 +89,16 @@ def _truncate_to_bytes(text: str, max_bytes: int, suffix: str = "…") -> str:
         return text
     suffix_bytes = suffix.encode("utf-8")
     # 为 suffix 留出字节, 再用 errors='ignore' 丢弃被截断的尾字节, 避免半个字符
-    cut = encoded[:max_bytes - len(suffix_bytes)]
+    cut = encoded[: max_bytes - len(suffix_bytes)]
     return cut.decode("utf-8", errors="ignore") + suffix
 
 
 _FEISHU_MAX_ATTEMPTS = 3
 
 
-def _post_feishu(webhook_url: str, payload: dict, secret: str, max_attempts: int = _FEISHU_MAX_ATTEMPTS) -> bool:
+def _post_feishu(
+    webhook_url: str, payload: dict, secret: str, max_attempts: int = _FEISHU_MAX_ATTEMPTS
+) -> bool:
     """发送飞书 webhook 请求并判定成败 (供 text / card 共用)。
 
     成功响应: HTTP 200 且业务 code=0 (或非 JSON/非 dict 的 200)。
@@ -148,7 +151,13 @@ def _post_feishu(webhook_url: str, payload: dict, secret: str, max_attempts: int
     return False
 
 
-def send_feishu(webhook_url: str, title: str, body: str, secret: str = "", max_attempts: int = _FEISHU_MAX_ATTEMPTS) -> bool:
+def send_feishu(
+    webhook_url: str,
+    title: str,
+    body: str,
+    secret: str = "",
+    max_attempts: int = _FEISHU_MAX_ATTEMPTS,
+) -> bool:
     """推送一条文本消息到飞书群推送 Webhook。
 
     Args:
@@ -173,7 +182,9 @@ def send_feishu(webhook_url: str, title: str, body: str, secret: str = "", max_a
     return _post_feishu(webhook_url, payload, secret, max_attempts)
 
 
-def send_feishu_card(webhook_url: str, title: str, subtitle: str, body_md: str, secret: str = "") -> bool:
+def send_feishu_card(
+    webhook_url: str, title: str, subtitle: str, body_md: str, secret: str = ""
+) -> bool:
     """推送一条 interactive 卡片消息到飞书群推送 Webhook —— 用 lark_md 渲染完整 markdown 报告。
 
     飞书「自定义机器人」webhook 不支持文件附件, 但 interactive 卡片的 lark_md 元素
@@ -196,15 +207,19 @@ def send_feishu_card(webhook_url: str, title: str, subtitle: str, body_md: str, 
     body = _truncate_card(body_md)
     elements: list[dict] = []
     if subtitle.strip():
-        elements.append({
-            "tag": "div",
-            "text": {"tag": "lark_md", "content": f"**{subtitle.strip()}**"},
-        })
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": f"**{subtitle.strip()}**"},
+            }
+        )
         elements.append({"tag": "hr"})
-    elements.append({
-        "tag": "div",
-        "text": {"tag": "lark_md", "content": body},
-    })
+    elements.append(
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": body},
+        }
+    )
 
     payload: dict = {
         "msg_type": "interactive",
@@ -221,19 +236,9 @@ def send_feishu_card(webhook_url: str, title: str, subtitle: str, body_md: str, 
 
 
 # ================================================================
-# 企业微信群推送 Webhook
+# 企业微信群推送 Webhook (与飞书同构: POST JSON, 但无需签名、原生 markdown)
+# 限制: 每机器人每分钟最多 20 条, 由 MonitorRuleEngine cooldown 去重兜底
 # ================================================================
-#
-# 与飞书自定义机器人几乎同构: 同样是"群推送 Webhook + POST JSON"。
-# 关键差异:
-#   1. Webhook 形态: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
-#   2. 无需签名校验 (key 本身即凭证; 企业微信群推送 Webhook 可选"签名校验"但极少用)
-#   3. Markdown 原生支持 (msgtype=markdown), 不必像飞书那样包进 interactive 卡片
-#   4. 成功响应: {"errcode":0,"errmsg":"ok"}
-#
-# 限制: 每个机器人每分钟最多 20 条消息 (超出会被限流 460min 内不可用),
-#      依赖 MonitorRuleEngine 的 cooldown 去重即可应对告警场景。
-# 企业微信群的消息可在绑定的个人微信接收, 实现"微信推送"体验。
 
 WECOM_HOOK_PREFIX = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send"
 
@@ -347,9 +352,7 @@ def send_wecom_markdown(webhook_url: str, title: str, body_md: str) -> bool:
     return _post_wecom(webhook_url, payload)
 
 
-# ================================================================
 # 通用第三方 JSON Webhook
-# ================================================================
 
 _CUSTOM_MAX_ATTEMPTS = 3
 
@@ -390,7 +393,11 @@ def send_custom(
         "data": data or {},
     }
     encoded = json.dumps(
-        payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True, default=str,
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        default=str,
     ).encode("utf-8")
     headers = {"Content-Type": "application/json", "User-Agent": "TickFlow-Webhook/1.0"}
     if secret:
@@ -404,7 +411,10 @@ def send_custom(
     for attempt in range(1, max_attempts + 1):
         try:
             response = httpx.post(
-                webhook_url, content=encoded, headers=headers, timeout=5.0,
+                webhook_url,
+                content=encoded,
+                headers=headers,
+                timeout=5.0,
             )
             if 200 <= response.status_code < 300:
                 return True
@@ -412,7 +422,7 @@ def send_custom(
             if response.status_code < 500:
                 logger.warning("第三方 Webhook 推送失败(不重试): %s", last_err)
                 return False
-        except Exception as exc:  # Network failures are retryable and must not escape.
+        except Exception as exc:  # noqa: BLE001 - 网络失败可重试,必须在此收敛
             last_err = str(exc)
         if attempt < max_attempts:
             time.sleep(min(2 ** (attempt - 1), 3))

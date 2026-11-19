@@ -1,3 +1,10 @@
+"""自定义数据源插件包管理路由。
+
+上传的 Python 包等价于代码执行，因此所有管理端点都经 require_management 鉴权：
+仅面板管理会话或本机访问可用，API token 不授予此权限。
+inspect 只预览不落盘；install 安装到版本目录；manage 控制启停与重置。
+"""
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
@@ -26,7 +33,11 @@ def require_management(request: Request):
     if auth.is_configured():
         if not auth.is_valid_session(request.cookies.get(COOKIE_NAME, "")):
             raise HTTPException(401, "请先登录")
-    elif _client_ip(request) not in ("127.0.0.1", "::1", "localhost") or request.url.hostname not in ("127.0.0.1", "::1", "localhost"):
+    elif _client_ip(request) not in (
+        "127.0.0.1",
+        "::1",
+        "localhost",
+    ) or request.url.hostname not in ("127.0.0.1", "::1", "localhost"):
         raise HTTPException(403, "请先设置访问密码并登录，或通过本机访问安装插件")
 
 
@@ -36,12 +47,18 @@ async def lifespan(_app):
         yield
     finally:
         from app.data_providers import custom
+
         for plugin in custom.list_plugins():
             if plugin.get("origin") == "external":
                 custom.get_provider(plugin["name"]).close()
 
 
-router = APIRouter(lifespan=lifespan, prefix="/api/custom/source-packages", tags=["source-packages"], dependencies=[Depends(require_management)])
+router = APIRouter(
+    lifespan=lifespan,
+    prefix="/api/custom/source-packages",
+    tags=["source-packages"],
+    dependencies=[Depends(require_management)],
+)
 
 
 async def read_upload(file: UploadFile):
@@ -58,6 +75,7 @@ async def read_upload(file: UploadFile):
 async def inspect(file: Annotated[UploadFile, File()]):
     data = await read_upload(file)
     from starlette.concurrency import run_in_threadpool
+
     try:
         preview, _ = await run_in_threadpool(packages.inspect_archive, data)
         return preview
@@ -66,8 +84,11 @@ async def inspect(file: Annotated[UploadFile, File()]):
 
 
 @router.post("/install")
-async def install(file: Annotated[UploadFile, File()], digest: str = Form(...), revision: str | None = Form(None)):
+async def install(
+    file: Annotated[UploadFile, File()], digest: str = Form(...), revision: str | None = Form(None)
+):
     from starlette.concurrency import run_in_threadpool
+
     data = await read_upload(file)
     try:
         return await run_in_threadpool(packages.install, data, digest, revision)
@@ -87,5 +108,6 @@ def manage(name: str, body: Action, request: Request):
     except (ValueError, OSError, TypeError, yaml.YAMLError) as exc:
         raise HTTPException(400, str(exc)) from exc
     from app.tickflow.policy import detect_capabilities
+
     request.app.state.capabilities = detect_capabilities()
     return result

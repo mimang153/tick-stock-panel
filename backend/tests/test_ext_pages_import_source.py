@@ -2,6 +2,7 @@
 
 CI 无 frontend/node_modules → find_esbuild 为 None → 整组跳过 (源码部署本机全跑)。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -92,9 +93,22 @@ def test_upload_without_esbuild_returns_409(tmp_path, monkeypatch):
 
 def test_from_project_validates_namespace(tmp_path):
     c = _client(tmp_path)
-    assert c.post("/api/ext-pages/import-source/from-project", json={"namespace": "_template"}).status_code == 400
-    assert c.post("/api/ext-pages/import-source/from-project", json={"namespace": "../x"}).status_code == 400
-    assert c.post("/api/ext-pages/import-source/from-project", json={"namespace": "not_exist_ns"}).status_code == 400
+    assert (
+        c.post(
+            "/api/ext-pages/import-source/from-project", json={"namespace": "_template"}
+        ).status_code
+        == 400
+    )
+    assert (
+        c.post("/api/ext-pages/import-source/from-project", json={"namespace": "../x"}).status_code
+        == 400
+    )
+    assert (
+        c.post(
+            "/api/ext-pages/import-source/from-project", json={"namespace": "not_exist_ns"}
+        ).status_code
+        == 400
+    )
 
 
 def test_from_project_compiles_real_namespace(tmp_path):

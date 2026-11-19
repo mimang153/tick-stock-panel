@@ -1,4 +1,5 @@
 """行情边界的分钟字段和北京墙钟标准化;旧服务入口保留兼容导入。"""
+
 from __future__ import annotations
 
 import logging
@@ -9,7 +10,14 @@ import polars as pl
 logger = logging.getLogger(__name__)
 
 CANONICAL_MINUTE_COLS = [
-    "symbol", "datetime", "open", "high", "low", "close", "volume", "amount",
+    "symbol",
+    "datetime",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "amount",
 ]
 
 
@@ -51,7 +59,9 @@ def _enforce_minute_beijing_wallclock(df: pl.DataFrame, *, source: str) -> pl.Da
             .dt.replace_time_zone(None)
             .cast(pl.Datetime("us"))
         )
-        logger.info("minute datetime tz-aware input converted to Beijing wallclock (source=%s)", source)
+        logger.info(
+            "minute datetime tz-aware input converted to Beijing wallclock (source=%s)", source
+        )
         return df
 
     hour = pl.col("datetime").dt.hour()
@@ -69,23 +79,67 @@ def _enforce_minute_beijing_wallclock(df: pl.DataFrame, *, source: str) -> pl.Da
         if beijing:
             logger.warning(
                 "minute datetime mixed convention, shifting all by +8h per UTC majority "
-                "(source=%s, utc=%d, beijing=%d)", source, utc_shifted, beijing,
+                "(source=%s, utc=%d, beijing=%d)",
+                source,
+                utc_shifted,
+                beijing,
             )
         else:
             logger.info(
                 "minute datetime UTC wallclock detected, shifted +8h to Beijing "
-                "(source=%s, rows=%d)", source, utc_shifted,
+                "(source=%s, rows=%d)",
+                source,
+                utc_shifted,
             )
         return df.with_columns(pl.col("datetime") + pl.duration(hours=8))
     if utc_shifted:
         logger.warning(
-            "minute datetime has %d UTC-like rows among %d Beijing rows, left as-is "
-            "(source=%s)", utc_shifted, beijing, source,
+            "minute datetime has %d UTC-like rows among %d Beijing rows, left as-is (source=%s)",
+            utc_shifted,
+            beijing,
+            source,
         )
     return df
 
 
-def _normalize_minute(df_in, default_symbol: str | None = None, *, source: str = "tickflow") -> pl.DataFrame:
+def _normalize_minute_datetime(df: pl.DataFrame) -> pl.DataFrame:
+    """按 timestamp > trade_time > trade_date 优先级收口 datetime 列。"""
+    if "timestamp" in df.columns:
+        # TickFlow 毫秒时间戳为 UTC 基准；契约要求北京墙钟 naive
+        df = df.with_columns(
+            pl.from_epoch(pl.col("timestamp").cast(pl.Int64), time_unit="ms")
+            .dt.replace_time_zone("UTC")
+            .dt.convert_time_zone("Asia/Shanghai")
+            .dt.replace_time_zone(None)
+            .alias("datetime")
+        ).drop("timestamp")
+        for drop_col in ("trade_time", "trade_date"):
+            if drop_col in df.columns:
+                df = df.drop(drop_col)
+    elif "trade_time" in df.columns:
+        df = df.rename({"trade_time": "datetime"})
+        if "trade_date" in df.columns:
+            df = df.drop("trade_date")
+    elif "trade_date" in df.columns:
+        df = df.rename({"trade_date": "datetime"})
+    return df
+
+
+def _cast_minute_types(df: pl.DataFrame) -> pl.DataFrame:
+    """datetime 统一微秒精度，OHLCV 统一 Float64。"""
+    if "datetime" in df.columns:
+        dt_type = df.schema["datetime"]
+        if not isinstance(dt_type, pl.Datetime) or dt_type.time_unit != "us":
+            df = df.with_columns(pl.col("datetime").cast(pl.Datetime("us"), strict=False))
+    for col in ("open", "high", "low", "close", "volume", "amount"):
+        if col in df.columns:
+            df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False))
+    return df
+
+
+def _normalize_minute(
+    df_in, default_symbol: str | None = None, *, source: str = "tickflow"
+) -> pl.DataFrame:
     """把 SDK 返回的分钟 K 数据规范成 canonical 列 (datetime 收口为北京墙钟)。"""
     if df_in is None or len(df_in) == 0:
         return pl.DataFrame()
@@ -103,25 +157,7 @@ def _normalize_minute(df_in, default_symbol: str | None = None, *, source: str =
     df = df.rename({k: v for k, v in rename_map.items() if k in df.columns})
 
     # datetime 列:优先用 timestamp(毫秒精度),其次 trade_time
-    if "timestamp" in df.columns:
-        # TickFlow 毫秒时间戳为 UTC 基准; 契约要求北京墙钟 naive
-        # (统一归一口径, 见 CONTRIBUTING §3.3)
-        df = df.with_columns(
-            pl.from_epoch(pl.col("timestamp").cast(pl.Int64), time_unit="ms")
-            .dt.replace_time_zone("UTC")
-            .dt.convert_time_zone("Asia/Shanghai")
-            .dt.replace_time_zone(None)
-            .alias("datetime")
-        ).drop("timestamp")
-        for drop_col in ("trade_time", "trade_date"):
-            if drop_col in df.columns:
-                df = df.drop(drop_col)
-    elif "trade_time" in df.columns:
-        df = df.rename({"trade_time": "datetime"})
-        if "trade_date" in df.columns:
-            df = df.drop("trade_date")
-    elif "trade_date" in df.columns:
-        df = df.rename({"trade_date": "datetime"})
+    df = _normalize_minute_datetime(df)
 
     if "datetime" in df.columns:
         # 时区契约守卫: 须在下方通用 us-cast 之前, 避免带时区列被静默剥成 UTC-naive
@@ -130,18 +166,8 @@ def _normalize_minute(df_in, default_symbol: str | None = None, *, source: str =
     if "symbol" not in df.columns and default_symbol is not None:
         df = df.with_columns(pl.lit(default_symbol).alias("symbol"))
 
-    # 类型规范:统一转 Datetime('us')
-    if "datetime" in df.columns:
-        dt_type = df.schema["datetime"]
-        if not isinstance(dt_type, pl.Datetime) or dt_type.time_unit != "us":
-            df = df.with_columns(pl.col("datetime").cast(pl.Datetime("us"), strict=False))
-
-    for col in ("open", "high", "low", "close"):
-        if col in df.columns:
-            df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False))
-    for col in ("volume", "amount"):
-        if col in df.columns:
-            df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False))
+    # 类型规范:统一转 Datetime('us') 与 Float64
+    df = _cast_minute_types(df)
 
     keep = [c for c in CANONICAL_MINUTE_COLS if c in df.columns]
     return df.select(keep)

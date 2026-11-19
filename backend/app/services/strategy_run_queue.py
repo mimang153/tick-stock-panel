@@ -11,6 +11,7 @@
 - 每个策略算完立刻增量写入 strategy_cache, 前端轮询 cached-summary
   逐个点亮卡片数字。
 """
+
 from __future__ import annotations
 
 import json
@@ -46,7 +47,7 @@ def load_run_timings(data_dir: Path) -> dict[str, float]:
             return {}
     if not isinstance(data, dict):
         return {}
-    return {str(k): float(v) for k, v in data.items() if isinstance(v, (int, float))}
+    return {str(k): float(v) for k, v in data.items() if isinstance(v, int | float)}
 
 
 def record_run_timings(data_dir: Path, elapsed_ms: dict[str, float]) -> None:
@@ -60,7 +61,7 @@ def record_run_timings(data_dir: Path, elapsed_ms: dict[str, float]) -> None:
         try:
             old = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(old, dict):
-                merged = {str(k): float(v) for k, v in old.items() if isinstance(v, (int, float))}
+                merged = {str(k): float(v) for k, v in old.items() if isinstance(v, int | float)}
         except (FileNotFoundError, ValueError, OSError):
             pass
         merged.update({sid: float(ms) for sid, ms in elapsed_ms.items()})
@@ -71,9 +72,7 @@ def record_run_timings(data_dir: Path, elapsed_ms: dict[str, float]) -> None:
 
 def order_strategy_ids(all_ids: list[str], timings: dict[str, float]) -> list[str]:
     """快策略先算: 有历史耗时的按耗时升序, 未知耗时的保持原顺序排在后面。"""
-    known = sorted(
-        (timings[sid], i, sid) for i, sid in enumerate(all_ids) if sid in timings
-    )
+    known = sorted((timings[sid], i, sid) for i, sid in enumerate(all_ids) if sid in timings)
     known_ids = {sid for _, _, sid in known}
     unknown = [sid for sid in all_ids if sid not in known_ids]
     return [sid for _, _, sid in known] + unknown
@@ -152,7 +151,9 @@ class StrategyRunManager:
     # 完成后 handle 保留时长: 前端 2s 轮询在几分钟内足够拿完全部结果
     KEEP_DONE_MS = 5 * 60 * 1000
 
-    def __init__(self, *, max_pending: int = 32, max_recent: int = 128, queue_timeout_s: float = 120) -> None:
+    def __init__(
+        self, *, max_pending: int = 32, max_recent: int = 128, queue_timeout_s: float = 120
+    ) -> None:
         self._lock = threading.Lock()
         self.execution_lock = threading.RLock()
         self._admission = threading.BoundedSemaphore(max_pending)
@@ -187,8 +188,12 @@ class StrategyRunManager:
 
     def snapshot(self) -> dict:
         with self._lock:
-            return {"pending": len(self._handles), "recent": len(self._done_recent),
-                    "max_pending": self._max_pending, "max_recent": self._max_recent}
+            return {
+                "pending": len(self._handles),
+                "recent": len(self._done_recent),
+                "max_pending": self._max_pending,
+                "max_recent": self._max_recent,
+            }
 
     def get_or_submit(
         self,
@@ -205,8 +210,10 @@ class StrategyRunManager:
             # 顺手清理完成超过 TTL 的暂存 handle, 防止字典无限增长
             for store in (self._handles, self._done_recent):
                 for k in [
-                    k for k, h in store.items()
-                    if h.snapshot()["done"] and h.finished_at_ms is not None
+                    k
+                    for k, h in store.items()
+                    if h.snapshot()["done"]
+                    and h.finished_at_ms is not None
                     and now_ms - h.finished_at_ms > self.KEEP_DONE_MS
                 ]:
                     del store[k]
@@ -222,12 +229,20 @@ class StrategyRunManager:
             done = self._done_recent.get(key)
             if done is not None and reuse_completed_ms > 0:
                 snap = done.snapshot()
-                if (done.source_version == source_version and (snap["error"] or snap["errors"])
-                        and done.finished_at_ms is not None and now_ms - done.finished_at_ms < 1000):
+                if (
+                    done.source_version == source_version
+                    and (snap["error"] or snap["errors"])
+                    and done.finished_at_ms is not None
+                    and now_ms - done.finished_at_ms < 1000
+                ):
                     return done
-                if (done.source_version == source_version and not snap["error"] and not snap["errors"]
-                        and done.finished_at_ms is not None
-                        and now_ms - done.finished_at_ms < reuse_completed_ms):
+                if (
+                    done.source_version == source_version
+                    and not snap["error"]
+                    and not snap["errors"]
+                    and done.finished_at_ms is not None
+                    and now_ms - done.finished_at_ms < reuse_completed_ms
+                ):
                     workload.record("strategy.batch", "cache_hit")
                     return done
             if len(self._handles) >= self._max_pending:
@@ -251,12 +266,24 @@ class StrategyRunManager:
 
     def task_status(self, task_id: str) -> dict | None:
         with self._lock:
-            handle = next((h for h in (*self._handles.values(), *self._done_recent.values()) if h.id == task_id), None)
+            handle = next(
+                (
+                    h
+                    for h in (*self._handles.values(), *self._done_recent.values())
+                    if h.id == task_id
+                ),
+                None,
+            )
         if handle is None:
             return None
         snap = handle.snapshot()
-        return {"id": handle.id, "pending": snap["pending"], "errors": snap["errors"],
-                "error": snap["error"], "complete": snap["done"]}
+        return {
+            "id": handle.id,
+            "pending": snap["pending"],
+            "errors": snap["errors"],
+            "error": snap["error"],
+            "complete": snap["done"],
+        }
 
     def _retire_if_done(self, handle: StrategyRunHandle) -> None:
         """worker 收尾后调用: 把 done handle 从执行区挪到暂存区供轮询。"""
@@ -267,7 +294,9 @@ class StrategyRunManager:
                 while len(self._done_recent) > self._max_recent:
                     self._done_recent.pop(next(iter(self._done_recent)))
 
-    def minute_summaries(self, *, identity: tuple | None = None, asset_type: str | None = None) -> list[dict]:
+    def minute_summaries(
+        self, *, identity: tuple | None = None, asset_type: str | None = None
+    ) -> list[dict]:
         """所有分钟 (timeframe='1m') handle 的结果摘要, 供 cached-summary 合并。
 
         分钟策略结果不落 strategy_cache (日线语义), 渐进式转后台后前端靠
@@ -285,20 +314,22 @@ class StrategyRunManager:
             if identity is not None and (len(h.key) < 5 or h.key[4] != identity):
                 continue
             snap = h.snapshot()
-            out.append({
-                "as_of": h.key[2] if len(h.key) > 2 else None,
-                "results": {
-                    sid: {
-                        "total": int(payload.get("total") or 0),
-                        "as_of": payload.get("as_of"),
-                        "computed_at": payload.get("computed_at"),
-                        "available_at": payload.get("available_at"),
-                    }
-                    for sid, payload in snap["results"].items()
-                },
-                "pending": snap["pending"],
-                "complete": snap["done"] and not snap["error"],
-            })
+            out.append(
+                {
+                    "as_of": h.key[2] if len(h.key) > 2 else None,
+                    "results": {
+                        sid: {
+                            "total": int(payload.get("total") or 0),
+                            "as_of": payload.get("as_of"),
+                            "computed_at": payload.get("computed_at"),
+                            "available_at": payload.get("available_at"),
+                        }
+                        for sid, payload in snap["results"].items()
+                    },
+                    "pending": snap["pending"],
+                    "complete": snap["done"] and not snap["error"],
+                }
+            )
         return out
 
     def _run_loop(self) -> None:
@@ -311,9 +342,11 @@ class StrategyRunManager:
                     workload.record("strategy.batch", "executed")
                     job(handle)
             except BaseException as e:
-                logger.exception("run_all 后台执行失败: %s", e)
+                logger.exception("run_all 后台执行失败")
                 workload.record("strategy.batch", "failed")
-                handle.fail(str(e), status_code=503 if isinstance(e, (WorkBusyError, TimeoutError)) else 500)
+                handle.fail(
+                    str(e), status_code=503 if isinstance(e, WorkBusyError | TimeoutError) else 500
+                )
             else:
                 if handle.snapshot()["errors"]:
                     workload.record("strategy.batch", "failed")
@@ -324,9 +357,7 @@ class StrategyRunManager:
     def _ensure_worker(self) -> None:
         with self._lock:
             if self._worker is None or not self._worker.is_alive():
-                self._worker = threading.Thread(
-                    target=self._run_loop, name="runall", daemon=True
-                )
+                self._worker = threading.Thread(target=self._run_loop, name="runall", daemon=True)
                 self._worker.start()
 
 

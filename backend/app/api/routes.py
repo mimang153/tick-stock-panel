@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 
 from app import __version__
-from app.storage.runtime import storage_health
+from app.storage.runtime import cache_health, storage_health
 from app.tickflow import client as tf_client
 from app.tickflow.policy import detect_capabilities, tier_label
 
@@ -69,7 +69,10 @@ def _memory_snapshot() -> dict:
 
 
 @router.get("/health")
+@router.get("/api/health")
 def health() -> dict:
+    ck = storage_health()
+    cache = cache_health()
     return {
         "status": "ok",
         "version": __version__,
@@ -77,7 +80,11 @@ def health() -> dict:
         "mode": tf_client.current_mode(),
         "memory": _memory_snapshot(),
         # 存储层状态: not_initialized(未接线) / ok / degraded(写入失败的批次>0 或 ping 失败)
-        "clickhouse": storage_health(),
+        "clickhouse": ck,
+        "ck_status": ck["status"],
+        "cache": cache,
+        "cache_backend": cache["backend"],
+        "cache_status": cache["status"],
     }
 
 

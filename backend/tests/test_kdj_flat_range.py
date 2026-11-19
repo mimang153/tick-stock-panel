@@ -8,6 +8,7 @@ fill_null(1e-12) 守卫, 但零分母不是空值, 0/0 得到 NaN 并被 ewm_mea
 矩阵路径 (backtest/matrix.matrix_feature) 对同一份数据只把该日置空、
 之后继续递推, 两条路径必须给出同一套值。
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -35,15 +36,17 @@ def _flat_window_panel() -> pl.DataFrame:
             current = close
             high = close * 1.02
             low = close * 0.98
-        rows.append({
-            "symbol": "511990.SH",
-            "date": start + timedelta(days=offset),
-            "open": current,
-            "high": high,
-            "low": low,
-            "close": current,
-            "volume": 1000.0,
-        })
+        rows.append(
+            {
+                "symbol": "511990.SH",
+                "date": start + timedelta(days=offset),
+                "open": current,
+                "high": high,
+                "low": low,
+                "close": current,
+                "volume": 1000.0,
+            }
+        )
     return pl.DataFrame(rows)
 
 
@@ -86,8 +89,18 @@ def test_kdj_before_flat_window_is_unchanged():
     np.testing.assert_allclose(
         enriched["kdj_k"].to_numpy().astype(float)[8:20],
         [
-            79.038803, 78.910706, 77.639870, 73.898865, 69.964340, 65.401917,
-            59.955997, 54.126106, 50.239616, 47.648457, 46.534885, 47.689919,
+            79.038803,
+            78.910706,
+            77.639870,
+            73.898865,
+            69.964340,
+            65.401917,
+            59.955997,
+            54.126106,
+            50.239616,
+            47.648457,
+            46.534885,
+            47.689919,
         ],
         rtol=1e-5,
         atol=1e-5,

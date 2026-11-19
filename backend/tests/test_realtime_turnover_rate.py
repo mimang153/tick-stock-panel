@@ -25,11 +25,13 @@ def _today_rows(turnover_rate: float | None = None) -> pl.DataFrame:
 
 
 def _instruments() -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": ["600000.SH"],
-        "name": ["Test"],
-        "float_shares": [100_000_000.0],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "name": ["Test"],
+            "float_shares": [100_000_000.0],
+        }
+    )
 
 
 def test_quote_extra_normalizes_realtime_turnover_fraction_to_percent_value():

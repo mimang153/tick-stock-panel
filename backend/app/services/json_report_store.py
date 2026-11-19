@@ -12,6 +12,7 @@ id_with_symbol(id 是否带 symbol 后缀 —— 大盘复盘无 symbol)。
 超出自动裁剪最旧的。写入走临时文件 + os.replace 原子替换, 避免进程中断留下半截 JSON。
 读写同时可能来自请求线程与调度线程, 故加实例锁串行化写路径。
 """
+
 from __future__ import annotations
 
 import json
@@ -45,6 +46,7 @@ class JsonReportStore:
 
     def _path(self) -> Path:
         from app.config import settings
+
         p = settings.data_dir / "user_data" / self.filename
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
@@ -67,7 +69,7 @@ class JsonReportStore:
         # 保持降序
         reports.sort(key=lambda r: r.get("created_at", ""), reverse=True)
         if len(reports) > self.max_reports:
-            reports = reports[:self.max_reports]
+            reports = reports[: self.max_reports]
         self._atomic_write(reports)
 
     def _atomic_write(self, reports: list[dict]) -> None:

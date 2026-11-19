@@ -2,7 +2,7 @@
 
 架构(完全解耦):
   - 只读 enriched(拿涨跌停名单), 不写回 enriched(14列不动)
-  - sealed 存独立 parquet(data/depth5/date=xxx/part.parquet)
+  - sealed 存 CK depth5 表（B5 起不再写本地 Parquet）
   - limit_ladder API 查询时 LEFT JOIN(同 ext_columns 机制)
   - signal_limit_up 永远是"价格涨停", sealed 是叠加的真假判定层
 
@@ -11,7 +11,7 @@
     读 enriched 内存缓存(线程安全) → 涨跌停名单 → tf.depth.batch
     → 算 sealed → 更新内存缓存(不落盘) → sealed_ready=True
   盘后定版 job(可配置时间, 默认15:02):
-    最后拉一次 → 落盘 depth5 parquet(定版)
+    最后拉一次 → 写入 CK depth5(定版)
 
 三层防护节流("设过大设上限, 设过小设最小值"):
   ① 套餐范围 clamp: Pro 10~120s, Expert 3~120s
@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 import threading
 import time
 from datetime import date
@@ -414,17 +413,9 @@ class DepthService:
                 "fetched_at": pl.Float64,
             },
         )
-        ds = today.isoformat()
-        out = self._repo.store.data_dir / "depth5" / f"date={ds}" / "part.parquet"  # type: ignore[attr-defined]
-        out.parent.mkdir(parents=True, exist_ok=True)
-        # 原子写: 先写临时文件再 os.replace, 避免读侧读到半写 parquet
-        tmp = out.with_name(out.name + ".tmp")
-        df.write_parquet(tmp)
-        os.replace(tmp, out)
-        # 读路径已切 CK：Parquet 只是过渡期副本，CK 是页面数据源
         self._depth_store().write_depth5(df.with_columns(pl.lit(today).cast(pl.Date).alias("date")))
         self._persisted_date = today
-        logger.info("depth sealed 落盘: %d 行 → %s (CK+Parquet)", df.height, out)
+        logger.info("depth sealed 落库(CK): %d 行", df.height)
 
     def _persisted_for_date(self, d: date) -> bool:
         """检查某日 depth5 是否已落库（CK）。"""

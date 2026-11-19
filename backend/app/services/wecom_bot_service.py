@@ -17,13 +17,14 @@
   订阅 aibot_subscribe → 收 errcode=0 → 每 30s ping → 收消息/事件回调
 限制: 每机器人仅 1 条长连接(新连接踢旧连接), 故配置变更需 stop→start
 """
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import threading
-import time
 import uuid
 
 logger = logging.getLogger(__name__)
@@ -43,12 +44,12 @@ class WecomBotService:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._running = False          # 连接线程存活标志
+        self._running = False  # 连接线程存活标志
         self._thread: threading.Thread | None = None
         self._ws_loop: asyncio.AbstractEventLoop | None = None
-        self._connected = False        # WebSocket 是否已连接并通过鉴权
+        self._connected = False  # WebSocket 是否已连接并通过鉴权
         self._last_error: str = ""
-        self._app_state = None         # 延迟注入, 避免循环导入
+        self._app_state = None  # 延迟注入, 避免循环导入
 
     # ================================================================
     # 生命周期
@@ -115,6 +116,7 @@ class WecomBotService:
             self.stop()
         # 重新读取最新凭证判断是否应启动
         from app.services import preferences
+
         if preferences.get_wecom_bot_enabled() and self.start():
             logger.info("智能机器人凭证已更新, 重新连接")
         elif was_running:
@@ -123,6 +125,7 @@ class WecomBotService:
     def status(self) -> dict:
         """返回连接状态(供 UI 展示)。"""
         from app.services import preferences
+
         return {
             "enabled": preferences.get_wecom_bot_enabled(),
             "running": self._running,
@@ -171,14 +174,13 @@ class WecomBotService:
                     )
             except Exception:  # noqa: BLE001
                 pass
-            try:
+            with contextlib.suppress(Exception):
                 loop.close()
-            except Exception:  # noqa: BLE001
-                pass
 
     async def _connect_loop(self) -> None:
         """主连接循环: 连接 → 鉴权 → 心跳保活 → 断开 → 退避重连。"""
         import websockets
+
         from app.services import preferences
 
         attempt = 0
@@ -194,7 +196,7 @@ class WecomBotService:
             try:
                 async with websockets.connect(
                     _WECOM_WS_URL,
-                    ping_interval=None,   # 用业务层 ping, 不用协议层
+                    ping_interval=None,  # 用业务层 ping, 不用协议层
                     close_timeout=5,
                 ) as ws:
                     # 1. 发送订阅鉴权帧
@@ -228,7 +230,7 @@ class WecomBotService:
                     # 3. 心跳保活 + 接收循环
                     await self._maintain_connection(ws)
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._last_error = "鉴权响应超时"
                 logger.warning("智能机器人鉴权超时")
             except Exception as e:  # noqa: BLE001 — 网络/断开, 可重连
@@ -258,11 +260,11 @@ class WecomBotService:
                     raw = await asyncio.wait_for(ws.recv(), timeout=_HEARTBEAT_INTERVAL)
                     self._log_incoming(raw)
                     continue
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass  # 接收超时 → 到了心跳时间
                 # 发送业务层 ping 保活
                 await ws.send(json.dumps({"cmd": "ping"}))
-            except Exception as e:  # noqa: BLE001 — 连接断开, 抛给上层重连
+            except Exception:  # noqa: TRY203 - 显式保留连接循环异常传播语义
                 raise
 
     def _log_incoming(self, raw) -> None:
@@ -281,8 +283,13 @@ class WecomBotService:
             msgtype = body.get("msgtype", "?")
             # 文本消息内容在 body.text.content 或 body.content
             content = body.get("text", {}).get("content") or body.get("content", "")
-            logger.info("智能机器人收到用户消息 [%s/%s] %s: %s",
-                        chattype, msgtype, userid, str(content)[:100])
+            logger.info(
+                "智能机器人收到用户消息 [%s/%s] %s: %s",
+                chattype,
+                msgtype,
+                userid,
+                str(content)[:100],
+            )
         # 事件回调: 进入会话 / 卡片点击 / 连接被踢等
         elif cmd == "aibot_event_callback":
             eventtype = body.get("event", {}).get("eventtype", "?")

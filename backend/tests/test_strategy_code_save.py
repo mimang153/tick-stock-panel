@@ -47,13 +47,15 @@ def _request(tmp_path):
     custom_dir = tmp_path / "strategies" / "custom"
     engine = StrategyEngine(strategy_dirs=[custom_dir, ai_dir])
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
-    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo, strategy_engine=engine)))
+    return SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(repo=repo, strategy_engine=engine))
+    )
 
 
 def test_prepare_strategy_code_rejects_forbidden_import():
     req = StrategyCodeValidateRequest(
         strategy_id="custom_bad",
-        code='''import os\nMETA = {"id": "custom_bad"}\n''',
+        code="""import os\nMETA = {"id": "custom_bad"}\n""",
     )
 
     with pytest.raises(ValueError, match="禁止 import os"):
@@ -166,16 +168,24 @@ def test_save_strategy_code_ok_when_custom_signal_defined(tmp_path):
     """信号已定义时, 引用它的策略可以正常保存。"""
     from app.strategy import custom_signals
 
-    custom_signals.save_one(tmp_path, {
-        "id": "oversold_macd_about_to_golden",
-        "name": "超跌接近金叉",
-        "kind": "entry",
-        "conditions": [
-            {"left": "momentum_60d", "op": "<=", "right": "-0.30",
-             "leftDays": 0, "rightDays": 0},
-        ],
-        "enabled": True,
-    })
+    custom_signals.save_one(
+        tmp_path,
+        {
+            "id": "oversold_macd_about_to_golden",
+            "name": "超跌接近金叉",
+            "kind": "entry",
+            "conditions": [
+                {
+                    "left": "momentum_60d",
+                    "op": "<=",
+                    "right": "-0.30",
+                    "leftDays": 0,
+                    "rightDays": 0,
+                },
+            ],
+            "enabled": True,
+        },
+    )
     request = _request(tmp_path)
     code = _code("custom_with_sig") + (
         '\nREQUIRED_FEATURES = {"csg_oversold_macd_about_to_golden"}\n'

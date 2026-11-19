@@ -9,6 +9,7 @@ run_backtest 复用现有 StrategyBacktestConfig + worker, 只读、受控窗口
   - run_backtest 是重任务 (子进程), 由 execute_tool 用 asyncio.to_thread 挪出事件循环。
   - Codex CLI 无 tools= 协议, 相关门控在 api 层入口 fail-closed, 不在本模块降级。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -25,18 +26,20 @@ LIST_DATA_CAPABILITIES = "list_data_capabilities"
 RUN_BACKTEST = "run_backtest"
 
 # run_backtest 回传给 LLM 的 stats 键白名单 (控制 token, 不塞曲线/成交明细)
-_BACKTEST_STATS_KEYS: frozenset[str] = frozenset({
-    "total_return",
-    "annual_return",
-    "max_drawdown",
-    "sharpe",
-    "sortino",
-    "calmar",
-    "win_rate",
-    "profit_factor",
-    "n_trades",
-    "avg_pnl",
-})
+_BACKTEST_STATS_KEYS: frozenset[str] = frozenset(
+    {
+        "total_return",
+        "annual_return",
+        "max_drawdown",
+        "sharpe",
+        "sortino",
+        "calmar",
+        "win_rate",
+        "profit_factor",
+        "n_trades",
+        "avg_pnl",
+    }
+)
 
 # 回测默认窗口 (对齐 api/backtest.py 的 FACTOR_DEFAULT_DAYS, 受控窗口防超大区间)
 _DEFAULT_BACKTEST_DAYS = 180
@@ -155,9 +158,8 @@ def list_factors(asset_type: str | None = None, stable_only: bool = False) -> di
 
 def list_strategies(engine) -> dict[str, Any]:
     """序列化策略目录: StrategyEngine.list_strategies(include_research=True) 精简视图。"""
-    strategies = []
-    for meta in engine.list_strategies(include_research=True):
-        strategies.append({
+    strategies = [
+        {
             "id": meta.get("id"),
             "name": meta.get("name", ""),
             "description": meta.get("description", ""),
@@ -175,7 +177,9 @@ def list_strategies(engine) -> dict[str, Any]:
                 }
                 for p in meta.get("params", [])
             ],
-        })
+        }
+        for meta in engine.list_strategies(include_research=True)
+    ]
     return {"strategies": strategies}
 
 
@@ -199,8 +203,9 @@ def list_data_capabilities() -> dict[str, Any]:
     return {"capabilities": capabilities}
 
 
-def resolve_strategy_target(strategy, *, asset_type: str | None = None,
-                            timeframe: str | None = None) -> tuple[str, str]:
+def resolve_strategy_target(
+    strategy, *, asset_type: str | None = None, timeframe: str | None = None
+) -> tuple[str, str]:
     """缺省参数遵循策略声明，多资产/周期策略优先保持 stock/1d。"""
     assets = strategy.meta.get("asset_types", ["stock"])
     periods = strategy.meta.get("timeframes", ["1d"])
@@ -302,7 +307,7 @@ async def execute_tool(
                     available = ", ".join(
                         str(s.get("id")) for s in engine.list_strategies()[:12] if s.get("id")
                     )
-                except Exception:  # 列举失败不影响错误本身
+                except Exception:  # noqa: BLE001 - 列举失败不影响错误本身
                     available = ""
                 hint = f"; 可用策略: {available}" if available else "; 可先用 list_strategies 查询"
                 return {"ok": False, "error": f"策略 {strategy_id} 不存在{hint}"}
@@ -311,7 +316,8 @@ async def execute_tool(
             if engine is not None:
                 strategy = engine.get(strategy_id)
                 asset_type, _ = resolve_strategy_target(
-                    strategy, asset_type=args.get("asset_type"),
+                    strategy,
+                    asset_type=args.get("asset_type"),
                 )
             result = await asyncio.to_thread(
                 run_backtest,

@@ -6,6 +6,7 @@ DLL 与运行时 ini 随 wheel 分发。两个实测约束决定本模块的形�
     lib 目录 + TDX_AI_DATA_LIB 指向, 不污染 site-packages、换 Key 只重写 ini;
   - 空闲后首次调用会 "Invalid server response" → 统一重试包装。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -19,6 +20,7 @@ import sys
 import time
 from datetime import date, datetime
 from pathlib import Path
+from typing import cast
 
 from app.data_providers.base import ProviderRequestError
 
@@ -29,8 +31,18 @@ _MARKETS = ("上证主板", "科创板", "深证主板", "创业板", "北交所
 
 # 快照批量字段(实测有效名; 注意昨收叫 LastClose、高低叫 Max/Min, 快照无 Name)
 SNAPSHOT_FIELDS = (
-    "Now", "Open", "Max", "Min", "LastClose", "Volume", "Amount", "RefreshTime",
-    "Buyp", "Buyv", "Sellp", "Sellv",
+    "Now",
+    "Open",
+    "Max",
+    "Min",
+    "LastClose",
+    "Volume",
+    "Amount",
+    "RefreshTime",
+    "Buyp",
+    "Buyv",
+    "Sellp",
+    "Sellv",
 )
 
 _RETRIES = 3
@@ -54,7 +66,7 @@ class TdxQuantAuthError(TdxQuantError):
 def _raise_response_error(raw, api_key: str = "") -> None:
     """SDK._clean 会打印并抹掉 ErrorId, 必须在它之前保留失败语义。"""
     value = raw
-    if isinstance(value, (str, bytes)):
+    if isinstance(value, str | bytes):
         try:
             value = json.loads(value)
         except (ValueError, UnicodeDecodeError):
@@ -70,10 +82,12 @@ def _raise_response_error(raw, api_key: str = "") -> None:
     message = re.sub(r"TDX-[\w-]+", "[redacted]", message, flags=re.IGNORECASE)[:200]
     if re.search(
         r"tokenkey|unauthori[sz]ed|invalid.*(?:key|token)|(?:key|token).*(?:error|expired)|权限|积分|额度|认证",
-        message, re.IGNORECASE,
+        message,
+        re.IGNORECASE,
     ):
         raise TdxQuantAuthError(
-            "TdxQuant 凭据、接口权限或额度不可用，请核对所配置 Key 与通达信后台状态。服务端: " + message
+            "TdxQuant 凭据、接口权限或额度不可用，请核对所配置 Key 与通达信后台状态。服务端: "
+            + message
         )
     raise TdxQuantError(f"TdxQuant 服务端请求失败: {message}")
 
@@ -266,7 +280,8 @@ class TdxQuantClient:
         if count <= 0:
             return {}
         end = (
-            f"{end_d:%Y-%m-%d %H:%M:%S}" if isinstance(end_d, datetime)
+            f"{end_d:%Y-%m-%d %H:%M:%S}"
+            if isinstance(end_d, datetime)
             else f"{end_d:%Y-%m-%d} 00:00:00"
         )
         out = self._raw("get_his_dats", code, "", end, period, "none", int(count))
@@ -293,19 +308,28 @@ class TdxQuantClient:
             raise TdxQuantError(f"get_cw_data({code}) 返回异常结构: {type(out)!r}")
         if not out:
             return []
-        dates, values, types = out.get("Date"), out.get("Value"), out.get("Type", [])
-        if (not all(isinstance(v, list) for v in (dates, values, types))
-                or len(dates) != len(values)):
+        dates = cast(list, out.get("Date"))
+        values = cast(list, out.get("Value"))
+        types = cast(list, out.get("Type", []))
+        if not all(isinstance(v, list) for v in (dates, values, types)) or len(dates) != len(
+            values
+        ):
             raise TdxQuantError(f"get_cw_data({code}) Date/Value/Type 列结构异常")
         records = []
         fields = ("Bonus", "AllotPrice", "ShareBonus", "Allotment")
         for i, item in enumerate(values):
             date_key = "".join(c for c in str(dates[i]).strip() if c.isdigit())[:8]
             try:
-                event_date = datetime.strptime(date_key, "%Y%m%d").date() if len(date_key) == 8 else None
+                event_date = (
+                    datetime.strptime(date_key, "%Y%m%d").date() if len(date_key) == 8 else None
+                )
             except ValueError:
                 event_date = None
-            if event_date is None or (start_d and event_date < start_d) or (end_d and event_date > end_d):
+            if (
+                event_date is None
+                or (start_d and event_date < start_d)
+                or (end_d and event_date > end_d)
+            ):
                 continue  # SDK 同样过滤无效日期及服务端未裁剪的窗口外事件。
             if item is None:
                 item = []
@@ -318,6 +342,11 @@ class TdxQuantClient:
                 raise TdxQuantError(f"get_cw_data({code}) Value[{i}] 含无效数值") from exc
             if not all(math.isfinite(v) for v in amounts):
                 raise TdxQuantError(f"get_cw_data({code}) Value[{i}] 含非有限数值")
-            records.append({"Date": date_key, "Type": types[i] if i < len(types) else "",
-                            **dict(zip(fields, amounts, strict=True))})
+            records.append(
+                {
+                    "Date": date_key,
+                    "Type": types[i] if i < len(types) else "",
+                    **dict(zip(fields, amounts, strict=True)),
+                }
+            )
         return records

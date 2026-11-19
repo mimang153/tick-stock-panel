@@ -4,6 +4,7 @@ schedule_seconds 优先于 schedule_minutes (秒级拉取, 如集合竞价 30s �
 缺省/非法回退分钟制, 存量 config.json 与旧导出包行为不变。
 判据不依赖跑测试机器的时区: 钉住 cn_now 与假时钟。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -54,15 +55,19 @@ def test_schedule_seconds_valid_boundary_preserved():
 
 
 def test_pull_config_req_validates_schedule_seconds():
+    # model_validate 传 dict 与构造调用运行时等价(同样触发 Pydantic 校验并抛 ValueError),
+    # 但避免 mypy 因 Field(...) 默认值把字段视为必填而报 call-arg。
     with pytest.raises(ValueError):
-        PullConfigReq(url="https://x", schedule_seconds=9)   # 低于下限 10s
+        PullConfigReq.model_validate({"url": "https://x", "schedule_seconds": 9})  # 低于下限 10s
     with pytest.raises(ValueError):
-        PullConfigReq(url="https://x", schedule_seconds=3_000_000)  # 超过 30 天
+        PullConfigReq.model_validate(
+            {"url": "https://x", "schedule_seconds": 3_000_000}
+        )  # 超过 30 天
 
-    req = PullConfigReq(url="https://x", schedule_seconds=30)
+    req = PullConfigReq.model_validate({"url": "https://x", "schedule_seconds": 30})
     assert req.schedule_seconds == 30 and req.schedule_minutes == 1440
     # 缺省 = 沿用分钟制 (存量行为)
-    assert PullConfigReq(url="https://x").schedule_seconds is None
+    assert PullConfigReq.model_validate({"url": "https://x"}).schedule_seconds is None
 
 
 # ── 有效间隔: 秒优先 / 回退 / 下限钳制 ─────────────────────────────
@@ -79,7 +84,10 @@ def test_interval_seconds_falls_back_to_minutes():
 
 def test_interval_seconds_clamps_floor():
     """手改 config.json 写过小值: 模型归一后调度侧下限兜底, 不打爆接口。"""
-    assert ext_pull._interval_seconds(PullConfig(url="https://x", schedule_minutes=0)) == ext_pull._MIN_INTERVAL_S
+    assert (
+        ext_pull._interval_seconds(PullConfig(url="https://x", schedule_minutes=0))
+        == ext_pull._MIN_INTERVAL_S
+    )
     assert ext_pull._interval_seconds(PullConfig(url="https://x", schedule_seconds=10)) == 10
 
 
@@ -102,7 +110,10 @@ class _FakeStore:
 async def test_interval_loop_pulls_every_30_seconds(monkeypatch):
     """schedule_seconds=30 → 两次拉取间隔 ~30s; 分钟制下会是 ~61s, 断言可区分。"""
     cfg = ExtConfig(
-        id="c1", label="t", mode="timeseries", fields=[],
+        id="c1",
+        label="t",
+        mode="timeseries",
+        fields=[],
         pull=PullConfig(url="https://x", enabled=True, schedule_minutes=1, schedule_seconds=30),
     )
     store = _FakeStore(cfg)
@@ -114,8 +125,16 @@ async def test_interval_loop_pulls_every_30_seconds(monkeypatch):
         @classmethod
         def now(cls, tz=None):
             moment = clock["now"].astimezone(tz) if tz else clock["now"]
-            return cls(moment.year, moment.month, moment.day, moment.hour,
-                       moment.minute, moment.second, moment.microsecond, moment.tzinfo)
+            return cls(
+                moment.year,
+                moment.month,
+                moment.day,
+                moment.hour,
+                moment.minute,
+                moment.second,
+                moment.microsecond,
+                moment.tzinfo,
+            )
 
     monkeypatch.setattr(ext_pull, "cn_now", lambda: clock["now"])
     monkeypatch.setattr(ext_pull, "datetime", _FakeDateTime)
@@ -146,6 +165,7 @@ async def test_interval_loop_pulls_every_30_seconds(monkeypatch):
     gap = (pulls[1] - pulls[0]).total_seconds()
     assert 30 <= gap <= 32, f"秒级间隔未生效: 实际间隔 {gap}s (期望 ~31s, 分钟制会是 ~61s)"
     # 状态已写回
+    assert cfg.pull is not None
     assert cfg.pull.last_status == "success" and cfg.pull.last_rows == 5
 
 
@@ -159,10 +179,15 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr("app.services.ext_data.get_ext_api_key", lambda _id: "")
     monkeypatch.setattr(api, "_refresh_views", lambda _request: None)
     monkeypatch.setattr(api.pull_scheduler, "refresh", lambda _path: None)
-    ExtConfigStore(tmp_path).upsert(ExtConfig(
-        id="snap", label="快照", mode="snapshot", fields=[ExtField("price", "float")],
-        pull=PullConfig(url="https://example.test"),
-    ))
+    ExtConfigStore(tmp_path).upsert(
+        ExtConfig(
+            id="snap",
+            label="快照",
+            mode="snapshot",
+            fields=[ExtField("price", "float")],
+            pull=PullConfig(url="https://example.test"),
+        )
+    )
     app = FastAPI()
     app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     app.include_router(api.router)
@@ -173,25 +198,43 @@ def client(tmp_path, monkeypatch):
 def test_configure_pull_persists_schedule_seconds(client):
     http, tmp_path = client
 
-    saved = http.put("/api/ext-data/snap/pull", json={
-        "url": "https://example.test", "schedule_minutes": 1, "schedule_seconds": 30,
-    })
+    saved = http.put(
+        "/api/ext-data/snap/pull",
+        json={
+            "url": "https://example.test",
+            "schedule_minutes": 1,
+            "schedule_seconds": 30,
+        },
+    )
     assert saved.status_code == 200
     assert saved.json()["pull"]["schedule_seconds"] == 30
-    assert ExtConfigStore(tmp_path).get("snap").pull.schedule_seconds == 30
+    saved_cfg = ExtConfigStore(tmp_path).get("snap")
+    assert saved_cfg is not None and saved_cfg.pull is not None
+    assert saved_cfg.pull.schedule_seconds == 30
 
     # 清除秒级 → 回退分钟制 (双字段互斥语义)
-    cleared = http.put("/api/ext-data/snap/pull", json={
-        "url": "https://example.test", "schedule_minutes": 5, "schedule_seconds": None,
-    })
+    cleared = http.put(
+        "/api/ext-data/snap/pull",
+        json={
+            "url": "https://example.test",
+            "schedule_minutes": 5,
+            "schedule_seconds": None,
+        },
+    )
     assert cleared.status_code == 200
     assert cleared.json()["pull"]["schedule_seconds"] is None
-    assert ExtConfigStore(tmp_path).get("snap").pull.schedule_minutes == 5
+    saved_cfg = ExtConfigStore(tmp_path).get("snap")
+    assert saved_cfg is not None and saved_cfg.pull is not None
+    assert saved_cfg.pull.schedule_minutes == 5
 
 
 def test_configure_pull_rejects_sub_floor_seconds(client):
     http, _ = client
-    rejected = http.put("/api/ext-data/snap/pull", json={
-        "url": "https://example.test", "schedule_seconds": 3,
-    })
+    rejected = http.put(
+        "/api/ext-data/snap/pull",
+        json={
+            "url": "https://example.test",
+            "schedule_seconds": 3,
+        },
+    )
     assert rejected.status_code == 422

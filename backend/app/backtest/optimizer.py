@@ -6,6 +6,7 @@
 - 单个优化任务在一个 worker 内串行执行; matrix_native 策略共享一份 MarketDataMatrix。
 - 支持进度回调 (第 i/N 组完成) 与取消。
 """
+
 from __future__ import annotations
 
 import itertools
@@ -14,7 +15,11 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import date
-from typing import Protocol
+from typing import Any, Protocol, cast
+
+# 主目标白名单 (P4 收敛): 与 guards.PRIMARY_OBJECTIVES 同源。退化目标 (胜率/
+# 持仓天数/交易数) 交易少时可被运气推到极端, 不得作排名主目标 —— 见 docs/robust-optimizer-plan.md。
+from app.backtest.guards import PRIMARY_OBJECTIVES as VALID_OBJECTIVES
 
 logger = logging.getLogger(__name__)
 
@@ -26,29 +31,20 @@ GRID_MAX_COMBINATIONS = 2000
 _MINIMIZE_OBJECTIVES = {"avg_holding_days"}
 
 # 可选优化目标 (须为 stats 中存在且数值可比的字段)。
-# 主目标白名单 (P4 收敛): 与 guards.PRIMARY_OBJECTIVES 同源。退化目标 (胜率/
-# 持仓天数/交易数) 交易少时可被运气推到极端, 不得作排名主目标 —— 见 docs/robust-optimizer-plan.md。
-from app.backtest.guards import PRIMARY_OBJECTIVES as VALID_OBJECTIVES  # noqa: F401
 
 
-def _candidates_for(param_id: str, spec, pmeta: dict) -> list:
-    """从 grid spec 解析某参数的候选值列表并逐个校验。
-
-    spec 支持三种写法:
-      - list: 显式候选值 [v1, v2, ...]
-      - {"values": [...]}: 显式候选值
-      - {"min", "max", "step"}: 数值型按步长展开 (含端点)
-    """
+def _raw_candidates(param_id: str, spec, pmeta: dict) -> list:
+    """按 grid spec 三种写法解析原始候选值 (未校验/未归一化)。"""
     p_type = pmeta["type"]
-
-    # 解析原始候选值
     if isinstance(spec, list):
-        raw = spec
-    elif isinstance(spec, dict) and "values" in spec:
-        raw = spec["values"]
-    elif isinstance(spec, dict):
+        return spec
+    if isinstance(spec, dict) and "values" in spec:
+        return spec["values"]
+    if isinstance(spec, dict):
         if p_type not in ("float", "int"):
-            raise ValueError(f"参数 '{param_id}' 为 {p_type} 型, 不支持 min/max/step 展开, 请给候选值列表")
+            raise ValueError(
+                f"参数 '{param_id}' 为 {p_type} 型, 不支持 min/max/step 展开, 请给候选值列表"
+            )
         step = spec.get("step") or pmeta.get("step")
         if step is None or float(step) <= 0:
             raise ValueError(f"参数 '{param_id}' 的 step 必须为正数")
@@ -61,34 +57,45 @@ def _candidates_for(param_id: str, spec, pmeta: dict) -> list:
         # 步数向下取整: (hi-lo) 不是 step 整数倍时, 四舍五入会多造一个越过 hi 的候选
         # (1~20 步长 7 → 22), 用户填的上限反而被越界校验拒绝。1e-9 容差保住整除端点。
         n_steps = int((hi - lo) / step + 1e-9)
-        raw = [round(lo + i * step, 10) for i in range(n_steps + 1)]
-    else:
-        raise ValueError(f"参数 '{param_id}' 的网格 spec 必须是列表或 {{min,max,step}} 字典")
+        return [round(lo + i * step, 10) for i in range(n_steps + 1)]
+    raise ValueError(f"参数 '{param_id}' 的网格 spec 必须是列表或 {{min,max,step}} 字典")
 
+
+def _normalized_value(param_id: str, val, p_type: str, pmeta: dict):
+    """逐值校验并按参数类型归一化。"""
+    if p_type in ("float", "int"):
+        try:
+            num = float(val)
+        except (TypeError, ValueError):
+            raise ValueError(f"参数 '{param_id}' 的候选值 {val!r} 不是数字") from None
+        if pmeta.get("min") is not None and num < float(pmeta["min"]) - 1e-9:
+            raise ValueError(f"参数 '{param_id}' 的候选值 {val} 超出范围 (< min {pmeta['min']})")
+        if pmeta.get("max") is not None and num > float(pmeta["max"]) + 1e-9:
+            raise ValueError(f"参数 '{param_id}' 的候选值 {val} 超出范围 (> max {pmeta['max']})")
+        return round(num) if p_type == "int" else num
+    if p_type == "bool":
+        return bool(val)
+    if p_type == "select" and val not in pmeta.get("options", []):
+        raise ValueError(
+            f"参数 '{param_id}' 的候选值 {val!r} 不在 options {pmeta.get('options')} 中"
+        )
+    return val
+
+
+def _candidates_for(param_id: str, spec, pmeta: dict) -> list:
+    """从 grid spec 解析某参数的候选值列表并逐个校验。
+
+    spec 支持三种写法:
+      - list: 显式候选值 [v1, v2, ...]
+      - {"values": [...]}: 显式候选值
+      - {"min", "max", "step"}: 数值型按步长展开 (含端点)
+    """
+    p_type = pmeta["type"]
+    raw = _raw_candidates(param_id, spec, pmeta)
     if not raw:
         raise ValueError(f"参数 '{param_id}' 的候选值为空")
 
-    # 逐值校验 + 归一化类型
-    out = []
-    for val in raw:
-        if p_type in ("float", "int"):
-            try:
-                num = float(val)
-            except (TypeError, ValueError):
-                raise ValueError(f"参数 '{param_id}' 的候选值 {val!r} 不是数字") from None
-            if pmeta.get("min") is not None and num < float(pmeta["min"]) - 1e-9:
-                raise ValueError(f"参数 '{param_id}' 的候选值 {val} 超出范围 (< min {pmeta['min']})")
-            if pmeta.get("max") is not None and num > float(pmeta["max"]) + 1e-9:
-                raise ValueError(f"参数 '{param_id}' 的候选值 {val} 超出范围 (> max {pmeta['max']})")
-            out.append(round(num) if p_type == "int" else num)
-        elif p_type == "bool":
-            out.append(bool(val))
-        elif p_type == "select":
-            if val not in pmeta.get("options", []):
-                raise ValueError(f"参数 '{param_id}' 的候选值 {val!r} 不在 options {pmeta.get('options')} 中")
-            out.append(val)
-        else:
-            out.append(val)
+    out = [_normalized_value(param_id, val, p_type, pmeta) for val in raw]
     # 去重保序
     seen = set()
     uniq = []
@@ -132,12 +139,15 @@ def expand_param_grid(params_meta: list[dict], param_grid: dict) -> list[dict]:
     for vals in cands.values():
         total *= len(vals)
     if total > GRID_MAX_COMBINATIONS:
-        raise ValueError(f"参数组合数 {total} 超过上限 {GRID_MAX_COMBINATIONS}, 请增大 step 或缩小范围")
+        raise ValueError(
+            f"参数组合数 {total} 超过上限 {GRID_MAX_COMBINATIONS}, 请增大 step 或缩小范围"
+        )
 
     keys = list(cands.keys())
-    combos = []
-    for values in itertools.product(*(cands[k] for k in keys)):
-        combos.append(dict(zip(keys, values, strict=True)))
+    combos = [
+        dict(zip(keys, values, strict=True))
+        for values in itertools.product(*(cands[k] for k in keys))
+    ]
     return combos
 
 
@@ -187,7 +197,7 @@ class OptimizeConfig:
     objective: str = "sortino"
     direction: str | None = None  # None -> 由 objective 推断
     max_workers: int = 4
-    base_params: dict = field(default_factory=dict)   # 不扫的固定策略参数
+    base_params: dict = field(default_factory=dict)  # 不扫的固定策略参数
     overrides: dict | None = None
     backtest_kwargs: dict = field(default_factory=dict)  # matching/fees/mode/initial_capital 等
     matrix_cache_max_mb: int = 512
@@ -201,6 +211,22 @@ class PhaseRssSampler(Protocol):
     def phase_peak_rss_bytes(self) -> int: ...
 
 
+@dataclass
+class _OptimizeRunState:
+    """一次 optimize 调用中各阶段共享的可变状态 (仅结构性搬运原局部变量)。"""
+
+    results: list[dict] = field(default_factory=list)
+    prepared: Any = None
+    prepared_panel: Any = None
+    prepare_ms: float = 0.0
+    trials_ms: float = 0.0
+    final_backtest_ms: float = 0.0
+    trial_peak_rss_bytes: int | None = None
+    final_backtest_peak_rss_bytes: int | None = None
+    cache_summary: dict | None = None
+    output: dict = field(default_factory=dict)
+
+
 class StrategyOptimizer:
     """在单 worker 内遍历参数组合, 并按目标排序。"""
 
@@ -208,24 +234,286 @@ class StrategyOptimizer:
         self.service = service
         self.strategy_engine = strategy_engine
 
-    def optimize(
+    def _run_one_trial(
+        self,
+        combo: dict,
+        bt_cfg,
+        cfg: OptimizeConfig,
+        direction: str,
+        trial_policy,
+        cancel_event: threading.Event | None,
+        state: _OptimizeRunState,
+    ) -> dict | None:
+        if cancel_event is not None and cancel_event.is_set():
+            return None
+        # 单组异常必须隔离: 一组失败不能丢弃全部已完成结果。
+        run_kwargs: dict = {"cancel_event": cancel_event, "result_policy": trial_policy}
+        if state.prepared is not None:
+            run_kwargs["prepared"] = state.prepared
+        elif state.prepared_panel is not None:
+            run_kwargs["prepared_panel"] = state.prepared_panel
+        try:
+            res = self.service.run(bt_cfg, **run_kwargs)
+        except Exception as e:  # noqa: BLE001 - 隔离单组失败, 记录后继续, 不拖垮整批
+            logger.warning("参数组 %s 回测异常: %r", combo, e)
+            return {
+                "params": combo,
+                "error": repr(e),
+                "objective_raw": None,
+                "_sort": float("-inf"),
+            }
+        if res.error:
+            return {
+                "params": combo,
+                "error": res.error,
+                "objective_raw": None,
+                "_sort": float("-inf"),
+            }
+        if cfg.objective not in res.stats:
+            return {
+                "params": combo,
+                "error": f"回测结果缺少优化目标字段 '{cfg.objective}'",
+                "objective_raw": None,
+                "_sort": float("-inf"),
+            }
+        # _sort: 内部排序键 (统一"越大越好"); objective_raw: 原始展示值 (不受方向取负污染)。
+        objective_started = time.perf_counter()
+        sort_value = objective_value(res.stats, cfg.objective, direction)
+        objective_ms = round((time.perf_counter() - objective_started) * 1000, 3)
+        return {
+            "params": combo,
+            "objective_raw": res.stats.get(cfg.objective),
+            "_sort": sort_value,
+            "stats": res.stats,
+            "objective_evaluation_ms": objective_ms,
+        }
+
+    def _best_raw(self, state: _OptimizeRunState) -> float | None:
+        if not state.results:
+            return None
+        top = max(state.results, key=lambda x: x["_sort"])
+        return None if top["_sort"] == float("-inf") else top.get("objective_raw")
+
+    def _prepare_optimization(
         self,
         cfg: OptimizeConfig,
-        progress_cb=None,
-        cancel_event: threading.Event | None = None,
-        *,
-        rss_sampler: PhaseRssSampler | None = None,
-        prepared_market_data=None,
-    ) -> dict:
+        s,
+        backtest_configs: list,
+        n_total: int,
+        progress_cb,
+        cancel_event: threading.Event | None,
+        prepared_market_data,
+        panel_backend,
+        state: _OptimizeRunState,
+    ) -> None:
+        cancelled_before_prepare = cancel_event is not None and cancel_event.is_set()
+        if (
+            getattr(s, "execution_backend", "polars_expr") == "matrix_native"
+            and not cancelled_before_prepare
+        ):
+            prepare_started = time.perf_counter()
+            prepare_kwargs = {
+                "matrix_cache_max_bytes": int(cfg.matrix_cache_max_mb) * 1024 * 1024,
+            }
+            if prepared_market_data is not None:
+                prepare_kwargs["market_data_override"] = prepared_market_data
+            state.prepared = self.service.prepare_matrix_optimization(
+                backtest_configs,
+                **prepare_kwargs,
+            )
+            state.prepare_ms = round((time.perf_counter() - prepare_started) * 1000, 1)
+            if progress_cb is not None:
+                progress_cb(
+                    {
+                        "type": "optimizer_prepare",
+                        "done": 0,
+                        "total": n_total,
+                        "best_score": None,
+                        "shared_matrix_bytes": state.prepared.market_data.nbytes,
+                        "elapsed_ms": state.prepare_ms,
+                    }
+                )
+        elif (
+            panel_backend(getattr(s, "execution_backend", "polars_expr"))
+            and not cancelled_before_prepare
+        ):
+            # P2a: 默认后端同样 prepare-once — 全组依赖计划取并集, 载一次
+            # 共享特征面板, 每组只跑过滤/评分/模拟。
+            prepare_started = time.perf_counter()
+            state.prepared_panel = self.service.prepare_panel_optimization(backtest_configs)
+            state.prepare_ms = round((time.perf_counter() - prepare_started) * 1000, 1)
+            if progress_cb is not None:
+                progress_cb(
+                    {
+                        "type": "optimizer_prepare",
+                        "done": 0,
+                        "total": n_total,
+                        "best_score": None,
+                        "shared_panel_bytes": state.prepared_panel.panel.estimated_size(),
+                        "elapsed_ms": state.prepare_ms,
+                    }
+                )
+
+    def _run_trials(
+        self,
+        combos: list,
+        backtest_configs: list,
+        cfg: OptimizeConfig,
+        direction: str,
+        cancel_event: threading.Event | None,
+        progress_cb,
+        rss_sampler: PhaseRssSampler | None,
+        trial_policy,
+        state: _OptimizeRunState,
+    ) -> list[dict]:
+        trials_started = time.perf_counter()
+        if rss_sampler is not None:
+            rss_sampler.reset_phase()
+        for done, (combo, bt_cfg) in enumerate(
+            zip(combos, backtest_configs, strict=True),
+            start=1,
+        ):
+            r = self._run_one_trial(
+                combo, bt_cfg, cfg, direction, trial_policy, cancel_event, state
+            )
+            if r is not None:
+                state.results.append(r)
+            if progress_cb is not None:
+                br = self._best_raw(state)
+                progress_cb(
+                    {
+                        "type": "optimizer_progress",
+                        "done": done,
+                        "total": len(combos),
+                        "best_score": round(br, 4) if br is not None else None,
+                    }
+                )
+            if cancel_event is not None and cancel_event.is_set():
+                break
+        state.trials_ms = round((time.perf_counter() - trials_started) * 1000, 1)
+        if rss_sampler is not None:
+            state.trial_peak_rss_bytes = rss_sampler.phase_peak_rss_bytes()
+        ranked = sorted(state.results, key=lambda x: x["_sort"], reverse=True)
+        for i, result_row in enumerate(ranked):
+            result_row["rank"] = i + 1
+            result_row.pop("_sort", None)
+        return ranked
+
+    def _finalize_best(
+        self,
+        cfg: OptimizeConfig,
+        ranked: list[dict],
+        n_total: int,
+        cancel_event: threading.Event | None,
+        progress_cb,
+        rss_sampler: PhaseRssSampler | None,
+        strategy_backtest_config,
+        trial_policy,
+        state: _OptimizeRunState,
+    ):
+        best = ranked[0] if ranked and ranked[0].get("objective_raw") is not None else None
+        best_raw = best["objective_raw"] if best else None
+        best_backtest = None
+        if best is not None and not (cancel_event is not None and cancel_event.is_set()):
+            if progress_cb is not None:
+                progress_cb(
+                    {
+                        "type": "optimizer_finalize",
+                        "done": len(state.results),
+                        "total": n_total,
+                        "best_score": round(best_raw, 4) if best_raw is not None else None,
+                    }
+                )
+            best_config = strategy_backtest_config(
+                strategy_id=cfg.strategy_id,
+                symbols=cfg.symbols,
+                start=cfg.start,
+                end=cfg.end,
+                params={**cfg.base_params, **best["params"]},
+                overrides=cfg.overrides,
+                **cfg.backtest_kwargs,
+            )
+            final_started = time.perf_counter()
+            if rss_sampler is not None:
+                rss_sampler.reset_phase()
+            final_run_kwargs: dict = {"cancel_event": cancel_event}
+            if state.prepared is not None:
+                final_run_kwargs["prepared"] = state.prepared
+            elif state.prepared_panel is not None:
+                final_run_kwargs["prepared_panel"] = state.prepared_panel
+            final_result = self.service.run(best_config, **final_run_kwargs)
+            state.final_backtest_ms = round((time.perf_counter() - final_started) * 1000, 1)
+            if rss_sampler is not None:
+                state.final_backtest_peak_rss_bytes = rss_sampler.phase_peak_rss_bytes()
+            best_backtest = (
+                asdict(cast(Any, final_result))
+                if is_dataclass(final_result)
+                else dict(final_result)
+            )
+        return best, best_raw, best_backtest
+
+    def _build_output(
+        self,
+        cfg: OptimizeConfig,
+        direction: str,
+        n_total: int,
+        ranked: list[dict],
+        best,
+        best_raw,
+        best_backtest,
+        state: _OptimizeRunState,
+    ) -> None:
+        trials_per_second = (
+            round(len(state.results) / (state.trials_ms / 1000.0), 4)
+            if state.trials_ms > 0
+            else 0.0
+        )
+        state.output = {
+            "objective": cfg.objective,
+            "direction": direction,
+            "n_combinations": n_total,
+            "n_completed": len(state.results),
+            "best_params": best["params"] if best else None,
+            "best_score": round(best_raw, 4) if best_raw is not None else None,
+            "best_backtest": best_backtest,
+            "results": ranked,
+            "requested_max_workers": int(cfg.max_workers),
+            "effective_workers": 1,
+            "shared_market_data": state.prepared is not None,
+            "shared_market_data_bytes": state.prepared.market_data.nbytes
+            if state.prepared is not None
+            else 0,
+            "shared_panel": state.prepared_panel is not None,
+            "shared_panel_bytes": state.prepared_panel.panel.estimated_size()
+            if state.prepared_panel is not None
+            else 0,
+            "prepare_ms": state.prepare_ms,
+            "timing_ms": {
+                "prepare": state.prepare_ms,
+                "trials": state.trials_ms,
+                "best_backtest": state.final_backtest_ms,
+            },
+            "performance": {
+                "mode": "serial",
+                "trials_per_second": trials_per_second,
+                "trial_peak_rss_bytes": state.trial_peak_rss_bytes,
+                "best_backtest_peak_rss_bytes": state.final_backtest_peak_rss_bytes,
+                "parallel_evaluated": False,
+            },
+        }
+
+    def _setup_optimize(self, cfg: OptimizeConfig):
+        """校验输入并把网格展开为 backtest 配置 (原 optimize 前置段落)。"""
         from app.backtest.strategy import (
             BacktestResultPolicy,
             StrategyBacktestConfig,
             _panel_backend,
         )
 
-        t0 = time.perf_counter()
         if cfg.objective not in VALID_OBJECTIVES:
-            raise ValueError(f"不支持的优化目标 '{cfg.objective}', 可选: {sorted(VALID_OBJECTIVES)}")
+            raise ValueError(
+                f"不支持的优化目标 '{cfg.objective}', 可选: {sorted(VALID_OBJECTIVES)}"
+            )
         direction = cfg.direction or default_direction(cfg.objective)
         _validate_backtest_kwargs(cfg.backtest_kwargs)
         if int(cfg.matrix_cache_max_mb) <= 0:
@@ -234,9 +522,6 @@ class StrategyOptimizer:
         s = self.strategy_engine.get(cfg.strategy_id)  # 可能抛 ValueError
         params_meta = s.meta.get("params", [])
         combos = expand_param_grid(params_meta, cfg.param_grid)
-        n_total = len(combos)
-
-        results: list[dict] = []
         backtest_configs = [
             StrategyBacktestConfig(
                 strategy_id=cfg.strategy_id,
@@ -249,215 +534,95 @@ class StrategyOptimizer:
             )
             for combo in combos
         ]
+        return (
+            direction,
+            s,
+            combos,
+            len(combos),
+            backtest_configs,
+            StrategyBacktestConfig,
+            BacktestResultPolicy,
+            _panel_backend,
+        )
 
-        prepared = None
-        prepared_panel = None
-        prepare_ms = 0.0
-        trials_ms = 0.0
-        final_backtest_ms = 0.0
-        trial_peak_rss_bytes = None
-        final_backtest_peak_rss_bytes = None
-        cache_summary = None
-        output: dict = {}
-        trial_policy = BacktestResultPolicy.optimizer_trial(cfg.objective)
-
-        def _run_one(combo: dict, bt_cfg: StrategyBacktestConfig) -> dict | None:
-            if cancel_event is not None and cancel_event.is_set():
-                return None
-            # 单组异常必须隔离: 一组失败不能丢弃全部已完成结果。
-            run_kwargs: dict = {"cancel_event": cancel_event, "result_policy": trial_policy}
-            if prepared is not None:
-                run_kwargs["prepared"] = prepared
-            elif prepared_panel is not None:
-                run_kwargs["prepared_panel"] = prepared_panel
+    def _release_prepared(self, state: _OptimizeRunState) -> None:
+        """共享矩阵/面板的生命周期终点 (原 finally 段落)。"""
+        if state.prepared is not None:
             try:
-                res = self.service.run(bt_cfg, **run_kwargs)
-            except Exception as e:  # 隔离单组失败, 记录后继续, 不拖垮整批
-                logger.warning("参数组 %s 回测异常: %r", combo, e)
-                return {"params": combo, "error": repr(e), "objective_raw": None, "_sort": float("-inf")}
-            if res.error:
-                return {"params": combo, "error": res.error, "objective_raw": None, "_sort": float("-inf")}
-            if cfg.objective not in res.stats:
-                return {
-                    "params": combo,
-                    "error": f"回测结果缺少优化目标字段 '{cfg.objective}'",
-                    "objective_raw": None,
-                    "_sort": float("-inf"),
-                }
-            # _sort: 内部排序键 (统一"越大越好"); objective_raw: 原始展示值 (不受方向取负污染)。
-            objective_started = time.perf_counter()
-            sort_value = objective_value(res.stats, cfg.objective, direction)
-            objective_ms = round((time.perf_counter() - objective_started) * 1000, 3)
-            return {
-                "params": combo,
-                "objective_raw": res.stats.get(cfg.objective),
-                "_sort": sort_value,
-                "stats": res.stats,
-                "objective_evaluation_ms": objective_ms,
-            }
+                state.cache_summary = state.prepared.compute_cache.snapshot()
+            finally:
+                state.prepared.compute_cache.close()
 
-        def _best_raw() -> float | None:
-            if not results:
-                return None
-            top = max(results, key=lambda x: x["_sort"])
-            return None if top["_sort"] == float("-inf") else top.get("objective_raw")
+    def _finalize_output(self, state: _OptimizeRunState, t0: float) -> dict:
+        """补齐缓存摘要与耗时字段 (原返回前段落)。"""
+        if state.cache_summary is not None:
+            state.cache_summary["released"] = True
+            state.cache_summary["current_bytes_after_close"] = 0
+            state.output["matrix_compute_cache"] = state.cache_summary
+        state.output["elapsed_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+        state.output["timing_ms"]["total"] = state.output["elapsed_ms"]
+        return state.output
+
+    def optimize(
+        self,
+        cfg: OptimizeConfig,
+        progress_cb=None,
+        cancel_event: threading.Event | None = None,
+        *,
+        rss_sampler: PhaseRssSampler | None = None,
+        prepared_market_data=None,
+    ) -> dict:
+        t0 = time.perf_counter()
+        (
+            direction,
+            s,
+            combos,
+            n_total,
+            backtest_configs,
+            strategy_backtest_config,
+            backtest_result_policy,
+            panel_backend,
+        ) = self._setup_optimize(cfg)
+        state = _OptimizeRunState()
+        trial_policy = backtest_result_policy.optimizer_trial(cfg.objective)
 
         try:
-            cancelled_before_prepare = cancel_event is not None and cancel_event.is_set()
-            if (
-                getattr(s, "execution_backend", "polars_expr") == "matrix_native"
-                and not cancelled_before_prepare
-            ):
-                prepare_started = time.perf_counter()
-                prepare_kwargs = {
-                    "matrix_cache_max_bytes": int(cfg.matrix_cache_max_mb) * 1024 * 1024,
-                }
-                if prepared_market_data is not None:
-                    prepare_kwargs["market_data_override"] = prepared_market_data
-                prepared = self.service.prepare_matrix_optimization(
-                    backtest_configs,
-                    **prepare_kwargs,
-                )
-                prepare_ms = round((time.perf_counter() - prepare_started) * 1000, 1)
-                if progress_cb is not None:
-                    progress_cb({
-                        "type": "optimizer_prepare",
-                        "done": 0,
-                        "total": n_total,
-                        "best_score": None,
-                        "shared_matrix_bytes": prepared.market_data.nbytes,
-                        "elapsed_ms": prepare_ms,
-                    })
-            elif (
-                _panel_backend(getattr(s, "execution_backend", "polars_expr"))
-                and not cancelled_before_prepare
-            ):
-                # P2a: 默认后端同样 prepare-once — 全组依赖计划取并集, 载一次
-                # 共享特征面板, 每组只跑过滤/评分/模拟。
-                prepare_started = time.perf_counter()
-                prepared_panel = self.service.prepare_panel_optimization(backtest_configs)
-                prepare_ms = round((time.perf_counter() - prepare_started) * 1000, 1)
-                if progress_cb is not None:
-                    progress_cb({
-                        "type": "optimizer_prepare",
-                        "done": 0,
-                        "total": n_total,
-                        "best_score": None,
-                        "shared_panel_bytes": prepared_panel.panel.estimated_size(),
-                        "elapsed_ms": prepare_ms,
-                    })
-
-            trials_started = time.perf_counter()
-            if rss_sampler is not None:
-                rss_sampler.reset_phase()
-            for done, (combo, bt_cfg) in enumerate(
-                zip(combos, backtest_configs, strict=True),
-                start=1,
-            ):
-                r = _run_one(combo, bt_cfg)
-                if r is not None:
-                    results.append(r)
-                if progress_cb is not None:
-                    br = _best_raw()
-                    progress_cb({
-                        "type": "optimizer_progress",
-                        "done": done,
-                        "total": n_total,
-                        "best_score": round(br, 4) if br is not None else None,
-                    })
-                if cancel_event is not None and cancel_event.is_set():
-                    break
-            trials_ms = round((time.perf_counter() - trials_started) * 1000, 1)
-            if rss_sampler is not None:
-                trial_peak_rss_bytes = rss_sampler.phase_peak_rss_bytes()
-
-            ranked = sorted(results, key=lambda x: x["_sort"], reverse=True)
-            for i, result_row in enumerate(ranked):
-                result_row["rank"] = i + 1
-                result_row.pop("_sort", None)
-
-            best = ranked[0] if ranked and ranked[0].get("objective_raw") is not None else None
-            best_raw = best["objective_raw"] if best else None
-            best_backtest = None
-            if best is not None and not (cancel_event is not None and cancel_event.is_set()):
-                if progress_cb is not None:
-                    progress_cb({
-                        "type": "optimizer_finalize",
-                        "done": len(results),
-                        "total": n_total,
-                        "best_score": round(best_raw, 4) if best_raw is not None else None,
-                    })
-                best_config = StrategyBacktestConfig(
-                    strategy_id=cfg.strategy_id,
-                    symbols=cfg.symbols,
-                    start=cfg.start,
-                    end=cfg.end,
-                    params={**cfg.base_params, **best["params"]},
-                    overrides=cfg.overrides,
-                    **cfg.backtest_kwargs,
-                )
-                final_started = time.perf_counter()
-                if rss_sampler is not None:
-                    rss_sampler.reset_phase()
-                final_run_kwargs: dict = {"cancel_event": cancel_event}
-                if prepared is not None:
-                    final_run_kwargs["prepared"] = prepared
-                elif prepared_panel is not None:
-                    final_run_kwargs["prepared_panel"] = prepared_panel
-                final_result = self.service.run(
-                    best_config,
-                    **final_run_kwargs,
-                )
-                final_backtest_ms = round((time.perf_counter() - final_started) * 1000, 1)
-                if rss_sampler is not None:
-                    final_backtest_peak_rss_bytes = rss_sampler.phase_peak_rss_bytes()
-                best_backtest = asdict(final_result) if is_dataclass(final_result) else dict(final_result)
-
-            trials_per_second = (
-                round(len(results) / (trials_ms / 1000.0), 4)
-                if trials_ms > 0
-                else 0.0
+            self._prepare_optimization(
+                cfg,
+                s,
+                backtest_configs,
+                n_total,
+                progress_cb,
+                cancel_event,
+                prepared_market_data,
+                panel_backend,
+                state,
             )
-            output = {
-                "objective": cfg.objective,
-                "direction": direction,
-                "n_combinations": n_total,
-                "n_completed": len(results),
-                "best_params": best["params"] if best else None,
-                "best_score": round(best_raw, 4) if best_raw is not None else None,
-                "best_backtest": best_backtest,
-                "results": ranked,
-                "requested_max_workers": int(cfg.max_workers),
-                "effective_workers": 1,
-                "shared_market_data": prepared is not None,
-                "shared_market_data_bytes": prepared.market_data.nbytes if prepared is not None else 0,
-                "shared_panel": prepared_panel is not None,
-                "shared_panel_bytes": prepared_panel.panel.estimated_size() if prepared_panel is not None else 0,
-                "prepare_ms": prepare_ms,
-                "timing_ms": {
-                    "prepare": prepare_ms,
-                    "trials": trials_ms,
-                    "best_backtest": final_backtest_ms,
-                },
-                "performance": {
-                    "mode": "serial",
-                    "trials_per_second": trials_per_second,
-                    "trial_peak_rss_bytes": trial_peak_rss_bytes,
-                    "best_backtest_peak_rss_bytes": final_backtest_peak_rss_bytes,
-                    "parallel_evaluated": False,
-                },
-            }
+            ranked = self._run_trials(
+                combos,
+                backtest_configs,
+                cfg,
+                direction,
+                cancel_event,
+                progress_cb,
+                rss_sampler,
+                trial_policy,
+                state,
+            )
+            best, best_raw, best_backtest = self._finalize_best(
+                cfg,
+                ranked,
+                n_total,
+                cancel_event,
+                progress_cb,
+                rss_sampler,
+                strategy_backtest_config,
+                trial_policy,
+                state,
+            )
+            self._build_output(
+                cfg, direction, n_total, ranked, best, best_raw, best_backtest, state
+            )
         finally:
-            if prepared is not None:
-                try:
-                    cache_summary = prepared.compute_cache.snapshot()
-                finally:
-                    prepared.compute_cache.close()
-
-        if cache_summary is not None:
-            cache_summary["released"] = True
-            cache_summary["current_bytes_after_close"] = 0
-            output["matrix_compute_cache"] = cache_summary
-        output["elapsed_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-        output["timing_ms"]["total"] = output["elapsed_ms"]
-        return output
+            self._release_prepared(state)
+        return self._finalize_output(state, t0)

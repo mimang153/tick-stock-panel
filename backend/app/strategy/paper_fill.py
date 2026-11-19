@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from app.storage import paper_pg as store
+
 DEFAULT_ACCOUNT_ID = "default"
 
 
@@ -94,19 +96,23 @@ def _fill_check_sellable(data_dir, order, account_id, symbol, qty, day):
 
 
 def _record_fill(data_dir, order, fill, acc, account_id):
-    _rootmod._append_fill(data_dir, fill, account_id)
+    def replay(fills):
+        # 在 account 行锁内以「已提交台账 + 本次 fill」重算。若在事务外用旧台账
+        # 各自重算，两个 worker 并发成交会用各自旧快照互相覆盖现金（账目分叉）。
+        positions, cash = _rootmod.replay_positions(data_dir, fills=fills, account_id=account_id)
+        today = _rootmod.cn_today().isoformat()
+        for pos in positions.values():
+            pos["available_qty"] = _rootmod._available_of(pos, today)
+        return positions, cash
 
     order["status"] = "filled"
     order["filled_at"] = fill["ts"]
     order["fill_price"] = fill["price"]
     order["fees"] = fill["fee"]
-    _rootmod.save_order(data_dir, order, account_id)
 
-    # 现金按台账重放结果定版 (重放是权威, 避免双写不一致)
-    _cash = _rootmod.replay_positions(data_dir, account_id=account_id)[1]
-    acc["cash"] = _cash  # type: ignore[index]
-    _rootmod.save_account(data_dir, acc, account_id)  # type: ignore[arg-type]
-    _rootmod._materialize(data_dir, account_id)
+    acc["cash"] = store.record_fill_transaction(  # type: ignore[index]
+        account_id, order, fill, replay_fn=replay
+    )
 
 
 def _append_fill_alert(data_dir, symbol, side, qty, price, fee, account_id, acc):
@@ -237,14 +243,22 @@ def day_fill_events(data_dir: Path, day: str, account_id: str = DEFAULT_ACCOUNT_
 def _fill_event(fill: dict, account_id: str) -> dict:
     """成交台账行 → 推送事件。字段对齐监控告警 (AlertEvent), 供 SSE toast /
     语音播报 / 系统通知 / alert_store 留痕 / Webhook 复用, 前端无需新管道。
-    ts 用 fill.seq (毫秒), 与 alert_store 的 ts 口径一致; 文案用中文可读措辞。
+    ts 取 fill.ts 的毫秒时间戳（PG 台账 seq 是账户内递增序号，不是时间戳）;
+    文案用中文可读措辞。
     """
     side_label = "买入" if fill["side"] == "buy" else "卖出"
+    try:
+        ts = datetime.fromisoformat(str(fill["ts"]))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=_rootmod.CN_TZ)
+        ts_ms = int(ts.timestamp() * 1000)
+    except (KeyError, TypeError, ValueError):
+        ts_ms = int(fill.get("seq", 0))
     return {
         "source": "paper",
         "type": "fill",
         "severity": "info",
-        "ts": int(fill["seq"]),
+        "ts": ts_ms,
         "symbol": fill["symbol"],
         "side": fill["side"],
         "qty": fill["qty"],

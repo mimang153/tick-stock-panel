@@ -4,6 +4,7 @@
 关闭以恢复旧版非模态体验 (边看行情边问)。这里锁住: 默认值、读写回环、
 独立保存不覆盖其它偏好、GET /preferences 可见。
 """
+
 from __future__ import annotations
 
 import pytest

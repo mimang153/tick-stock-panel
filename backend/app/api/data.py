@@ -255,13 +255,16 @@ def _safe_aggregate_daily(repo, view: str = "kline_daily") -> dict | None:
     从分区目录名获取日期范围和交易日数，不读任何 parquet。
     标的数从 instruments 小表获取（~5000行，毫秒级）。
     """
-    daily_dir = repo.store.data_dir / "kline_daily"
-    if not daily_dir.exists():
-        return None
-    dates: list[str] = []
-    for d in daily_dir.iterdir():
-        if d.is_dir() and d.name.startswith("date="):
-            dates.append(d.name[5:])  # noqa: PERF401 - PERF401: 循环内含多行处理/异常, 改写推导式损可读性
+    store = _ck_store(repo)
+    if store is not None:
+        dates = [d.isoformat() for d in store.list_daily_dates(view)]
+    else:
+        daily_dir = repo.store.data_dir / view
+        if not daily_dir.exists():
+            return None
+        dates = [
+            d.name[5:] for d in daily_dir.iterdir() if d.is_dir() and d.name.startswith("date=")
+        ]
     if not dates:
         return None
     dates.sort()
@@ -291,14 +294,16 @@ def _safe_aggregate_enriched(repo) -> dict | None:
         with contextlib.suppress(Exception):
             fields = len(store.table_columns("kline_daily_enriched"))
 
-    # 日期范围：从分区目录名获取，不扫数据
-    enriched_dir = repo.store.data_dir / "kline_daily_enriched"
-    if not enriched_dir.exists():
-        return None
-    dates: list[str] = []
-    for d in enriched_dir.iterdir():
-        if d.is_dir() and d.name.startswith("date="):
-            dates.append(d.name[5:])  # noqa: PERF401 - PERF401: 循环内含多行处理/异常, 改写推导式损可读性
+    # 日期范围：优先 CK 日期列表，无 storage 时回退本地分区目录
+    if store is not None:
+        dates = [d.isoformat() for d in store.list_daily_dates("kline_daily_enriched")]
+    else:
+        enriched_dir = repo.store.data_dir / "kline_daily_enriched"
+        if not enriched_dir.exists():
+            return None
+        dates = [
+            d.name[5:] for d in enriched_dir.iterdir() if d.is_dir() and d.name.startswith("date=")
+        ]
     if not dates:
         return None
     dates.sort()

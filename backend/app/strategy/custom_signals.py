@@ -13,11 +13,13 @@
   - 字段白名单 + 固定运算符集，杜绝任意表达式注入。
   - 第一版只支持 AND（多条件同时满足）。
 """
+
 from __future__ import annotations
 
 import logging
 import re
 from pathlib import Path
+from typing import cast
 
 import polars as pl
 
@@ -26,7 +28,7 @@ from app.definitions import DefinitionKind, JsonDefinitionStore, register_kind
 logger = logging.getLogger(__name__)
 
 # ── 常量 ────────────────────────────────────────────────
-PREFIX = "csg_"                       # 自定义信号列名前缀
+PREFIX = "csg_"  # 自定义信号列名前缀
 ID_RE = re.compile(r"^[a-z0-9_]{1,40}$")
 OPS = {">", ">=", "<", "<=", "==", "!="}
 # string 扩展字段 (概念/行业归属等) 的运算符: contains 为字面量包含
@@ -38,42 +40,81 @@ _MAX_STR_RIGHT = 64
 # 与 ENRICHED_COLUMNS 的数值列保持一致，排除 symbol/date/name 等非数值列。
 # raw_* 为存储列(未复权原始价); limit_*_price 为涨跌停判定价运行时列
 # (compute_limit_signals 产出, 已含 0.005 交易所容差)。
-ALLOWED_FIELDS: frozenset[str] = frozenset({
-    # 行情
-    "open", "high", "low", "close", "volume", "amount", "turnover_rate",
-    "consecutive_limit_ups", "consecutive_limit_downs",
-    # 原始价 (涨跌停类信号判定用)
-    "raw_close", "raw_high", "raw_low",
-    # 涨跌停判定价 (运行时列: 生效价∓0.005 容差)
-    "limit_up_price", "limit_down_price",
-    # 基础
-    "prev_close", "change_pct", "change_amount", "amplitude",
-    # 均线 / 指数均线
-    "ma5", "ma10", "ma20", "ma30", "ma60",
-    "ema5", "ema10", "ema20", "ema30", "ema60",
-    # MACD / BOLL / KDJ / ATR
-    "macd_dif", "macd_dea", "macd_hist",
-    "boll_upper", "boll_lower",
-    "kdj_k", "kdj_d", "kdj_j",
-    "atr_14",
-    # 量价 / 极值 / 动量 / 波动率 / RSI
-    "vol_ma5", "vol_ma10", "vol_ratio_5d",
-    "high_60d", "low_60d",
-    "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
-    "annual_vol_20d",
-    "rsi_6", "rsi_14", "rsi_24",
-    # 异动偏离 (交易所异动规则口径, 运行时列)
-    "deviate_3d", "deviate_10d", "deviate_30d",
-})
+ALLOWED_FIELDS: frozenset[str] = frozenset(
+    {
+        # 行情
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "turnover_rate",
+        "consecutive_limit_ups",
+        "consecutive_limit_downs",
+        # 原始价 (涨跌停类信号判定用)
+        "raw_close",
+        "raw_high",
+        "raw_low",
+        # 涨跌停判定价 (运行时列: 生效价∓0.005 容差)
+        "limit_up_price",
+        "limit_down_price",
+        # 基础
+        "prev_close",
+        "change_pct",
+        "change_amount",
+        "amplitude",
+        # 均线 / 指数均线
+        "ma5",
+        "ma10",
+        "ma20",
+        "ma30",
+        "ma60",
+        "ema5",
+        "ema10",
+        "ema20",
+        "ema30",
+        "ema60",
+        # MACD / BOLL / KDJ / ATR
+        "macd_dif",
+        "macd_dea",
+        "macd_hist",
+        "boll_upper",
+        "boll_lower",
+        "kdj_k",
+        "kdj_d",
+        "kdj_j",
+        "atr_14",
+        # 量价 / 极值 / 动量 / 波动率 / RSI
+        "vol_ma5",
+        "vol_ma10",
+        "vol_ratio_5d",
+        "high_60d",
+        "low_60d",
+        "momentum_5d",
+        "momentum_10d",
+        "momentum_20d",
+        "momentum_30d",
+        "momentum_60d",
+        "annual_vol_20d",
+        "rsi_6",
+        "rsi_14",
+        "rsi_24",
+        # 异动偏离 (交易所异动规则口径, 运行时列)
+        "deviate_3d",
+        "deviate_10d",
+        "deviate_30d",
+    }
+)
 
 # 运算符 → Polars 表达式构造器（输入 col_expr, value）
 _OP_BUILDERS = {
-    ">":   lambda c, v: c > v,
-    ">=":  lambda c, v: c >= v,
-    "<":   lambda c, v: c < v,
-    "<=":  lambda c, v: c <= v,
-    "==":  lambda c, v: c == v,
-    "!=":  lambda c, v: c != v,
+    ">": lambda c, v: c > v,
+    ">=": lambda c, v: c >= v,
+    "<": lambda c, v: c < v,
+    "<=": lambda c, v: c <= v,
+    "==": lambda c, v: c == v,
+    "!=": lambda c, v: c != v,
     # literal=True: 右值按字面量匹配, 不当正则编译 (用户输入含 .* 等也安全)
     "contains": lambda c, v: c.cast(pl.Utf8).str.contains(v, literal=True),
 }
@@ -85,7 +126,7 @@ def _string_ext_fields() -> frozenset[str]:
         from app.factors.ext_factors import ext_string_fields
 
         return ext_string_fields()
-    except Exception:
+    except Exception:  # noqa: BLE001 - 扩展字段探测失败则按无扩展字段降级
         return frozenset()
 
 
@@ -171,9 +212,9 @@ def _parse_days(c: dict, key: str, i: int) -> int:
     try:
         n = int(raw)
     except (TypeError, ValueError):
-        raise ValueError(f"第 {i+1} 个条件: {key} 必须是整数: {raw!r}")
+        raise ValueError(f"第 {i + 1} 个条件: {key} 必须是整数: {raw!r}") from None
     if n < 0 or n > MAX_DAYS:
-        raise ValueError(f"第 {i+1} 个条件: {key} 必须在 0..{MAX_DAYS} 之间: {n}")
+        raise ValueError(f"第 {i + 1} 个条件: {key} 必须在 0..{MAX_DAYS} 之间: {n}")
     return n
 
 
@@ -198,13 +239,13 @@ def _parse_right(right: str, *, string_mode: bool = False) -> tuple[str, object]
         if len(right) > _MAX_STR_RIGHT:
             raise ValueError(f"字符串右值过长 (≤{_MAX_STR_RIGHT} 字符): {right[:20]}…")
         return ("const_str", right.strip())
-    if isinstance(right, (int, float)):
+    if isinstance(right, int | float):
         return ("const", float(right))
     if not isinstance(right, str):
         raise ValueError(f"非法右值: {right!r}")
     allowed = allowed_fields()
     if right.startswith("field:"):
-        col = right[len("field:"):]
+        col = right[len("field:") :]
         if col not in allowed:
             raise ValueError(f"右值字段不在白名单: {col}")
         return ("field", col)
@@ -219,8 +260,8 @@ def _parse_right(right: str, *, string_mode: bool = False) -> tuple[str, object]
     raise ValueError(f"非法右值（应为 field:xxx 或数字）: {right!r}")
 
 
-def validate(sig: dict) -> None:
-    """校验一个信号定义，非法则抛 ValueError（含中文信息）。"""
+def _validate_signal_meta(sig: dict) -> None:
+    """校验信号层面的 id / column / name / kind / timeframe。"""
     sid = sig.get("id", "")
     if not isinstance(sid, str) or not ID_RE.match(sid):
         raise ValueError(f"信号 id 非法（仅小写字母数字下划线，1-40字符）: {sid!r}")
@@ -235,36 +276,48 @@ def validate(sig: dict) -> None:
         raise ValueError("kind 必须是 entry / exit / both")
     timeframe = sig.get("timeframe", TIMEFRAME_DAILY)
     if timeframe not in (TIMEFRAME_DAILY, TIMEFRAME_INTRADAY):
-        raise ValueError(f"timeframe 必须是 {TIMEFRAME_DAILY} / {TIMEFRAME_INTRADAY}: {timeframe!r}")
+        raise ValueError(
+            f"timeframe 必须是 {TIMEFRAME_DAILY} / {TIMEFRAME_INTRADAY}: {timeframe!r}"
+        )
+
+
+def _validate_condition(c, i: int, string_fields: frozenset[str]) -> None:
+    """校验单条 conditions，非法抛 ValueError。"""
+    if not isinstance(c, dict):
+        raise ValueError(f"第 {i + 1} 个条件格式错误")
+    left = c.get("left", "")
+    if left not in allowed_fields():
+        raise ValueError(f"第 {i + 1} 个条件: 字段 {left!r} 不在白名单")
+    is_str = left in string_fields
+    if is_str:
+        if c.get("op") not in STRING_OPS:
+            raise ValueError(
+                f"第 {i + 1} 个条件: 字符串字段 {left!r} 仅支持 "
+                f"{'/'.join(sorted(STRING_OPS))} 运算符"
+            )
+    elif c.get("op") == "contains":
+        raise ValueError(f"第 {i + 1} 个条件: contains 仅用于字符串扩展字段")
+    elif c.get("op") not in OPS:
+        raise ValueError(f"第 {i + 1} 个条件: 运算符 {c.get('op')!r} 非法")
+    _parse_right(cast(str, c.get("right")), string_mode=is_str)  # 会校验右值字段/数字/字符串
+    _parse_days(c, "leftDays", i)  # 左字段偏移
+    _parse_days(c, "rightDays", i)  # 右字段偏移
+
+
+def validate(sig: dict) -> None:
+    """校验一个信号定义，非法则抛 ValueError（含中文信息）。"""
+    _validate_signal_meta(sig)
     conds = sig.get("conditions")
     if not isinstance(conds, list) or len(conds) == 0:
         raise ValueError("conditions 不能为空")
     if len(conds) > 8:
         raise ValueError("conditions 最多 8 条")
-    if timeframe == TIMEFRAME_INTRADAY:
+    if sig.get("timeframe", TIMEFRAME_DAILY) == TIMEFRAME_INTRADAY:
         _validate_intraday(sig)
         return
     string_fields = _string_ext_fields()
     for i, c in enumerate(conds):
-        if not isinstance(c, dict):
-            raise ValueError(f"第 {i+1} 个条件格式错误")
-        left = c.get("left", "")
-        if left not in allowed_fields():
-            raise ValueError(f"第 {i+1} 个条件: 字段 {left!r} 不在白名单")
-        is_str = left in string_fields
-        if is_str:
-            if c.get("op") not in STRING_OPS:
-                raise ValueError(
-                    f"第 {i+1} 个条件: 字符串字段 {left!r} 仅支持 "
-                    f"{'/'.join(sorted(STRING_OPS))} 运算符"
-                )
-        elif c.get("op") == "contains":
-            raise ValueError(f"第 {i+1} 个条件: contains 仅用于字符串扩展字段")
-        elif c.get("op") not in OPS:
-            raise ValueError(f"第 {i+1} 个条件: 运算符 {c.get('op')!r} 非法")
-        _parse_right(c.get("right"), string_mode=is_str)   # 会校验右值字段/数字/字符串
-        _parse_days(c, "leftDays", i)   # 左字段偏移
-        _parse_days(c, "rightDays", i)  # 右字段偏移
+        _validate_condition(c, i, string_fields)
 
 
 # ── 编译为 Polars 表达式 ─────────────────────────────────
@@ -323,21 +376,21 @@ def validate_overlay_conditions(conditions: object) -> None:
     string_fields = _string_ext_fields()
     for i, c in enumerate(conditions):
         if not isinstance(c, dict):
-            raise ValueError(f"第 {i+1} 个叠加条件格式错误")
+            raise ValueError(f"第 {i + 1} 个叠加条件格式错误")
         left = c.get("left", "")
         if left not in allowed_fields():
-            raise ValueError(f"第 {i+1} 个叠加条件: 字段 {left!r} 不在白名单")
+            raise ValueError(f"第 {i + 1} 个叠加条件: 字段 {left!r} 不在白名单")
         is_str = left in string_fields
         if is_str:
             if c.get("op") not in STRING_OPS:
                 raise ValueError(
-                    f"第 {i+1} 个叠加条件: 字符串字段 {left!r} 仅支持 "
+                    f"第 {i + 1} 个叠加条件: 字符串字段 {left!r} 仅支持 "
                     f"{'/'.join(sorted(STRING_OPS))} 运算符"
                 )
         elif c.get("op") not in OPS:
-            raise ValueError(f"第 {i+1} 个叠加条件: 运算符 {c.get('op')!r} 非法")
-        _parse_right(c.get("right"), string_mode=is_str)
-        _parse_days(c, "leftDays", i)   # 左字段偏移
+            raise ValueError(f"第 {i + 1} 个叠加条件: 运算符 {c.get('op')!r} 非法")
+        _parse_right(cast(str, c.get("right")), string_mode=is_str)
+        _parse_days(c, "leftDays", i)  # 左字段偏移
         _parse_days(c, "rightDays", i)  # 右字段偏移
 
 
@@ -380,7 +433,7 @@ def build_overlay_expr(conditions: list[dict]) -> pl.Expr | None:
         kind, val = _parse_right(c["right"], string_mode=is_str)
         left_days = int(c.get("leftDays", 0) or 0)
         right_days = int(c.get("rightDays", 0) or 0)
-        right_expr = _col(val, right_days) if kind == "field" else val
+        right_expr = _col(cast(str, val), right_days) if kind == "field" else val
         parts.append(_OP_BUILDERS[op](_col(left, left_days), right_expr))
     combined = parts[0]
     for p in parts[1:]:
@@ -400,11 +453,10 @@ def overlay_missing_columns(conditions: list[dict], columns) -> list[str]:
             missing.append(left)
         right = c.get("right")
         if isinstance(right, str) and right.startswith("field:"):
-            col = right[len("field:"):]
+            col = right[len("field:") :]
             if col and col not in have and col not in missing:
                 missing.append(col)
     return missing
-
 
 
 def build_expressions(signals: list[dict], allow_shift: bool = True) -> dict[str, pl.Expr]:
@@ -439,13 +491,13 @@ def build_expressions(signals: list[dict], allow_shift: bool = True) -> dict[str
                 if op == "contains" and not is_str:
                     raise ValueError(f"contains 仅用于字符串扩展字段: {left!r}")
                 kind, val = _parse_right(c["right"], string_mode=is_str)
-                right_expr = _col(val, right_days) if kind == "field" else val
+                right_expr = _col(cast(str, val), right_days) if kind == "field" else val
                 parts.append(_OP_BUILDERS[op](_col(left, left_days), right_expr))
             combined = parts[0]
             for p in parts[1:]:
                 combined = combined & p
             out[col_name] = combined
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - 单个自定义信号编译失败不影响其它信号
             logger.warning("custom signal compile failed %s: %s", sig.get("id"), e)
     return out
 
@@ -470,8 +522,21 @@ def prev_day_fields(signals: list[dict]) -> set[str]:
                 and isinstance(right, str)
                 and right.startswith("field:")
             ):
-                fields.add(right[len("field:"):])
+                fields.add(right[len("field:") :])
     return fields
+
+
+def _check_prev_fields(
+    left: str,
+    left_days: int,
+    right_name: str | None,
+    right_days: int,
+    prev_available: set[str],
+) -> None:
+    """校验偏移 1 的字段已由调用方 join 出 _prev_ 列。"""
+    for name, days in ((left, left_days), (right_name, right_days)):
+        if name is not None and days == 1 and name not in prev_available:
+            raise ValueError(f"当日路径缺少昨日值列: _prev_{name}")
 
 
 def build_expressions_prev(
@@ -484,6 +549,7 @@ def build_expressions_prev(
       (单日快照无法回看多日; 与旧内置行为的差异在于昨日值由 join 提供)。
     - 其余编译逻辑与 build_expressions 完全同源。
     """
+
     def _col_prev(name: str, days: int) -> pl.Expr:
         if days == 0:
             return pl.col(name)
@@ -509,18 +575,20 @@ def build_expressions_prev(
                 is_str = left in string_fields
                 kind, val = _parse_right(c["right"], string_mode=is_str)
                 # 偏移字段须已由调用方 join 出 _prev_ 列
-                for name, days in ((left, left_days), (val if kind == "field" else None, right_days)):
-                    if name is None:
-                        continue
-                    if days == 1 and name not in prev_available:
-                        raise ValueError(f"当日路径缺少昨日值列: _prev_{name}")
-                right_expr = _col_prev(val, right_days) if kind == "field" else val
+                _check_prev_fields(
+                    left,
+                    left_days,
+                    cast(str | None, val) if kind == "field" else None,
+                    right_days,
+                    prev_available,
+                )
+                right_expr = _col_prev(cast(str, val), right_days) if kind == "field" else val
                 parts.append(_OP_BUILDERS[op](_col_prev(left, left_days), right_expr))
             combined = parts[0]
             for p in parts[1:]:
                 combined = combined & p
             out[col_name] = combined
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - 单个当日路径信号编译失败不影响其它信号
             logger.warning("custom signal (today) compile failed %s: %s", sig.get("id"), e)
     return out
 
@@ -569,7 +637,7 @@ def _expr_root_columns(expr: pl.Expr) -> set[str]:
         # Polars 的 meta.root_names() 返回表达式引用的根列名
         names = expr.meta.root_names()
         return set(names)
-    except Exception:
+    except Exception:  # noqa: BLE001 - 信号名探测失败按空集合降级
         return set()
 
 
@@ -597,12 +665,12 @@ def intraday_column_name(signal_id: str) -> str:
 
 def _parse_right_intraday(right: object) -> tuple[str, object]:
     """盘中条件的右值: ('const', float) 或 ('field', 特征名)。"""
-    if isinstance(right, (int, float)):
+    if isinstance(right, int | float):
         return ("const", float(right))
     if not isinstance(right, str):
         raise ValueError(f"非法右值: {right!r}")
     if right.startswith("field:"):
-        col = right[len("field:"):]
+        col = right[len("field:") :]
         if col not in INTRADAY_FEATURES:
             raise ValueError(f"盘中右值字段不在白名单: {col}")
         return ("field", col)
@@ -617,18 +685,20 @@ def _parse_right_intraday(right: object) -> tuple[str, object]:
 
 def _validate_intraday(sig: dict) -> None:
     """校验盘中信号定义, 非法抛 ValueError。"""
-    conds = sig.get("conditions")
+    conds = cast(list, sig.get("conditions"))  # validate() 已确保为非空列表
     for i, c in enumerate(conds):
         if not isinstance(c, dict):
-            raise ValueError(f"第 {i+1} 个条件格式错误")
+            raise ValueError(f"第 {i + 1} 个条件格式错误")
         left = c.get("left", "")
         if left not in INTRADAY_FEATURES:
-            raise ValueError(f"第 {i+1} 个条件: 盘中字段 {left!r} 不在白名单")
+            raise ValueError(f"第 {i + 1} 个条件: 盘中字段 {left!r} 不在白名单")
         if c.get("op") not in INTRADAY_OPS:
-            raise ValueError(f"第 {i+1} 个条件: 运算符 {c.get('op')!r} 非法(盘中额外支持 cross_up/cross_down)")
+            raise ValueError(
+                f"第 {i + 1} 个条件: 运算符 {c.get('op')!r} 非法(盘中额外支持 cross_up/cross_down)"
+            )
         _parse_right_intraday(c.get("right"))
         if int(c.get("leftDays", 0) or 0) or int(c.get("rightDays", 0) or 0):
-            raise ValueError(f"第 {i+1} 个条件: 盘中信号不支持日期偏移(leftDays/rightDays)")
+            raise ValueError(f"第 {i + 1} 个条件: 盘中信号不支持日期偏移(leftDays/rightDays)")
     min_bars = sig.get("min_bars", 0)
     try:
         n = int(min_bars)
@@ -659,7 +729,9 @@ def build_intraday_expressions(signals: list[dict]) -> dict[str, pl.Expr]:
                 if op == "cross_up":
                     # 前一根 bar 未满足 且 当前 bar 满足; 右值为常量时不 shift 字面量
                     if kind == "field":
-                        prev_ok = left.shift(1).over(_EDGE_GROUP) <= pl.col(val).shift(1).over(_EDGE_GROUP)
+                        prev_ok = left.shift(1).over(_EDGE_GROUP) <= pl.col(val).shift(1).over(
+                            _EDGE_GROUP
+                        )
                         cur_ok = left > pl.col(val)
                     else:
                         prev_ok = left.shift(1).over(_EDGE_GROUP) <= val
@@ -667,7 +739,9 @@ def build_intraday_expressions(signals: list[dict]) -> dict[str, pl.Expr]:
                     parts.append(prev_ok & cur_ok)
                 elif op == "cross_down":
                     if kind == "field":
-                        prev_ok = left.shift(1).over(_EDGE_GROUP) >= pl.col(val).shift(1).over(_EDGE_GROUP)
+                        prev_ok = left.shift(1).over(_EDGE_GROUP) >= pl.col(val).shift(1).over(
+                            _EDGE_GROUP
+                        )
                         cur_ok = left < pl.col(val)
                     else:
                         prev_ok = left.shift(1).over(_EDGE_GROUP) >= val
@@ -680,7 +754,7 @@ def build_intraday_expressions(signals: list[dict]) -> dict[str, pl.Expr]:
             for p in parts[1:]:
                 combined = combined & p
             out[intraday_column_name(sig["id"])] = combined
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - 单个盘中信号编译失败不影响其它信号
             logger.warning("intraday signal compile failed %s: %s", sig.get("id"), e)
     return out
 
@@ -695,13 +769,14 @@ def apply_intraday_edges(frame: pl.DataFrame, exprs: dict[str, pl.Expr]) -> pl.D
     if frame.is_empty() or not exprs:
         return frame
     df = frame.with_columns([e.fill_null(False).alias(n) for n, e in exprs.items()])
-    return df.with_columns([
-        (
-            pl.col(n)
-            & ~pl.col(n).shift(1).over(_EDGE_GROUP).fill_null(True)
-        ).cast(pl.Boolean).alias(n)
-        for n in exprs
-    ])
+    return df.with_columns(
+        [
+            (pl.col(n) & ~pl.col(n).shift(1).over(_EDGE_GROUP).fill_null(True))
+            .cast(pl.Boolean)
+            .alias(n)
+            for n in exprs
+        ]
+    )
 
 
 # ── 盘中信号定义加载(带指纹缓存: 引擎/监控高频路径用) ──────────
@@ -719,7 +794,8 @@ def load_intraday_all(data_dir: Path) -> list[dict]:
     if cached is not None and cached[0] == fp:
         return cached[1]
     sigs = [
-        s for s in load_all(data_dir)
+        s
+        for s in load_all(data_dir)
         if s.get("timeframe") == TIMEFRAME_INTRADAY and s.get("enabled") is not False
     ]
     _intraday_cache[data_dir] = (fp, sigs)
@@ -805,10 +881,12 @@ def _definition_dependencies(sig: dict) -> frozenset[str]:
     return frozenset(_expr_root_columns(next(iter(exprs.values()))))
 
 
-register_kind(DefinitionKind(
-    kind="signal",
-    store=_STORE,
-    id_pattern=ID_RE,
-    validate=validate,
-    dependencies=_definition_dependencies,
-))
+register_kind(
+    DefinitionKind(
+        kind="signal",
+        store=_STORE,
+        id_pattern=ID_RE,
+        validate=validate,
+        dependencies=_definition_dependencies,
+    )
+)

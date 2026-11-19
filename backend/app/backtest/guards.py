@@ -8,18 +8,31 @@ from __future__ import annotations
 
 # 可作主目标的指标: 方向语义明确、跨参数组可比、不随交易数退化。
 # max_drawdown / mc_maxdd_* 为负值, 最大化带符号值 = 回撤越小越好。
-PRIMARY_OBJECTIVES: frozenset[str] = frozenset({
-    "sortino", "sharpe", "calmar",
-    "annual_return", "total_return", "profit_factor",
-    "max_drawdown", "mc_maxdd_p50", "mc_maxdd_p95",
-    "avg_pnl", "median_pnl",
-})
+PRIMARY_OBJECTIVES: frozenset[str] = frozenset(
+    {
+        "sortino",
+        "sharpe",
+        "calmar",
+        "annual_return",
+        "total_return",
+        "profit_factor",
+        "max_drawdown",
+        "mc_maxdd_p50",
+        "mc_maxdd_p95",
+        "avg_pnl",
+        "median_pnl",
+    }
+)
 
 # 退化目标: 交易数少时可被运气推到极端 (3 笔全胜 = win_rate 100%), 只作展示列
 # 或约束条件, 不得作主排名目标。
-DEGENERATE_OBJECTIVES: frozenset[str] = frozenset({
-    "win_rate", "avg_holding_days", "n_trades",
-})
+DEGENERATE_OBJECTIVES: frozenset[str] = frozenset(
+    {
+        "win_rate",
+        "avg_holding_days",
+        "n_trades",
+    }
+)
 
 
 def validate_primary_objective(objective: str) -> None:
@@ -39,4 +52,4 @@ def trades_ok(stats: dict, min_trades: int) -> bool:
     if min_trades is None or min_trades <= 0:
         return True
     n = stats.get("n_trades")
-    return isinstance(n, (int, float)) and n >= min_trades
+    return isinstance(n, int | float) and n >= min_trades

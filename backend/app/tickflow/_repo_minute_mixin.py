@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, time
+
 from app.tickflow._repo_mixin_base import _RepoMixinBase
 from app.tickflow.repository import (
     Path,
@@ -23,6 +25,29 @@ class _MinuteMixin(_RepoMixinBase):
     def _minute_glob_for(self, asset_type: str) -> str:
         """按资产类型选择分钟K parquet glob。ETF 分钟数据独立存储于 kline_etf_minute。"""
         return self._etf_minute_glob if asset_type == "etf" else self._minute_glob
+
+    def _read_minute_from_ck(
+        self, asset_type: str, symbols: list[str], start: datetime, end: datetime
+    ) -> pl.DataFrame | None:
+        """CK 优先读取分钟K；无门面或查不到数据时返回 None 走本地兼容路径。"""
+        store = self._ck_store()
+        if store is None:
+            return None
+        table = "kline_etf_minute" if asset_type == "etf" else "kline_minute"
+        try:
+            df = store.read_minute(table, symbols=symbols, start=start, end=end)
+        except Exception as e:  # noqa: BLE001 - 读 CK 失败要降级到本地, 不能让分时图报错
+            logger.warning("CK 分钟K读取失败(%s): %s", table, e)
+            return None
+        if df.is_empty():
+            return None
+        df = df.sort(["symbol", "datetime"])
+        cols = [
+            c
+            for c in ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
+            if c in df.columns
+        ]
+        return df.select(cols)
 
     def _maybe_adjust_minute(self, df: pl.DataFrame, asset_type: str) -> pl.DataFrame:
         """原始基准标记开启时应用读取时复权投影 (services/minute_adjust 三层架构)。
@@ -55,6 +80,14 @@ class _MinuteMixin(_RepoMixinBase):
         该查询在自选分时热路径上被每 tick、每客户端调用, 全树 glob 扫描成本随
         本地分钟历史线性增长; 单日数据按约定完整落在 date= 分区内, 谓词不变。
         """
+        ck = self._read_minute_from_ck(
+            asset_type,
+            [symbol],
+            datetime.combine(trade_date, time.min),
+            datetime.combine(trade_date, time.max),
+        )
+        if ck is not None:
+            return self._maybe_adjust_minute(ck, asset_type)
         try:
             part = self._minute_partition_path(asset_type, trade_date)
             source = part if part is not None else self._minute_glob_for(asset_type)
@@ -81,6 +114,14 @@ class _MinuteMixin(_RepoMixinBase):
         """
         if not symbols:
             return pl.DataFrame()
+        ck = self._read_minute_from_ck(
+            asset_type,
+            symbols,
+            datetime.combine(trade_date, time.min),
+            datetime.combine(trade_date, time.max),
+        )
+        if ck is not None:
+            return self._maybe_adjust_minute(ck, asset_type)
         try:
             part = self._minute_partition_path(asset_type, trade_date)
             source = part if part is not None else self._minute_glob_for(asset_type)
@@ -110,6 +151,14 @@ class _MinuteMixin(_RepoMixinBase):
         """
         if not symbols:
             return pl.DataFrame()
+        ck = self._read_minute_from_ck(
+            asset_type,
+            symbols,
+            datetime.combine(start, time.min),
+            datetime.combine(end, time.max),
+        )
+        if ck is not None:
+            return self._maybe_adjust_minute(ck, asset_type)
         try:
             lf = scan_parquet_compat(self._minute_glob_for(asset_type))
             available = set(lf.collect_schema().names())
@@ -151,6 +200,16 @@ class _MinuteMixin(_RepoMixinBase):
         """
         if not symbols or not dates:
             return pl.DataFrame()
+        ck = self._read_minute_from_ck(
+            asset_type,
+            symbols,
+            datetime.combine(min(dates), time.min),
+            datetime.combine(max(dates), time.max),
+        )
+        if ck is not None:
+            ck = ck.filter(pl.col("datetime").dt.date().is_in(dates))
+            if not ck.is_empty():
+                return self._maybe_adjust_minute(ck, asset_type)
         base = (
             self._etf_minute_glob.rsplit("/", 2)[0]
             if asset_type == "etf"

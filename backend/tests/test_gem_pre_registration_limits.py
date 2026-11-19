@@ -4,6 +4,7 @@
 标量 / Polars / NumPy 三条路径须给出同一结果, 否则 2020 年以前的回测
 会把创业板 10% 涨停误判为未封板。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -44,19 +45,25 @@ def test_polars_and_numpy_gem_limit_before_registration():
     dates = [BEFORE, AFTER]
     symbols = ["300750.SZ", "300001.SZ", "688001.SH", "600001.SH"]
     names = ["宁德时代", "*ST创业", "科创", "主板"]
-    panel = pl.DataFrame({
-        "date": [value for value in dates for _ in symbols],
-        "symbol": symbols * len(dates),
-        "name": names * len(dates),
-    }).with_columns(
-        polars_is_risk_warning_name(pl.col("name")).alias("is_st")
-    ).with_columns(
-        polars_price_limit_pct(pl.col("symbol"), pl.col("date"), pl.col("is_st")).alias("pct")
+    panel = (
+        pl.DataFrame(
+            {
+                "date": [value for value in dates for _ in symbols],
+                "symbol": symbols * len(dates),
+                "name": names * len(dates),
+            }
+        )
+        .with_columns(polars_is_risk_warning_name(pl.col("name")).alias("is_st"))
+        .with_columns(
+            polars_price_limit_pct(pl.col("symbol"), pl.col("date"), pl.col("is_st")).alias("pct")
+        )
     )
-    expected = np.array([
-        [0.10, 0.05, 0.20, 0.10],
-        [0.20, 0.20, 0.20, 0.10],
-    ])
+    expected = np.array(
+        [
+            [0.10, 0.05, 0.20, 0.10],
+            [0.20, 0.20, 0.20, 0.10],
+        ]
+    )
     polars_values = panel["pct"].to_numpy().reshape(len(dates), len(symbols))
     np.testing.assert_allclose(polars_values, expected)
     np.testing.assert_allclose(numpy_price_limit_matrix(dates, symbols, names), expected, rtol=1e-6)
@@ -70,7 +77,12 @@ def test_backtest_lock_matrix_marks_pre_registration_gem_ten_percent_limit_up():
     seen = np.ones(close.shape, dtype=bool)
     nan = np.array([np.nan])
     up, down = _limit_lock_matrices(
-        close, close.copy(), seen, dates, ["300750.SZ"], ["宁德时代"],
+        close,
+        close.copy(),
+        seen,
+        dates,
+        ["300750.SZ"],
+        ["宁德时代"],
         {"limit_up": nan, "limit_down": nan},
         apply_latest_limits=False,
     )
@@ -87,11 +99,18 @@ def test_upgrade_does_not_reuse_pre_reform_matrix_cache(tmp_path, monkeypatch):
     for day, close in zip(dates, [10.0, 11.0], strict=True):
         partition = root / f"date={day.isoformat()}"
         partition.mkdir(parents=True)
-        pl.DataFrame({
-            "symbol": ["300750.SZ"], "date": [day],
-            "open": [close], "high": [close], "low": [close], "close": [close],
-            "raw_close": [close], "volume": [1000.0],
-        }).write_parquet(partition / "part.parquet")
+        pl.DataFrame(
+            {
+                "symbol": ["300750.SZ"],
+                "date": [day],
+                "open": [close],
+                "high": [close],
+                "low": [close],
+                "close": [close],
+                "raw_close": [close],
+                "volume": [1000.0],
+            }
+        ).write_parquet(partition / "part.parquet")
     kwargs = {
         "field_columns": {"raw_close", "price_limit_pct"},
         "instruments": pl.DataFrame({"symbol": ["300750.SZ"], "name": ["宁德时代"]}),

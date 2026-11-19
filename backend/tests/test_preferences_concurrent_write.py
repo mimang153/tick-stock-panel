@@ -6,6 +6,7 @@ preferences.save 的 docstring 记着这个坑: "FastAPI 同步端点跑线程�
 setter —— PUT /api/settings/preferences/quote-interval 与任意另一个偏好 PUT
 同时在飞时, 后者会被前者用旧快照整体覆盖掉。
 """
+
 from __future__ import annotations
 
 import json

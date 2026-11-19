@@ -3,6 +3,7 @@
 检查固定本次输入、参数和预热起点，比较截断/扰动未来后的历史输出；
 它不能证明上游供应商数据本身满足 point-in-time，也不替代样本外验证。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -14,6 +15,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +42,7 @@ def _array_digest(array: np.ndarray) -> str:
     digest.update(str(array.shape).encode())
     # memmap 和非连续视图分块处理，避免为整个回测矩阵再复制一份。
     for start in range(0, len(array), 256):
-        block = np.ascontiguousarray(array[start:start + 256])
+        block = np.ascontiguousarray(array[start : start + 256])
         digest.update(memoryview(block).cast("B"))
     return digest.hexdigest()
 
@@ -49,12 +51,26 @@ def fingerprint_matrix(market: MarketDataMatrix) -> dict:
     fields = {
         name: _array_digest(getattr(market, name))
         for name in (
-            "timestamps", "session_ids", "open", "high", "low", "close", "volume",
-            "tradable", "limit_up_locked", "limit_down_locked",
+            "timestamps",
+            "session_ids",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "tradable",
+            "limit_up_locked",
+            "limit_down_locked",
         )
     }
-    fields.update({f"field:{key}": _array_digest(value) for key, value in sorted(market.fields.items())})
-    identity = {"timestamps": market.timestamp_labels, "symbols": market.symbols, "names": market.names}
+    fields.update(
+        {f"field:{key}": _array_digest(value) for key, value in sorted(market.fields.items())}
+    )
+    identity = {
+        "timestamps": market.timestamp_labels,
+        "symbols": market.symbols,
+        "names": market.names,
+    }
     return {
         "sha256": json_digest({"identity": identity, "fields": fields}),
         "fields": fields,
@@ -114,9 +130,15 @@ def _different(left: np.ndarray, right: np.ndarray) -> np.ndarray:
 def _report(checks: list[dict]) -> dict:
     differences = sum(c.get("differences", 0) for c in checks)
     status = (
-        "error" if any(c["kind"] == "repeat" and c["status"] == "error" for c in checks)
-        else "failed" if differences else "error" if any(c["status"] == "error" for c in checks)
-        else "passed" if any(c.get("compared_values", 0) > 0 for c in checks) else "insufficient"
+        "error"
+        if any(c["kind"] == "repeat" and c["status"] == "error" for c in checks)
+        else "failed"
+        if differences
+        else "error"
+        if any(c["status"] == "error" for c in checks)
+        else "passed"
+        if any(c.get("compared_values", 0) > 0 for c in checks)
+        else "insufficient"
     )
     return {"status": status, "checks": checks, "differences": differences}
 
@@ -126,9 +148,13 @@ def _check(kind: str, cutoff, compare: Callable[[], dict]) -> dict:
         return {"kind": kind, "cutoff": str(cutoff), "status": "completed", **compare()}
     except Exception as exc:  # noqa: BLE001 — 用户策略异常必须转为可见的检查失败。
         return {
-            "kind": kind, "cutoff": str(cutoff), "status": "error",
+            "kind": kind,
+            "cutoff": str(cutoff),
+            "status": "error",
             "error": f"重算未完成（{type(exc).__name__}）",
-            "differences": 0, "compared_values": 0, "examples": [],
+            "differences": 0,
+            "compared_values": 0,
+            "examples": [],
         }
 
 
@@ -138,14 +164,17 @@ def _perturb_matrix(market: MarketDataMatrix, cutoff: int) -> MarketDataMatrix:
             return array
         values = array.copy()
         scale = 1.5 + np.arange(len(values) - cutoff - 1)[:, None] * 0.03
-        future = values[cutoff + 1:]
-        values[cutoff + 1:] = (future * scale + (future == 0)).astype(array.dtype)
+        future = values[cutoff + 1 :]
+        values[cutoff + 1 :] = (future * scale + (future == 0)).astype(array.dtype)
         values.flags.writeable = False
         return values
 
     return replace(
         market,
-        **{name: change(getattr(market, name)) for name in ("open", "high", "low", "close", "volume")},
+        **{
+            name: change(getattr(market, name))
+            for name in ("open", "high", "low", "close", "volume")
+        },
         fields={name: change(value) for name, value in market.fields.items()},
         _valid_bars=None,
     )
@@ -155,13 +184,15 @@ def audit_matrix(
     market: MarketDataMatrix,
     baseline: SignalMatrix,
     evaluate: Callable[[MarketDataMatrix], SignalMatrix],
-    *, start: str, end: str, cancel_event=None,
+    *,
+    start: str,
+    end: str,
+    cancel_event=None,
 ) -> dict:
     candidates = [
-        i for i, label in enumerate(market.timestamp_labels[:-1])
-        if start <= label[:10] <= end
+        i for i, label in enumerate(market.timestamp_labels[:-1]) if start <= label[:10] <= end
     ]
-    checks = []
+    checks: list[dict] = []
 
     def compare(kind, cutoff):
         label = market.timestamp_labels[cutoff]
@@ -174,20 +205,28 @@ def audit_matrix(
         actual = evaluate(data)
         if actual.shape != data.shape:
             raise ValueError("重算信号形状不匹配")
-        rows = np.array([start <= t[:10] <= label[:10] for t in market.timestamp_labels[:cutoff + 1]])
-        count, compared, examples = 0, 0, []
+        rows = np.array(
+            [start <= t[:10] <= label[:10] for t in market.timestamp_labels[: cutoff + 1]]
+        )
+        count, compared = 0, 0
+        examples: list[dict] = []
         for name in ("entry", "exit", "score", "entry_signal_code", "exit_signal_code"):
-            expected = getattr(baseline, name)[:cutoff + 1]
-            observed = getattr(actual, name)[:cutoff + 1]
+            expected = getattr(baseline, name)[: cutoff + 1]
+            observed = getattr(actual, name)[: cutoff + 1]
             diff = _different(expected, observed) & rows[:, None]
             count += int(diff.sum())
             compared += int(rows.sum()) * market.shape[1]
-            for t, a in np.argwhere(diff)[:max(0, _EXAMPLES - len(examples))]:
-                examples.append({
-                    "date": market.timestamp_labels[t], "symbol": market.symbols[a],
-                    "field": name, "baseline": _scalar(expected[t, a]),
-                    "recomputed": _scalar(observed[t, a]), "cutoff": label,
-                })
+            for t, a in np.argwhere(diff)[: max(0, _EXAMPLES - len(examples))]:
+                examples.append(
+                    {
+                        "date": market.timestamp_labels[t],
+                        "symbol": market.symbols[a],
+                        "field": name,
+                        "baseline": _scalar(expected[t, a]),
+                        "recomputed": _scalar(observed[t, a]),
+                        "cutoff": label,
+                    }
+                )
         return {"differences": count, "compared_values": compared, "examples": examples}
 
     for cutoff in _cutoffs(candidates):
@@ -196,11 +235,13 @@ def audit_matrix(
             if cancel_event is not None and cancel_event.is_set():
                 return {**_report(checks), "status": "cancelled"}
 
-            checks.append(_check(kind, label, lambda kind=kind, cutoff=cutoff: compare(kind, cutoff)))
+            checks.append(_check(kind, label, partial(compare, kind, cutoff)))
     if any(check["differences"] for check in checks):
         # 先排除非确定性/带状态策略，避免把随机变化直接解释为未来数据依赖。
         kind = "repeat"
-        cutoff = max(i for i, label in enumerate(market.timestamp_labels) if start <= label[:10] <= end)
+        cutoff = max(
+            i for i, label in enumerate(market.timestamp_labels) if start <= label[:10] <= end
+        )
         label = market.timestamp_labels[cutoff]
         control = _check(kind, label, lambda: compare("repeat", cutoff))
         if control["differences"]:
@@ -211,14 +252,19 @@ def audit_matrix(
 
 def _perturb_frame(frame: pl.DataFrame, time_col: str, cutoff) -> pl.DataFrame:
     future = pl.col(time_col) > cutoff
-    return frame.with_columns([
-        pl.when(future).then(
-            pl.col(name) * (1.5 + pl.col(time_col).rank("dense") * 0.03) + (pl.col(name) == 0)
-        )
-        .otherwise(pl.col(name)).cast(dtype).alias(name)
-        for name, dtype in frame.schema.items()
-        if dtype.is_numeric() and name != time_col
-    ])
+    return frame.with_columns(
+        [
+            pl.when(future)
+            .then(
+                pl.col(name) * (1.5 + pl.col(time_col).rank("dense") * 0.03) + (pl.col(name) == 0)
+            )
+            .otherwise(pl.col(name))
+            .cast(dtype)
+            .alias(name)
+            for name, dtype in frame.schema.items()
+            if dtype.is_numeric() and name != time_col
+        ]
+    )
 
 
 def _compare_frames(baseline, actual, time_col, start, cutoff):
@@ -227,42 +273,66 @@ def _compare_frames(baseline, actual, time_col, start, cutoff):
     left, right = baseline.filter(bounds), actual.filter(bounds)
     if left.select(keys).is_duplicated().any() or right.select(keys).is_duplicated().any():
         raise ValueError("检查输出包含重复时间和标的")
-    names = [name for name, dtype in left.schema.items() if name not in keys and (dtype.is_numeric() or dtype == pl.Boolean)]
+    names = [
+        name
+        for name, dtype in left.schema.items()
+        if name not in keys and (dtype.is_numeric() or dtype == pl.Boolean)
+    ]
     if any(name not in right.columns for name in names):
         raise ValueError("重算输出缺少字段")
     # full join 能发现消失或新增的历史信号，而不只检查两边都存在的行。
     joined = (
-        left.select(*keys, *names).with_columns(pl.lit(True).alias("_present"))
+        left.select(*keys, *names)
+        .with_columns(pl.lit(True).alias("_present"))
         .join(
             right.select(*keys, *names).with_columns(pl.lit(True).alias("_present")),
-            on=keys, how="full", coalesce=True, suffix="__audit",
-        ).sort(keys)
+            on=keys,
+            how="full",
+            coalesce=True,
+            suffix="__audit",
+        )
+        .sort(keys)
     )
-    count, examples = 0, []
+    count = 0
+    examples: list[dict] = []
     for name in ["_present", *names]:
         expected, observed = joined[name].to_numpy(), joined[f"{name}__audit"].to_numpy()
         diff = _different(expected, observed)
         count += int(diff.sum())
-        for row in np.flatnonzero(diff)[:max(0, _EXAMPLES - len(examples))]:
-            examples.append({
-                "date": str(joined[time_col][int(row)]), "symbol": joined["symbol"][int(row)],
+        examples.extend(
+            {
+                "date": str(joined[time_col][int(row)]),
+                "symbol": joined["symbol"][int(row)],
                 "field": "signal_presence" if name == "_present" else name,
-                "baseline": _scalar(expected[row]), "recomputed": _scalar(observed[row]),
+                "baseline": _scalar(expected[row]),
+                "recomputed": _scalar(observed[row]),
                 "cutoff": str(cutoff),
-            })
-    return {"differences": count, "compared_values": joined.height * (len(names) + 1), "examples": examples}
+            }
+            for row in np.flatnonzero(diff)[: max(0, _EXAMPLES - len(examples))]
+        )
+    return {
+        "differences": count,
+        "compared_values": joined.height * (len(names) + 1),
+        "examples": examples,
+    }
 
 
 def audit_frame(
-    raw: pl.DataFrame, baseline: pl.DataFrame, evaluate: Callable[[pl.DataFrame], pl.DataFrame],
-    *, start, end, time_col: str = "date", cancel_event=None,
+    raw: pl.DataFrame,
+    baseline: pl.DataFrame,
+    evaluate: Callable[[pl.DataFrame], pl.DataFrame],
+    *,
+    start,
+    end,
+    time_col: str = "date",
+    cancel_event=None,
 ) -> dict:
     times = raw[time_col].unique().sort().to_list()
     if times and isinstance(start, str) and not isinstance(times[0], str):
         start = type(times[0]).fromisoformat(start)
         end = type(times[0]).fromisoformat(end)
     candidates = [t for t in times[:-1] if start <= t <= end]
-    checks = []
+    checks: list[dict] = []
 
     def compare(kind, cutoff):
         if kind == "repeat":
@@ -278,7 +348,7 @@ def audit_frame(
             if cancel_event is not None and cancel_event.is_set():
                 return {**_report(checks), "status": "cancelled"}
 
-            checks.append(_check(kind, cutoff, lambda kind=kind, cutoff=cutoff: compare(kind, cutoff)))
+            checks.append(_check(kind, cutoff, partial(compare, kind, cutoff)))
     if any(check["differences"] for check in checks):
         kind, cutoff = "repeat", end
         control = _check(kind, cutoff, lambda: compare("repeat", cutoff))
@@ -323,14 +393,19 @@ def load_evidence(data_dir: Path, run_id: str) -> dict:
     if path.stat().st_size > _MAX_MANIFEST_BYTES:
         raise ValueError("回测版本记录超过大小限制")
     value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or value.get("schema_version") != 1 or value.get("run_id") != run_id:
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != 1
+        or value.get("run_id") != run_id
+    ):
         raise ValueError("回测版本记录无效")
     return value
 
 
 def audit_trade_timing(trades: list[dict], config: dict, backend: str) -> dict:
     """检查已记录的信号日与成交日，不把期末估值记录当成次日信号成交。"""
-    differences, compared, examples = 0, 0, []
+    differences, compared = 0, 0
+    examples: list[dict] = []
     for trade in trades:
         for side in ("entry", "exit"):
             signal = trade.get(f"{side}_signal_date")
@@ -347,13 +422,19 @@ def audit_trade_timing(trades: list[dict], config: dict, backend: str) -> dict:
             if signal > fill or (next_open and signal == fill):
                 differences += 1
                 if len(examples) < _EXAMPLES:
-                    examples.append({
-                        "symbol": trade["symbol"], "side": side,
-                        "signal_date": signal, "fill_date": fill,
-                    })
+                    examples.append(
+                        {
+                            "symbol": trade["symbol"],
+                            "side": side,
+                            "signal_date": signal,
+                            "fill_date": fill,
+                        }
+                    )
     return {
         "status": "failed" if differences else "passed" if compared else "insufficient",
-        "compared_values": compared, "differences": differences, "examples": examples,
+        "compared_values": compared,
+        "differences": differences,
+        "examples": examples,
     }
 
 
@@ -382,18 +463,27 @@ def runtime_version() -> dict:
 
     root = Path(__file__).resolve().parents[1]
     paths = [
-        "backtest/evidence.py", "backtest/engine.py", "backtest/strategy.py",
-        "backtest/matrix.py", "backtest/fundamentals.py", "backtest/minute_replay.py",
-        "strategy/engine.py", "strategy/scoring.py", "indicators/pipeline.py",
+        "backtest/evidence.py",
+        "backtest/engine.py",
+        "backtest/strategy.py",
+        "backtest/matrix.py",
+        "backtest/fundamentals.py",
+        "backtest/minute_replay.py",
+        "strategy/engine.py",
+        "strategy/scoring.py",
+        "indicators/pipeline.py",
     ]
     files = {
         name: _file_digest(root / name)  # 冻结发行版可能只携带字节码。
         for name in paths
     }
     return {
-        "application": __version__, "python": sys.version.split()[0],
-        "polars": pl.__version__, "numpy": np.__version__,
-        "code_sha256": json_digest(files), "code_files": files,
+        "application": __version__,
+        "python": sys.version.split()[0],
+        "polars": pl.__version__,
+        "numpy": np.__version__,
+        "code_sha256": json_digest(files),
+        "code_files": files,
     }
 
 
@@ -416,10 +506,13 @@ class EvidenceRecorder:
         if strategy.composite is not None:
             for child in strategy.composite.children:
                 child_def = strategy_engine.get(child.strategy_id)
-                self.children.append({
-                    "id": child.strategy_id, "weight": child.weight,
-                    "definitions": definition_versions(data_dir, child_def),
-                })
+                self.children.append(
+                    {
+                        "id": child.strategy_id,
+                        "weight": child.weight,
+                        "definitions": definition_versions(data_dir, child_def),
+                    }
+                )
 
     def record_frame(self, name: str, frame: pl.DataFrame) -> None:
         self.datasets[name] = fingerprint_frame(frame)
@@ -433,26 +526,41 @@ class EvidenceRecorder:
 
     def check_matrix(self, market, signals, evaluate) -> None:
         self.datasets["daily_matrix"] = fingerprint_matrix(market)
-        self.reports.append({
-            "scope": "daily_signals",
-            **audit_matrix(
-                market, signals, evaluate, start=str(self.config.start), end=str(self.config.end),
-                cancel_event=self.cancel_event,
-            ),
-        })
+        self.reports.append(
+            {
+                "scope": "daily_signals",
+                **audit_matrix(
+                    market,
+                    signals,
+                    evaluate,
+                    start=str(self.config.start),
+                    end=str(self.config.end),
+                    cancel_event=self.cancel_event,
+                ),
+            }
+        )
 
     def check_panel(self, baseline, evaluate) -> None:
         self.outputs["daily_features_and_signals"] = fingerprint_frame(baseline)
         if self.raw_panel is None or self.prepare_panel is None:
-            self.reports.append({"scope": "daily_signals", "status": "error", "checks": [], "differences": 0})
+            self.reports.append(
+                {"scope": "daily_signals", "status": "error", "checks": [], "differences": 0}
+            )
             return
-        self.reports.append({
-            "scope": "daily_features_and_signals",
-            **audit_frame(
-                self.raw_panel, baseline, lambda raw: evaluate(self.prepare_panel(raw)),
-                start=self.config.start, end=self.config.end, cancel_event=self.cancel_event,
-            ),
-        })
+        prepare_panel = self.prepare_panel
+        self.reports.append(
+            {
+                "scope": "daily_features_and_signals",
+                **audit_frame(
+                    self.raw_panel,
+                    baseline,
+                    lambda raw: evaluate(prepare_panel(raw)),
+                    start=self.config.start,
+                    end=self.config.end,
+                    cancel_event=self.cancel_event,
+                ),
+            }
+        )
         # 检查完成后释放对大面板及准备上下文的引用。
         self.raw_panel, self.prepare_panel = None, None
 
@@ -467,19 +575,33 @@ class EvidenceRecorder:
                     raise ValueError("分钟信号缺少触发时间，无法检查")
                 if isinstance(timestamp, str):
                     timestamp = datetime.fromisoformat(timestamp)
-                rows.append({
-                    "symbol": str(row["symbol"]), "datetime": timestamp,
-                    "close": row.get("close"), "score": value.scores.get(str(row["symbol"]), 0.0),
-                })
-            return pl.DataFrame(rows, schema={
-                "symbol": pl.Utf8, "datetime": dtype, "close": pl.Float64, "score": pl.Float64,
-            })
+                rows.append(
+                    {
+                        "symbol": str(row["symbol"]),
+                        "datetime": timestamp,
+                        "close": row.get("close"),
+                        "score": value.scores.get(str(row["symbol"]), 0.0),
+                    }
+                )
+            return pl.DataFrame(
+                rows,
+                schema={
+                    "symbol": pl.Utf8,
+                    "datetime": dtype,
+                    "close": pl.Float64,
+                    "score": pl.Float64,
+                },
+            )
 
         try:
             report = audit_frame(
-                history, decisions(result), lambda variant: decisions(evaluate(variant)),
-                start=history["datetime"].min(), end=history["datetime"].max(),
-                time_col="datetime", cancel_event=self.cancel_event,
+                history,
+                decisions(result),
+                lambda variant: decisions(evaluate(variant)),
+                start=history["datetime"].min(),
+                end=history["datetime"].max(),
+                time_col="datetime",
+                cancel_event=self.cancel_event,
             )
         except (ValueError, TypeError, pl.exceptions.PolarsError):
             report = {"status": "error", "checks": [], "differences": 0}
@@ -496,38 +618,63 @@ class EvidenceRecorder:
             summary["status"] = "cancelled"
         elif any(r["status"] == "error" for r in self.reports) and summary["status"] != "failed":
             summary["status"] = "error"
-        elif any(r["status"] == "insufficient" for r in self.reports) and summary["status"] == "passed":
+        elif (
+            any(r["status"] == "insufficient" for r in self.reports)
+            and summary["status"] == "passed"
+        ):
             summary["status"] = "partial"
         definitions_after = definition_versions(self.data_dir, self.strategy)
-        data_digest = json_digest({key: value["sha256"] for key, value in sorted(self.datasets.items())})
+        data_digest = json_digest(
+            {key: value["sha256"] for key, value in sorted(self.datasets.items())}
+        )
         config_digest = json_digest(effective_config)
         strategy = {
-            "id": self.config.strategy_id, "backend": self.strategy.execution_backend,
-            "meta": self.strategy.meta, "definitions": self.definitions, "children": self.children,
+            "id": self.config.strategy_id,
+            "backend": self.strategy.execution_backend,
+            "meta": self.strategy.meta,
+            "definitions": self.definitions,
+            "children": self.children,
             "changed_during_run": definitions_after != self.definitions,
         }
         strategy["sha256"] = json_digest(strategy)
         runtime = self.runtime
         return {
-            "schema_version": 1, "run_id": result.run_id,
+            "schema_version": 1,
+            "run_id": result.run_id,
             "created_at": datetime.now(UTC).isoformat(),
             "runtime": runtime,
-            "config": effective_config, "config_sha256": config_digest,
+            "config": effective_config,
+            "config_sha256": config_digest,
             "strategy": strategy,
             "data": {
-                "sha256": data_digest, "origin": "local_normalized_snapshot",
-                "asset_type": self.config.asset_type, "daily_price_basis": "qfq",
+                "sha256": data_digest,
+                "origin": "local_normalized_snapshot",
+                "asset_type": self.config.asset_type,
+                "daily_price_basis": "qfq",
                 "datasets": self.datasets,
             },
-            "reproducibility_sha256": json_digest({
-                "data": data_digest, "strategy": strategy["sha256"], "config": config_digest, "runtime": runtime,
-            }),
+            "reproducibility_sha256": json_digest(
+                {
+                    "data": data_digest,
+                    "strategy": strategy["sha256"],
+                    "config": config_digest,
+                    "runtime": runtime,
+                }
+            ),
             "lookahead": {**summary, "reports": self.reports, "sampled": True},
-            "execution_timing": audit_trade_timing(result.trades, effective_config, self.strategy.execution_backend),
+            "execution_timing": audit_trade_timing(
+                result.trades, effective_config, self.strategy.execution_backend
+            ),
             "outputs": self.outputs,
             "result_summary": {
-                key: _scalar(result.stats.get(key)) for key in (
-                    "total_return", "annual_return", "max_drawdown", "sharpe", "win_rate", "n_trades",
+                key: _scalar(result.stats.get(key))
+                for key in (
+                    "total_return",
+                    "annual_return",
+                    "max_drawdown",
+                    "sharpe",
+                    "win_rate",
+                    "n_trades",
                 )
             },
             "limitations": [

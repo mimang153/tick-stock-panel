@@ -129,5 +129,7 @@ PYTEST_VENV=/my/writable/venv bash run_tests.sh -q tests/   # 自定义 venv 路
 |------|------|
 | `AGENTS.md` | AI 开发入口，必读 `CONTRIBUTING.md` |
 | `CONTRIBUTING.md` | 架构、数据契约、测试矩阵、PR 合并标准（权威） |
-| `tsp-rule/*.mdc` | 技术栈规约，AI 写码参考（软约束） |
+| `tsp-rule/*.mdc` | 技术栈规约，AI 写码参考（软约束）；库表设计约束见 `tsp-rule/pgsql.mdc`（原本文 §9 已迁入） |
 | `CONVENTIONS.md` | 本文件：工程规约 + 质量门禁实操（软约束的量化 + 硬门禁落地） |
+
+> 库表设计约束（关系库 id 主键 + 四审计字段 + 表/字段注释）已迁至 [`tsp-rule/pgsql.mdc`](tsp-rule/pgsql.mdc)，按软规约在 PR 复审时人工核对；本文不再重复。

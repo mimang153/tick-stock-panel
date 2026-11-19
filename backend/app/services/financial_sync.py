@@ -168,21 +168,22 @@ def _write_table(table: str, df: pl.DataFrame, data_dir: Path) -> int:
         logger.warning("sync_%s skipped: 缺少 period_end 列，无法写入 CK", table)
         return 0
 
-    # 写入 Parquet (全量覆盖, 过渡期保留给尚未迁移的读取方)
-    out_dir = data_dir / "financials" / table
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / "part.parquet"
-    atomic_write_parquet(df, out_file)
+    # CK 主键 period_end 为 Date：provider 可能返回 ISO 字符串，写入前规范化，
+    # 否则 clickhouse_connect 序列化 str 到 Date 会 TypeError。
+    if df["period_end"].dtype == pl.Utf8:
+        df = df.with_columns(pl.col("period_end").str.to_date(strict=False))
 
     store = _financial_store()
     if store is not None:
-        # CK 主键 period_end 为 Date：provider 可能返回 ISO 字符串，写入前规范化，
-        # 否则 clickhouse_connect 序列化 str 到 Date 会 TypeError。
-        if df["period_end"].dtype == pl.Utf8:
-            df = df.with_columns(pl.col("period_end").str.to_date(strict=False))
+        # B5：生产路径 CK 为唯一落盘目标；本地 part.parquet 只服务离线脚本/单测。
         store.write_financials(_ck_table(table), df)
+        logger.info("sync_%s done(CK): %d records written", table, len(df))
+        return len(df)
 
-    logger.info("sync_%s done: %d records written", table, len(df))
+    out_dir = data_dir / "financials" / table
+    out_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_parquet(df, out_dir / "part.parquet")
+    logger.info("sync_%s done(local/offline): %d records written", table, len(df))
     return len(df)
 
 

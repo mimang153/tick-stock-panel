@@ -5,6 +5,7 @@
 服务端若用宿主机时钟(Docker 镜像默认 UTC), 刚生成的报告会被显示成「8 小时前」,
 「今天是否已生成过报告」的判定(created_at 前 10 位 == 浏览器今天)也会误判。
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone

@@ -262,6 +262,28 @@ def test_scoring_value_expr_resolves_ext_column():
     assert scoring_value_expr(["symbol"], COL) is None  # 缺列 → 不可计算 (非伪装零分)
 
 
+def test_snapshot_frame_cache_key_is_path_independent(data_dir):
+    cfg = _mk_config(data_dir, cid="tags", mode="snapshot")
+    fields = [ExtField(name="hot", dtype="float")]
+    root_a = data_dir / "mount_a"
+    root_b = data_dir / "mount_b"
+    path_a = root_a / "ext_data" / "tags" / "part.parquet"
+    path_b = root_b / "ext_data" / "tags" / "part.parquet"
+    path_a.parent.mkdir(parents=True)
+    path_b.parent.mkdir(parents=True)
+    pl.DataFrame({"symbol": ["600000.SH"], "hot": [0.8]}).write_parquet(path_a)
+    path_b.write_bytes(path_a.read_bytes())
+
+    first = ext_factors._snapshot_frame(root_a, cfg, fields)
+    second = ext_factors._snapshot_frame(root_b, cfg, fields)
+
+    assert first.equals(second)
+    assert len(ext_factors._frame_cache) == 1
+    assert all(
+        str(root_a) not in key[0] and str(root_b) not in key[0] for key in ext_factors._frame_cache
+    )
+
+
 # ── 失效链路 ──────────────────────────────────────────────
 
 

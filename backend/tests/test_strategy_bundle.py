@@ -4,6 +4,7 @@
 闭包; 缺失引用只告警不阻断; 往返恢复 + 冲突两态; 越界条目拒绝 (策略包不能
 变成配置走私通道)。
 """
+
 from __future__ import annotations
 
 import io
@@ -21,7 +22,7 @@ from app.strategy.engine import StrategyEngine
 
 META_COMMON = '"asset_types": ["stock"], "timeframes": ["1d"]'
 
-STANDALONE = f'''\
+STANDALONE = f"""\
 META = {{"id": "custom_standalone", "name": "独立", "description": "d", "tags": [], {META_COMMON}}}
 
 import polars as pl
@@ -29,9 +30,9 @@ import polars as pl
 
 def filter(df: pl.DataFrame, params: dict) -> pl.Expr:
     return pl.lit(True)
-'''
+"""
 
-FACTOR_RANK = f'''\
+FACTOR_RANK = f"""\
 META = {{"id": "custom_rank", "name": "排名", "description": "d", "tags": [], {META_COMMON},
        "scoring": {{"uf_meta": 1.0, "momentum_5d": 0.5}}}}
 
@@ -42,9 +43,9 @@ SCORING = {{"uf_dep": 1.0, "momentum_5d": 0.5}}
 
 def filter(df: pl.DataFrame, params: dict) -> pl.Expr:
     return pl.lit(True)
-'''
+"""
 
-SIG_STRAT = f'''\
+SIG_STRAT = f"""\
 META = {{"id": "custom_sigstrat", "name": "信号", "description": "d", "tags": [], {META_COMMON}}}
 
 import polars as pl
@@ -54,9 +55,9 @@ ENTRY_SIGNALS = ["csg_sig_dep", "signal_builtin_x"]
 
 def filter(df: pl.DataFrame, params: dict) -> pl.Expr:
     return pl.lit(True)
-'''
+"""
 
-MISSING_REFS = f'''\
+MISSING_REFS = f"""\
 META = {{"id": "custom_missing", "name": "缺依赖", "description": "d", "tags": [], {META_COMMON}}}
 
 import polars as pl
@@ -67,18 +68,30 @@ ENTRY_SIGNALS = ["csg_gone"]
 
 def filter(df: pl.DataFrame, params: dict) -> pl.Expr:
     return pl.lit(True)
-'''
+"""
 
-COMPOSITE = f'''\
+COMPOSITE = f"""\
 META = {{"id": "custom_comp", "name": "叠加", "description": "d", "tags": [], {META_COMMON},
        "children": [{{"strategy_id": "custom_standalone", "weight": 1.0}}]}}
 
 EXECUTION_BACKEND = "composite"
-'''
+"""
 
 UF_DEP = {"id": "uf_dep", "label": "依赖因子", "kind": "custom", "formula": "close", "lang": "dsl"}
-UF_META = {"id": "uf_meta", "label": "META因子", "kind": "custom", "formula": "close", "lang": "dsl"}
-UF_DEP2 = {"id": "uf_dep2", "label": "信号因子", "kind": "custom", "formula": "close", "lang": "dsl"}
+UF_META = {
+    "id": "uf_meta",
+    "label": "META因子",
+    "kind": "custom",
+    "formula": "close",
+    "lang": "dsl",
+}
+UF_DEP2 = {
+    "id": "uf_dep2",
+    "label": "信号因子",
+    "kind": "custom",
+    "formula": "close",
+    "lang": "dsl",
+}
 SIG_DEP = {
     "id": "sig_dep",
     "name": "信号依赖",
@@ -136,9 +149,7 @@ def _zip_names(data: bytes) -> set[str]:
 
 
 def test_standalone_bundle_carries_override(bundle_env, engine):
-    data, filename, summary = strategy_bundle.build_bundle(
-        bundle_env, engine, "custom_standalone"
-    )
+    data, filename, summary = strategy_bundle.build_bundle(bundle_env, engine, "custom_standalone")
     names = _zip_names(data)
     assert "strategies/custom/custom_standalone.py" in names
     assert "user_data/strategy_overrides/custom_standalone.json" in names
@@ -279,22 +290,29 @@ def test_bad_format_rejected(bundle_env):
         strategy_bundle.parse_bundle(garbage)
 
 
-def test_legacy_preview_resolves_dependencies_from_destination(bundle_env, engine, tmp_path_factory, monkeypatch):
+def test_legacy_preview_resolves_dependencies_from_destination(
+    bundle_env, engine, tmp_path_factory, monkeypatch
+):
     from app.config import settings
 
     blob = strategy_bundle.build_bundle(bundle_env, engine, "custom_missing")[0]
     destination = tmp_path_factory.mktemp("local_dependencies")
     monkeypatch.setattr(settings, "data_dir", destination)
     _write(destination / "user_data/custom_factors/uf_gone.json", {**UF_DEP, "id": "uf_gone"})
-    _write(destination / "user_data/custom_signals/gone.json", {**SIG_DEP, "id": "gone", "conditions": [{"left": "close", "op": ">", "right": 0}]})
+    _write(
+        destination / "user_data/custom_signals/gone.json",
+        {**SIG_DEP, "id": "gone", "conditions": [{"left": "close", "op": ">", "right": 0}]},
+    )
     assert strategy_bundle.inspect_bundle(blob)["missing_deps"] == []
 
 
 def test_legacy_import_preserves_per_file_failure_reporting(bundle_env):
-    blob = _bundle_zip({
-        "strategies/custom/custom_standalone.py": STANDALONE.encode(),
-        "user_data/custom_factors/uf_broken.json": b"not json",
-    })
+    blob = _bundle_zip(
+        {
+            "strategies/custom/custom_standalone.py": STANDALONE.encode(),
+            "user_data/custom_factors/uf_broken.json": b"not json",
+        }
+    )
     (bundle_env / "strategies/custom/custom_standalone.py").unlink()
     result = strategy_bundle.apply_bundle(blob)
     categories = {item["key"]: item for item in result["categories"]}
@@ -311,6 +329,8 @@ def test_legacy_package_rejects_symlink_entries(bundle_env, operation):
         entry.create_system = 3
         entry.external_attr = (stat.S_IFLNK | 0o777) << 16
         archive.writestr(entry, STANDALONE)
-        archive.writestr("manifest.json", json.dumps({"format": strategy_bundle.BUNDLE_FORMAT, "version": 1}))
+        archive.writestr(
+            "manifest.json", json.dumps({"format": strategy_bundle.BUNDLE_FORMAT, "version": 1})
+        )
     with pytest.raises(strategy_bundle.StrategyBundleError, match="符号链接"):
         getattr(strategy_bundle, operation)(buffer.getvalue())

@@ -4,9 +4,9 @@
 测试必须自带定义, 不依赖运行目录的用户数据。种子 JSON 收录在
 tests/fixtures/custom_signals/ (入库, 仅测试使用)。
 """
+
 from __future__ import annotations
 
-import json
 import shutil
 from pathlib import Path
 
@@ -31,9 +31,7 @@ def install_pipeline_caches(monkeypatch) -> list[dict]:
 
     sigs = load_seed_definitions()
     prev_fields = custom_signals.prev_day_fields(sigs)
-    monkeypatch.setattr(
-        pipeline, "_custom_signal_exprs", custom_signals.build_expressions(sigs)
-    )
+    monkeypatch.setattr(pipeline, "_custom_signal_exprs", custom_signals.build_expressions(sigs))
     monkeypatch.setattr(
         pipeline,
         "_custom_signal_exprs_today",

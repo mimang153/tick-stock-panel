@@ -10,6 +10,7 @@
 - 策略源码写入前过与引擎一致的 AST 安全校验, 不安全的条目跳过并报错;
 - 文件类冲突默认跳过, 显式 allow_overwrite 才覆盖; 偏好/密钥走 merge 不整替。
 """
+
 from __future__ import annotations
 
 import io
@@ -21,7 +22,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import yaml
@@ -33,10 +34,10 @@ logger = logging.getLogger(__name__)
 BACKUP_FORMAT = "tick-config-backup"
 BACKUP_VERSION = 1
 
-MAX_ARCHIVE_BYTES = 128 * 1024 * 1024   # 上传压缩包上限
-MAX_ENTRIES = 2_000                     # 条目数上限
-MAX_FILE_BYTES = 10 * 1024 * 1024       # 单文件解压上限
-MAX_TOTAL_BYTES = 64 * 1024 * 1024      # 全包解压总量上限
+MAX_ARCHIVE_BYTES = 128 * 1024 * 1024  # 上传压缩包上限
+MAX_ENTRIES = 2_000  # 条目数上限
+MAX_FILE_BYTES = 10 * 1024 * 1024  # 单文件解压上限
+MAX_TOTAL_BYTES = 64 * 1024 * 1024  # 全包解压总量上限
 
 # 导出默认脱敏的偏好键 — webhook URL 本身含 token, 与 secret 同级处理。
 SENSITIVE_PREFERENCE_KEYS = (
@@ -134,20 +135,44 @@ def _app_version() -> str:
 class _Entry:
     """一个通过白名单校验的备份条目。"""
 
-    name: str        # zip 内条目名 (data_dir 相对 POSIX 路径)
+    name: str  # zip 内条目名 (data_dir 相对 POSIX 路径)
     category: str
-    target: Path     # 本机落盘绝对路径
+    target: Path  # 本机落盘绝对路径；paper PG 快照不使用
+    pg_account_id: str | None = None  # paper/accounts/{id}/snapshot.json → PG 账户
 
 
 # ── 路径归类: zip 条目名 → (类别, 目标路径); 不在备份范围返回 None ──────────
 
+
+def _classify_user_data_file(name: str, data_dir: Path) -> tuple[str, Path] | None:
+    if name == "preferences.json":
+        return "preferences", data_dir / "user_data" / "preferences.json"
+    if name == "strategy_pool.json":
+        return "strategy_pool", data_dir / "user_data" / name
+    if name == "secrets.json":
+        return "secrets", data_dir / "user_data" / "secrets.json"
+    if name == "auth.json":
+        return "auth", data_dir / "user_data" / "auth.json"
+    if name in ("watchlist.parquet", "watchlist_groups.json"):
+        return "watchlist", data_dir / "user_data" / name
+    if name == "research_candidates.json":
+        return "research_candidates", data_dir / "user_data" / name
+    if name in ("alerts.jsonl", "assistant_sessions.json"):
+        return "history", data_dir / "user_data" / name
+    return None
+
+
+def _name_ok(name: str, suffix: str) -> bool:
+    """文件名去掉后缀后须是纯名称标识, 防止路径穿越。"""
+    return name.endswith(suffix) and bool(_NAME_RE.match(name[: -len(suffix)]))
+
+
+def _name_ext_ok(name: str, suffixes: frozenset[str]) -> bool:
+    """文件名匹配任一允许后缀即为合法名称。"""
+    return any(_name_ok(name, s) for s in suffixes)
+
+
 def _classify(rel: PurePosixPath, data_dir: Path) -> tuple[str, Path] | None:
-    def _name_ok(name: str, suffix: str) -> bool:
-        return name.endswith(suffix) and bool(_NAME_RE.match(name[: -len(suffix)]))
-
-    def _name_ext_ok(name: str, suffixes: frozenset[str]) -> bool:
-        return any(_name_ok(name, s) for s in suffixes)
-
     parts = rel.parts
     if (
         len(parts) == 3
@@ -179,28 +204,23 @@ def _classify(rel: PurePosixPath, data_dir: Path) -> tuple[str, Path] | None:
     ):
         return "lots", data_dir / Path(*parts)
     if len(parts) == 2 and parts[0] == "user_data":
-        name = parts[1]
-        if name == "preferences.json":
-            return "preferences", data_dir / "user_data" / "preferences.json"
-        if name == "strategy_pool.json":
-            return "strategy_pool", data_dir / "user_data" / name
-        if name == "secrets.json":
-            return "secrets", data_dir / "user_data" / "secrets.json"
-        if name == "auth.json":
-            return "auth", data_dir / "user_data" / "auth.json"
-        if name in ("watchlist.parquet", "watchlist_groups.json"):
-            return "watchlist", data_dir / "user_data" / name
-        if name == "research_candidates.json":
-            return "research_candidates", data_dir / "user_data" / name
-        if name in ("alerts.jsonl", "assistant_sessions.json"):
-            return "history", data_dir / "user_data" / name
-    if len(parts) == 2 and parts[0] == "data_sources" and (_name_ok(parts[1], ".yaml") or _name_ok(parts[1], ".yml")):
+        return _classify_user_data_file(parts[1], data_dir)
+    if (
+        len(parts) == 2
+        and parts[0] == "data_sources"
+        and (_name_ok(parts[1], ".yaml") or _name_ok(parts[1], ".yml"))
+    ):
         return "data_sources", data_dir / Path(*parts)
     if len(parts) == 2 and parts[0] == "analysis_menus" and _name_ok(parts[1], ".json"):
         return "analysis_menus", data_dir / Path(*parts)
     if len(parts) == 2 and parts[0] == "sound_packs" and _name_ext_ok(parts[1], _SOUND_PACK_EXTS):
         return "sound_packs", data_dir / Path(*parts)
-    if len(parts) == 3 and parts[0] == "ext_data" and parts[2] == "config.json" and bool(_NAME_RE.match(parts[1])):
+    if (
+        len(parts) == 3
+        and parts[0] == "ext_data"
+        and parts[2] == "config.json"
+        and bool(_NAME_RE.match(parts[1]))
+    ):
         return "ext_data", data_dir / Path(*parts)
     if (
         len(parts) == 3
@@ -234,35 +254,34 @@ def _safe_rel(entry_name: str) -> PurePosixPath:
     return rel
 
 
+_PG_SNAPSHOT_FILE = "snapshot.json"
+
+
+def _pg_snapshot_account(rel: PurePosixPath) -> str | None:
+    """paper/accounts/{id}/snapshot.json → 账户 ID；其余 paper 文件仍走文件态。"""
+    parts = rel.parts
+    if (
+        len(parts) == 4
+        and parts[0] == "paper"
+        and parts[1] == "accounts"
+        and parts[3] == _PG_SNAPSHOT_FILE
+        and bool(_NAME_RE.match(parts[2]))
+    ):
+        return parts[2]
+    return None
+
+
 # ── 导出 ────────────────────────────────────────────────
 
-def _collect_backup_files(data_dir: Path) -> list[Path]:
-    out: list[Path] = []
 
-    def _glob(directory: Path, pattern: str) -> None:
-        if directory.is_dir():
-            out.extend(sorted(directory.glob(pattern)))
-
-    for sub in _STRATEGY_SOURCES:
-        _glob(data_dir / "strategies" / sub, "*.py")
-    for sub in ("strategy_overrides", "custom_signals", "custom_factors", "monitor_rules"):
-        _glob(data_dir / "user_data" / sub, "*.json")
-    _glob(data_dir / "user_data" / "position_policies", "*.py")
-    _glob(data_dir / "user_data" / "lots", "lot_*.json")
-    for name in (
-        "watchlist.parquet", "watchlist_groups.json", "preferences.json",
-        "research_candidates.json", "alerts.jsonl", "assistant_sessions.json", "auth.json", "strategy_pool.json",
-    ):
-        p = data_dir / "user_data" / name
-        if p.is_file():
-            out.append(p)
-    _glob(data_dir / "data_sources", "*.yaml")
-    _glob(data_dir / "data_sources", "*.yml")
-    _glob(data_dir / "analysis_menus", "*.json")
+def _collect_ext_backups(data_dir: Path, out: list[Path]) -> None:
+    """收集扩展数据/页面、音效包与模拟盘账户的备份文件, 追加到 out。"""
     if (data_dir / "sound_packs").is_dir():
-        for f in sorted((data_dir / "sound_packs").iterdir()):
-            if f.is_file() and f.suffix.lower() in _SOUND_PACK_EXTS:
-                out.append(f)
+        out.extend(
+            f
+            for f in sorted((data_dir / "sound_packs").iterdir())
+            if f.is_file() and f.suffix.lower() in _SOUND_PACK_EXTS
+        )
     ext_base = data_dir / "ext_data"
     if ext_base.is_dir():
         for sub in sorted(ext_base.iterdir()):
@@ -282,9 +301,42 @@ def _collect_backup_files(data_dir: Path) -> list[Path]:
     if accounts_base.is_dir():
         for pattern in ("*.json", "*.jsonl"):
             out.extend(sorted(accounts_base.rglob(pattern)))
+
+
+def _collect_backup_files(data_dir: Path) -> list[Path]:
+    out: list[Path] = []
+
+    def _glob(directory: Path, pattern: str) -> None:
+        if directory.is_dir():
+            out.extend(sorted(directory.glob(pattern)))
+
+    for sub in _STRATEGY_SOURCES:
+        _glob(data_dir / "strategies" / sub, "*.py")
+    for sub in ("strategy_overrides", "custom_signals", "custom_factors", "monitor_rules"):
+        _glob(data_dir / "user_data" / sub, "*.json")
+    _glob(data_dir / "user_data" / "position_policies", "*.py")
+    _glob(data_dir / "user_data" / "lots", "lot_*.json")
+    for name in (
+        "watchlist.parquet",
+        "watchlist_groups.json",
+        "preferences.json",
+        "research_candidates.json",
+        "alerts.jsonl",
+        "assistant_sessions.json",
+        "auth.json",
+        "strategy_pool.json",
+    ):
+        p = data_dir / "user_data" / name
+        if p.is_file():
+            out.append(p)
+    _glob(data_dir / "data_sources", "*.yaml")
+    _glob(data_dir / "data_sources", "*.yml")
+    _glob(data_dir / "analysis_menus", "*.json")
+    _collect_ext_backups(data_dir, out)
     # 只带走 classify 认可的文件, 保证导出/导入白名单严格对称。
     return [
-        p for p in out
+        p
+        for p in out
         if _classify(PurePosixPath(p.relative_to(data_dir).as_posix()), data_dir) is not None
     ]
 
@@ -339,8 +391,13 @@ def _backup_secrets(data_dir: Path) -> dict[str, Any]:
         payload["ai_api_key"] = ai_key
         # 仅带 Key 而漏掉服务地址/模型, 在新设备上仍无法按原配置使用。
         for field in (
-            "ai_provider", "ai_protocol", "ai_base_url", "ai_model",
-            "ai_codex_command", "ai_codex_reasoning_effort", "ai_user_agent",
+            "ai_provider",
+            "ai_protocol",
+            "ai_base_url",
+            "ai_model",
+            "ai_codex_command",
+            "ai_codex_reasoning_effort",
+            "ai_user_agent",
         ):
             payload[field] = secrets_store.get_ai_config(field)
         from app.config import settings
@@ -380,7 +437,9 @@ def build_backup(*, categories: Iterable[str] | None = None) -> tuple[bytes, str
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in _collect_backup_files(data_dir):
             rel = path.relative_to(data_dir).as_posix()
-            category, _ = _classify(PurePosixPath(rel), data_dir)  # collect 已过滤, 必非 None
+            category, _ = cast(
+                tuple[str, Path], _classify(PurePosixPath(rel), data_dir)
+            )  # 必非 None
             if selected is not None and category not in selected:
                 continue
             # 敏感类别 (密钥/访问凭证) 只在显式勾选时打包, 默认导出不带。
@@ -393,10 +452,33 @@ def build_backup(*, categories: Iterable[str] | None = None) -> tuple[bytes, str
                 continue
             zf.writestr(rel, payload)
             counts[category] = counts.get(category, 0) + 1
+        if selected is None or "paper" in selected:
+            # 模拟盘账户已迁到 PG（DES-005）：每个账户导出为虚拟快照条目，
+            # 沿用 paper 类别白名单路径，前端类别键 / manifest 结构不变。
+            # PG 不可用时降级跳过并告警，不影响其余配置备份。
+            try:
+                from app.storage import paper_pg
+
+                for account_id in paper_pg.list_account_ids():
+                    snapshot = paper_pg.dump_account(account_id)
+                    if snapshot is None:
+                        continue
+                    rel = f"paper/accounts/{account_id}/{_PG_SNAPSHOT_FILE}"
+                    if not _pg_snapshot_account(PurePosixPath(rel)):
+                        continue  # 非法账户 ID 不落包
+                    zf.writestr(
+                        rel, json.dumps(snapshot, ensure_ascii=False, indent=2, default=str)
+                    )
+                    counts["paper"] = counts.get("paper", 0) + 1
+            except Exception as e:  # noqa: BLE001 - PG 不可用时降级，其余配置仍可备份
+                logger.warning("paper accounts backup skipped (PostgreSQL unavailable): %s", e)
         if include_secrets:
             secrets_payload = _backup_secrets(data_dir)
             if secrets_payload:
-                zf.writestr("user_data/secrets.json", json.dumps(secrets_payload, ensure_ascii=False, indent=2))
+                zf.writestr(
+                    "user_data/secrets.json",
+                    json.dumps(secrets_payload, ensure_ascii=False, indent=2),
+                )
                 counts["secrets"] = counts.get("secrets", 0) + 1
         manifest = {
             "format": BACKUP_FORMAT,
@@ -421,11 +503,24 @@ def build_backup(*, categories: Iterable[str] | None = None) -> tuple[bytes, str
 
 # ── 解析与校验 (inspect / apply 共用) ─────────────────────
 
+
 @dataclass(frozen=True)
 class _ParsedArchive:
     manifest: dict[str, Any]
     entries: list[_Entry]
     out_of_scope: list[str]  # 结构安全但不在备份范围内的条目 (忽略, 计数上报)
+
+
+def _check_entry_size(info: zipfile.ZipInfo, total: int) -> int:
+    """累计解压总量与单文件大小双重上限校验, 返回新的总量。"""
+    total += info.file_size
+    if total > MAX_TOTAL_BYTES:
+        raise ConfigBackupError(f"备份解压总量超过 {MAX_TOTAL_BYTES // 1024 // 1024}MB 上限")
+    if info.file_size > MAX_FILE_BYTES:
+        raise ConfigBackupError(
+            f"条目 {info.filename} 超过单文件 {MAX_FILE_BYTES // 1024 // 1024}MB 上限"
+        )
+    return total
 
 
 def _parse_archive(data: bytes) -> _ParsedArchive:
@@ -460,17 +555,13 @@ def _parse_archive(data: bytes) -> _ParsedArchive:
         for info in infos:
             if info.filename == "manifest.json":
                 continue
-            total += info.file_size
-            if total > MAX_TOTAL_BYTES:
-                raise ConfigBackupError(f"备份解压总量超过 {MAX_TOTAL_BYTES // 1024 // 1024}MB 上限")
-            if info.file_size > MAX_FILE_BYTES:
-                raise ConfigBackupError(f"条目 {info.filename} 超过单文件 {MAX_FILE_BYTES // 1024 // 1024}MB 上限")
+            total = _check_entry_size(info, total)
             rel = _safe_rel(info.filename)
             cls = _classify(rel, data_dir)
             if cls is None:
                 out_of_scope.append(info.filename)
                 continue
-            entries.append(_Entry(name=info.filename, category=cls[0], target=cls[1]))
+            entries.append(_Entry(info.filename, cls[0], cls[1], _pg_snapshot_account(rel)))
     return _ParsedArchive(manifest=manifest, entries=entries, out_of_scope=out_of_scope)
 
 
@@ -483,6 +574,18 @@ def _read_entry(zf: zipfile.ZipFile, name: str) -> bytes:
     return payload
 
 
+def _entry_conflicts(entry: _Entry) -> bool:
+    """PG 快照按账户判冲突，其余条目沿用文件存在性。"""
+    if entry.pg_account_id:
+        try:
+            from app.storage import paper_pg
+
+            return paper_pg.get_account(entry.pg_account_id) is not None
+        except Exception:  # noqa: BLE001 - PG 不可用时预览标无冲突，apply 会记录失败
+            return False
+    return entry.target.exists()
+
+
 def inspect_archive(data: bytes) -> dict[str, Any]:
     """解析备份并给出预览: 各类别条目数、与本地冲突数。不写任何文件。"""
     parsed = _parse_archive(data)
@@ -490,11 +593,16 @@ def inspect_archive(data: bytes) -> dict[str, Any]:
     for entry in parsed.entries:
         c = cats.setdefault(
             entry.category,
-            {"key": entry.category, "label": _CATEGORY_LABELS[entry.category], "count": 0, "conflicts": 0},
+            {
+                "key": entry.category,
+                "label": _CATEGORY_LABELS[entry.category],
+                "count": 0,
+                "conflicts": 0,
+            },
         )
         c["count"] += 1
         # 偏好/密钥是 merge 语义, 不存在冲突概念。
-        if entry.category not in ("preferences", "secrets") and entry.target.exists():
+        if entry.category not in ("preferences", "secrets") and _entry_conflicts(entry):
             c["conflicts"] += 1
     return {
         "created_at": parsed.manifest.get("created_at", ""),
@@ -509,6 +617,7 @@ def inspect_archive(data: bytes) -> dict[str, Any]:
 
 
 # ── 导入 ────────────────────────────────────────────────
+
 
 def _validate_strategy_code(code: str, *, is_dependency: bool, dep_names: frozenset[str]) -> None:
     """与 engine._load_file 相同口径的 AST 安全校验 — 备份可能被篡改, 不因
@@ -534,6 +643,21 @@ def _validate_json_object(payload: bytes, *, what: str) -> dict:
     return doc
 
 
+def _validate_jsonl_payload(name: str, payload: bytes) -> None:
+    """逐行 JSON 校验; 空行容忍, 坏行 fail-closed。"""
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise ConfigBackupError(f"{name} 不是有效 UTF-8: {e}") from e
+    for i, line in enumerate(text.splitlines()):
+        if not line.strip():
+            continue
+        try:
+            json.loads(line)
+        except json.JSONDecodeError as e:
+            raise ConfigBackupError(f"{name} 第 {i + 1} 行不是有效 JSON: {e}") from e
+
+
 def _validate_payload(entry: _Entry, payload: bytes) -> None:
     """写盘前的内容级校验 (策略的安全校验独立处理)。"""
     name = entry.target.name
@@ -547,18 +671,7 @@ def _validate_payload(entry: _Entry, payload: bytes) -> None:
     if entry.category == "ext_pages" and name == "bundle.js":
         return  # 编译产物无法 AST 校验; 仅导入可信备份 (说明书已注明)
     if name.endswith(".jsonl"):
-        # 逐行 JSON (成交台账/净值/告警); 空行容忍, 坏行 fail-closed。
-        try:
-            text = payload.decode("utf-8")
-        except UnicodeDecodeError as e:
-            raise ConfigBackupError(f"{name} 不是有效 UTF-8: {e}") from e
-        for i, line in enumerate(text.splitlines()):
-            if not line.strip():
-                continue
-            try:
-                json.loads(line)
-            except json.JSONDecodeError as e:
-                raise ConfigBackupError(f"{name} 第 {i + 1} 行不是有效 JSON: {e}") from e
+        _validate_jsonl_payload(name, payload)
         return
     if entry.category == "watchlist" and name.endswith(".parquet"):
         import polars as pl
@@ -610,7 +723,204 @@ def _write_payload(target: Path, payload: bytes) -> None:
         _write_bytes_atomic(target, payload)
 
 
-def apply_archive(data: bytes, *, allow_overwrite: bool = False, categories: Iterable[str] | None = None) -> dict[str, Any]:
+def _archive_result(results: dict[str, dict[str, Any]], category: str) -> dict[str, Any]:
+    return results.setdefault(
+        category,
+        {
+            "key": category,
+            "label": _CATEGORY_LABELS[category],
+            "imported": 0,
+            "skipped_conflict": 0,
+            "failed": [],
+        },
+    )
+
+
+def _classify_archive_entries(zf, entries, allow_overwrite: bool, results):
+    # 第一遍: 截断读全部条目 + 冲突过滤 + 偏好/密钥提取。
+    # 策略条目先攒批 — 同目录 _*.py 依赖要进主文件的 import 白名单
+    # (与 engine._load_file 的 dependency glob 口径一致), 校验必须看全批。
+    strategy_codes: dict[_Entry, str] = {}
+    policy_codes: dict[_Entry, str] = {}
+    plain_entries: list[tuple[_Entry, bytes]] = []
+    pg_snapshots: list[tuple[_Entry, bytes]] = []
+    prefs_payload: dict | None = None
+    secrets_payload: dict | None = None
+    for entry in entries:
+        try:
+            payload = _read_entry(zf, entry.name)
+        except ConfigBackupError as e:
+            _archive_result(results, entry.category)["failed"].append(
+                {"file": entry.name, "error": str(e)}
+            )
+            continue
+        if entry.category == "preferences":
+            prefs_payload = _validate_json_object(payload, what="偏好设置 ")
+            continue
+        if entry.category == "secrets":
+            secrets_payload = _validate_json_object(payload, what="密钥文件 ")
+            continue
+        if entry.pg_account_id:
+            # PG 账户快照：按账户整体判冲突，绝不落文件、不逐文件半恢复。
+            if not allow_overwrite and _entry_conflicts(entry):
+                _archive_result(results, "paper")["skipped_conflict"] += 1
+                continue
+            pg_snapshots.append((entry, payload))
+            continue
+        if entry.target.exists() and not allow_overwrite:
+            _archive_result(results, entry.category)["skipped_conflict"] += 1
+            continue
+        if entry.category == "strategies":
+            try:
+                strategy_codes[entry] = payload.decode("utf-8")
+            except UnicodeDecodeError as e:
+                _archive_result(results, "strategies")["failed"].append(
+                    {"file": entry.name, "error": f"策略文件不是有效 UTF-8: {e}"}
+                )
+        elif entry.category == "position_policies":
+            try:
+                policy_codes[entry] = payload.decode("utf-8")
+            except UnicodeDecodeError as e:
+                _archive_result(results, "position_policies")["failed"].append(
+                    {"file": entry.name, "error": f"仓位策略文件不是有效 UTF-8: {e}"}
+                )
+        else:
+            plain_entries.append((entry, payload))
+    return strategy_codes, policy_codes, plain_entries, pg_snapshots, prefs_payload, secrets_payload
+
+
+def _restore_code_batches(strategy_codes, policy_codes, results, reload_hints) -> None:
+    # 第二遍: 内容校验 + 写盘 (策略 → 仓位策略 → 其余文件)。
+    for directory, batch in _groupby_dir(strategy_codes):
+        # 依赖名单 = 本批同目录 _*.py + 本机已存在的 _*.py (引擎 reload 时
+        # glob 的是落盘后的目录, 两边取并集才不误杀)。
+        dep_names = {p.name[:-3] for p in directory.glob("_*.py")}
+        dep_names |= {e.target.name[:-3] for e, _ in batch if e.target.name.startswith("_")}
+        for entry, code in batch:
+            is_dep = entry.target.name.startswith("_")
+            try:
+                _validate_strategy_code(code, is_dependency=is_dep, dep_names=frozenset(dep_names))
+                _write_payload(entry.target, code.encode("utf-8"))
+            except (ConfigBackupError, ValueError, SyntaxError, OSError) as e:
+                _archive_result(results, "strategies")["failed"].append(
+                    {"file": entry.name, "error": str(e)}
+                )
+                continue
+            _archive_result(results, "strategies")["imported"] += 1
+            reload_hints["strategies"] = True
+
+    # 仓位策略: 与策略同一信任模型 — 安全校验 + 结构解析 + 合成冒烟三关全过才写盘
+    # (validate_policy_code 内置); 注册表按目录签名惰性刷新, 无需 reload 钩子。
+    if not policy_codes:
+        return
+    from app.backtest import position_policies as _pp
+
+    for entry, code in policy_codes.items():
+        check = _pp.validate_policy_code(code)
+        if not check["ok"]:
+            _archive_result(results, "position_policies")["failed"].append(
+                {"file": entry.name, "error": "; ".join(check["issues"])}
+            )
+            continue
+        try:
+            _write_payload(entry.target, code.encode("utf-8"))
+        except OSError as e:
+            _archive_result(results, "position_policies")["failed"].append(
+                {"file": entry.name, "error": str(e)}
+            )
+            continue
+        _archive_result(results, "position_policies")["imported"] += 1
+    _pp.invalidate_cache()
+
+
+def _restore_pg_and_plain(
+    pg_snapshots, plain_entries, allow_overwrite, results, reload_hints
+) -> None:
+    # PG 账户快照整体恢复（事务内先删后插），逐条容错。
+    for entry, payload in pg_snapshots:
+        try:
+            snapshot = json.loads(payload)
+            from app.storage import paper_pg
+
+            assert entry.pg_account_id is not None  # 分流条件已保证
+            paper_pg.restore_account(entry.pg_account_id, snapshot)
+        except Exception as e:  # noqa: BLE001 - PG 不可用/快照损坏逐条记错，不影响其余条目
+            _archive_result(results, "paper")["failed"].append(
+                {"file": entry.name, "error": str(e)}
+            )
+            continue
+        _archive_result(results, "paper")["imported"] += 1
+
+    for entry, payload in plain_entries:
+        try:
+            _validate_payload(entry, payload)
+            if entry.category == "strategy_pool":
+                from app.services import strategy_pool
+
+                strategy_pool.restore_snapshot(json.loads(payload), allow_overwrite=allow_overwrite)
+            else:
+                _write_payload(entry.target, payload)
+        except (ConfigBackupError, ValueError, OSError, UnicodeDecodeError) as e:
+            _archive_result(results, entry.category)["failed"].append(
+                {"file": entry.name, "error": str(e)}
+            )
+            continue
+        _archive_result(results, entry.category)["imported"] += 1
+        if entry.category in reload_hints:
+            reload_hints[entry.category] = True
+        # 导入即冒烟 (P4): 信号/因子落盘后立刻静态冒烟, 结果随导入返回 —
+        # 导入完成即知道定义能不能算, 不用等回测报错才发现。
+        if entry.category in ("custom_signals", "custom_factors"):
+            _archive_result(results, entry.category).setdefault("smoke", []).append(
+                _smoke_entry(entry, payload)
+            )
+
+
+def _finalize_archive_import(
+    parsed, results, prefs_payload, secrets_payload, allow_overwrite, reload_hints
+) -> None:
+    # auth.json 是外部写入的凭证文件, 进程内密码/会话缓存需要重读。
+    if results.get("auth", {}).get("imported"):
+        from app.services import auth as auth_store
+
+        auth_store.invalidate_runtime_caches()
+
+    # 偏好/密钥最后落: merge 语义 (备份键覆盖本地同名键, 本地新增键保留),
+    # 走各 store 的 save (自带锁、0600 与缓存失效)。
+    if prefs_payload is not None:
+        from app.services import preferences
+
+        preferences.save(prefs_payload)
+        _archive_result(results, "preferences")["imported"] += 1
+    if secrets_payload is not None:
+        from app import secrets_store
+
+        secrets_store.save(secrets_payload)
+        _archive_result(results, "secrets")["imported"] += 1
+
+    ui_prefs = prefs_payload.get("ui_prefs") if prefs_payload else None
+    has_legacy_pool = isinstance(ui_prefs, dict) and "strategy_pool" in ui_prefs
+    legacy_only = not any(entry.category == "strategy_pool" for entry in parsed.entries)
+    has_pool_file = (_data_dir() / "user_data" / "strategy_pool.json").is_file()
+    if (has_pool_file and (results.get("strategy_pool") or has_legacy_pool)) or (
+        legacy_only and has_legacy_pool
+    ):
+        from app.services import strategy_pool
+
+        # 完整新文件优先; 未勾选/冲突跳过新文件时也不能借旧偏好绕过保护。
+        try:
+            strategy_pool.restore_legacy_preferences(
+                allow_overwrite=legacy_only and allow_overwrite and has_legacy_pool
+            )
+        except (ValueError, OSError):
+            logger.warning(
+                "strategy library preference shadow could not be reconciled after import"
+            )
+
+
+def apply_archive(
+    data: bytes, *, allow_overwrite: bool = False, categories: Iterable[str] | None = None
+) -> dict[str, Any]:
     """把备份写入本机。categories 只导入勾选的类别 (None=全部); 文件类默认冲突
     跳过; 偏好/密钥 merge。逐条容错, 单条失败不影响其余条目, 结果按类别汇总。
     返回 reload_hints 供 API 层刷新引擎。"""
@@ -624,147 +934,22 @@ def apply_archive(data: bytes, *, allow_overwrite: bool = False, categories: Ite
         skipped_unselected = len(parsed.entries) - len(entries)
     results: dict[str, dict[str, Any]] = {}
     reload_hints = {key: False for key in _RELOAD_HINT_KEYS}
-    prefs_payload: dict | None = None
-    secrets_payload: dict | None = None
 
-    def _result(category: str) -> dict[str, Any]:
-        return results.setdefault(
-            category,
-            {"key": category, "label": _CATEGORY_LABELS[category],
-             "imported": 0, "skipped_conflict": 0, "failed": []},
-        )
-
-    # 第一遍: 截断读全部条目 + 冲突过滤 + 偏好/密钥提取。
-    # 策略条目先攒批 — 同目录 _*.py 依赖要进主文件的 import 白名单
-    # (与 engine._load_file 的 dependency glob 口径一致), 校验必须看全批。
-    strategy_codes: dict[_Entry, str] = {}
-    policy_codes: dict[_Entry, str] = {}
-    plain_entries: list[tuple[_Entry, bytes]] = []
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as e:  # _parse_archive 已校验过, 理论不可达
         raise ConfigBackupError("不是有效的 ZIP 备份文件") from e
     with zf:
-        for entry in entries:
-            try:
-                payload = _read_entry(zf, entry.name)
-            except ConfigBackupError as e:
-                _result(entry.category)["failed"].append({"file": entry.name, "error": str(e)})
-                continue
-            if entry.category == "preferences":
-                prefs_payload = _validate_json_object(payload, what="偏好设置 ")
-                continue
-            if entry.category == "secrets":
-                secrets_payload = _validate_json_object(payload, what="密钥文件 ")
-                continue
-            if entry.target.exists() and not allow_overwrite:
-                _result(entry.category)["skipped_conflict"] += 1
-                continue
-            if entry.category == "strategies":
-                try:
-                    strategy_codes[entry] = payload.decode("utf-8")
-                except UnicodeDecodeError as e:
-                    _result("strategies")["failed"].append(
-                        {"file": entry.name, "error": f"策略文件不是有效 UTF-8: {e}"}
-                    )
-            elif entry.category == "position_policies":
-                try:
-                    policy_codes[entry] = payload.decode("utf-8")
-                except UnicodeDecodeError as e:
-                    _result("position_policies")["failed"].append(
-                        {"file": entry.name, "error": f"仓位策略文件不是有效 UTF-8: {e}"}
-                    )
-            else:
-                plain_entries.append((entry, payload))
+        classified = _classify_archive_entries(zf, entries, allow_overwrite, results)
+    strategy_codes, policy_codes, plain_entries, pg_snapshots, prefs_payload, secrets_payload = (
+        classified
+    )
 
-    # 第二遍: 内容校验 + 写盘 (策略 → 仓位策略 → 其余文件)。
-    for directory, batch in _groupby_dir(strategy_codes):
-        # 依赖名单 = 本批同目录 _*.py + 本机已存在的 _*.py (引擎 reload 时
-        # glob 的是落盘后的目录, 两边取并集才不误杀)。
-        dep_names = {p.name[:-3] for p in directory.glob("_*.py")}
-        dep_names |= {e.target.name[:-3] for e, _ in batch if e.target.name.startswith("_")}
-        for entry, code in batch:
-            is_dep = entry.target.name.startswith("_")
-            try:
-                _validate_strategy_code(code, is_dependency=is_dep, dep_names=frozenset(dep_names))
-                _write_payload(entry.target, code.encode("utf-8"))
-            except (ConfigBackupError, ValueError, SyntaxError, OSError) as e:
-                _result("strategies")["failed"].append({"file": entry.name, "error": str(e)})
-                continue
-            _result("strategies")["imported"] += 1
-            reload_hints["strategies"] = True
-
-    # 仓位策略: 与策略同一信任模型 — 安全校验 + 结构解析 + 合成冒烟三关全过才写盘
-    # (validate_policy_code 内置); 注册表按目录签名惰性刷新, 无需 reload 钩子。
-    if policy_codes:
-        from app.backtest import position_policies as _pp
-
-        for entry, code in policy_codes.items():
-            check = _pp.validate_policy_code(code)
-            if not check["ok"]:
-                _result("position_policies")["failed"].append(
-                    {"file": entry.name, "error": "; ".join(check["issues"])}
-                )
-                continue
-            try:
-                _write_payload(entry.target, code.encode("utf-8"))
-            except OSError as e:
-                _result("position_policies")["failed"].append({"file": entry.name, "error": str(e)})
-                continue
-            _result("position_policies")["imported"] += 1
-        _pp.invalidate_cache()
-
-    for entry, payload in plain_entries:
-        try:
-            _validate_payload(entry, payload)
-            if entry.category == "strategy_pool":
-                from app.services import strategy_pool
-
-                strategy_pool.restore_snapshot(json.loads(payload), allow_overwrite=allow_overwrite)
-            else:
-                _write_payload(entry.target, payload)
-        except (ConfigBackupError, ValueError, OSError, UnicodeDecodeError) as e:
-            _result(entry.category)["failed"].append({"file": entry.name, "error": str(e)})
-            continue
-        _result(entry.category)["imported"] += 1
-        if entry.category in reload_hints:
-            reload_hints[entry.category] = True
-        # 导入即冒烟 (P4): 信号/因子落盘后立刻静态冒烟, 结果随导入返回 —
-        # 导入完成即知道定义能不能算, 不用等回测报错才发现。
-        if entry.category in ("custom_signals", "custom_factors"):
-            _result(entry.category).setdefault("smoke", []).append(_smoke_entry(entry, payload))
-
-    # auth.json 是外部写入的凭证文件, 进程内密码/会话缓存需要重读。
-    if results.get("auth", {}).get("imported"):
-        from app.services import auth as auth_store
-
-        auth_store.invalidate_runtime_caches()
-
-    # 偏好/密钥最后落: merge 语义 (备份键覆盖本地同名键, 本地新增键保留),
-    # 走各 store 的 save (自带锁、0600 与缓存失效)。
-    if prefs_payload is not None:
-        from app.services import preferences
-
-        preferences.save(prefs_payload)
-        _result("preferences")["imported"] += 1
-    if secrets_payload is not None:
-        from app import secrets_store
-
-        secrets_store.save(secrets_payload)
-        _result("secrets")["imported"] += 1
-
-    ui_prefs = prefs_payload.get("ui_prefs") if prefs_payload else None
-    has_legacy_pool = isinstance(ui_prefs, dict) and "strategy_pool" in ui_prefs
-    legacy_only = not any(entry.category == "strategy_pool" for entry in parsed.entries)
-    has_pool_file = (_data_dir() / "user_data" / "strategy_pool.json").is_file()
-    if (has_pool_file and (results.get("strategy_pool") or has_legacy_pool)) or (legacy_only and has_legacy_pool):
-        from app.services import strategy_pool
-
-        # 完整新文件优先; 未勾选/冲突跳过新文件时也不能借旧偏好绕过保护。
-        try:
-            strategy_pool.restore_legacy_preferences(allow_overwrite=legacy_only and allow_overwrite and has_legacy_pool)
-        except (ValueError, OSError):
-            logger.warning("strategy library preference shadow could not be reconciled after import")
+    _restore_code_batches(strategy_codes, policy_codes, results, reload_hints)
+    _restore_pg_and_plain(pg_snapshots, plain_entries, allow_overwrite, results, reload_hints)
+    _finalize_archive_import(
+        parsed, results, prefs_payload, secrets_payload, allow_overwrite, reload_hints
+    )
 
     failed_total = sum(len(r["failed"]) for r in results.values())
     logger.info(
@@ -794,7 +979,7 @@ def _groupby_dir(strategy_codes: dict[_Entry, str]) -> list[tuple[Path, list[tup
     return sorted(grouped.items(), key=lambda kv: kv[0].name)
 
 
-def _smoke_entry(entry: "_Entry", payload: bytes) -> dict:
+def _smoke_entry(entry: _Entry, payload: bytes) -> dict:
     """对导入的信号/因子定义跑静态冒烟; 冒烟自身异常不阻断导入 (fail-open)。"""
     from app.definitions import smoke_definition
 
@@ -805,6 +990,10 @@ def _smoke_entry(entry: "_Entry", payload: bytes) -> dict:
             raise ValueError("定义不是 JSON 对象")
         result = smoke_definition(kind, definition)
     except Exception as e:  # noqa: BLE001 — 冒烟是增值信息, 不构成导入失败
-        return {"file": entry.name, "ok": False, "issues": [{"code": "S000", "message": f"冒烟未执行: {e}"}]}
+        return {
+            "file": entry.name,
+            "ok": False,
+            "issues": [{"code": "S000", "message": f"冒烟未执行: {e}"}],
+        }
     result["file"] = entry.name
     return result

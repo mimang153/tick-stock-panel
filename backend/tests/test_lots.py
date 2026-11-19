@@ -1,8 +1,10 @@
 """批次 (持仓提醒) 测试: 批次→规则映射 + 校验 + sync 一致性 (锁/校验先行/级联删除)。"""
+
 from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from fastapi import HTTPException
@@ -31,7 +33,7 @@ def _lot(**overrides):
 class _EngineStub:
     def __init__(self) -> None:
         self.set_calls = 0
-        self.rules = []
+        self.rules: list = []
 
     def set_rules(self, rules) -> None:
         self.set_calls += 1
@@ -177,7 +179,7 @@ def test_sync_lot_etf_resolves_asset_type(tmp_path, monkeypatch):
         resolve_asset_type=lambda _symbol: "etf",
     )
     state = SimpleNamespace(repo=repo, monitor_engine=engine)
-    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    request: Any = SimpleNamespace(app=SimpleNamespace(state=state))
     _patch_channels(monkeypatch)
     monkeypatch.setattr(lots_api, "_reload_engine", lambda r: None)
     lots_api.sync_lot(request, _lot(symbol="510300.SH"))

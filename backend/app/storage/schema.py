@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import polars as pl
 
@@ -350,6 +350,124 @@ ORDER BY task""",
 ) ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY tuple()
 ORDER BY (date, kind, member)""",
+    # ── 派生结果缓存（RC-12）：市场环境时序 ──────────────────────────
+    # 列随评分模型迭代扩展，用 payload_json 存整行避免频繁 DDL；date 独立列
+    # 供按日覆盖/删除与去重。本地 parquet 仅作离线兼容，在线读源为 CK。
+    "regime_history": """CREATE TABLE IF NOT EXISTS {table} (
+  date              Date,
+  payload_json      String,
+  updated_at        DateTime64(3) DEFAULT now64(3)
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY tuple()
+ORDER BY date""",
+    # ── 修补契约（DES-002）：审计/快照/generation 元数据 ──────────────
+    "ck_repair_audit": """CREATE TABLE IF NOT EXISTS {table} (
+  id             UUID DEFAULT generateUUIDv4(),
+  repair_id      String,
+  dataset        LowCardinality(String),
+  day            Date,
+  symbol         String,
+  change_type    LowCardinality(String),
+  before_json    Nullable(String),
+  after_json     Nullable(String),
+  reason         LowCardinality(String),
+  status         LowCardinality(String),
+  created_by     LowCardinality(String),
+  created_at     DateTime64(3) DEFAULT now64(3),
+  updated_by     LowCardinality(String),
+  updated_at     DateTime64(3) DEFAULT now64(3)
+) ENGINE = MergeTree
+PARTITION BY toYYYYMM(day)
+ORDER BY (dataset, day, repair_id, symbol, id)""",
+    "ck_repair_snapshot": """CREATE TABLE IF NOT EXISTS {table} (
+  id             UUID DEFAULT generateUUIDv4(),
+  repair_id      String,
+  dataset        LowCardinality(String),
+  day            Date,
+  symbol         String,
+  payload_json   String,
+  created_by     LowCardinality(String),
+  created_at     DateTime64(3) DEFAULT now64(3),
+  updated_by     LowCardinality(String),
+  updated_at     DateTime64(3) DEFAULT now64(3)
+) ENGINE = MergeTree
+PARTITION BY toYYYYMM(day)
+ORDER BY (dataset, day, repair_id, symbol, id)""",
+    "ck_enriched_generation": """CREATE TABLE IF NOT EXISTS {table} (
+  id             UUID DEFAULT generateUUIDv4(),
+  asset_type     LowCardinality(String),
+  generation_id  String,
+  state          LowCardinality(String),
+  changed_from   Nullable(Date),
+  heartbeat_at   DateTime64(3),
+  committed_at   Nullable(DateTime64(3)),
+  created_by     LowCardinality(String),
+  created_at     DateTime64(3) DEFAULT now64(3),
+  updated_by     LowCardinality(String),
+  updated_at     DateTime64(3) DEFAULT now64(3)
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY asset_type
+ORDER BY (asset_type, generation_id)""",
+    # ── 协调态审计（DES-004 §2.3 / 方案 B）：Redis 协调态丢失后的 CK 重建源 ──
+    "ck_coord_job_state": """CREATE TABLE IF NOT EXISTS {table} (
+  id          UUID DEFAULT generateUUIDv4() COMMENT '行主键',
+  job_id      String COMMENT '任务唯一标识',
+  state_json  String COMMENT '任务完整状态快照JSON(id/status/stage/progress/result/error等)',
+  status      LowCardinality(String) COMMENT '任务状态快照,便于过滤',
+  created_at  DateTime64(3) COMMENT '首次写入时间',
+  created_by  LowCardinality(String) COMMENT '首次写入者标识',
+  updated_at  DateTime64(3) DEFAULT now64(3) COMMENT '最后更新时间,兼作ReplacingMergeTree版本列',
+  updated_by  LowCardinality(String) COMMENT '最后更新者标识'
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY tuple()
+ORDER BY job_id
+COMMENT '任务状态审计:每个job保留最新快照,Redis JobState丢失后据此重建'""",
+    "ck_coord_cancel_request": """CREATE TABLE IF NOT EXISTS {table} (
+  id           UUID DEFAULT generateUUIDv4() COMMENT '行主键',
+  job_id       String COMMENT '被取消的任务标识',
+  requested_at DateTime64(3) COMMENT '取消请求发起时间',
+  actor        LowCardinality(String) COMMENT '取消请求发起者标识',
+  consumed     UInt8 COMMENT '是否已消费:1=已消费不再恢复,0=待恢复',
+  created_at   DateTime64(3) COMMENT '审计记录创建时间',
+  created_by   LowCardinality(String) COMMENT '审计记录创建者标识',
+  updated_at   DateTime64(3) DEFAULT now64(3) COMMENT '最后更新时间,兼作版本列',
+  updated_by   LowCardinality(String) COMMENT '最后更新者标识'
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY tuple()
+ORDER BY job_id
+COMMENT '取消请求审计:每个job保留最新取消请求,Redis CancelFlag丢失后据此重建'""",
+    "ck_coord_limiter_lease": """CREATE TABLE IF NOT EXISTS {table} (
+  id           UUID DEFAULT generateUUIDv4() COMMENT '行主键',
+  lease_id     String COMMENT '租约唯一标识,由limiter在acquire时生成',
+  owner_id     String COMMENT '租约持有者标识(进程/任务)',
+  kind         LowCardinality(String) COMMENT '任务类别:normal/mining/exclusive',
+  weight       UInt32 COMMENT '占用容量权重',
+  acquired_at  DateTime64(3) COMMENT '获取租约时间',
+  released_at  Nullable(DateTime64(3)) COMMENT '释放租约时间,未释放为NULL',
+  created_at   DateTime64(3) COMMENT '审计记录创建时间',
+  created_by   LowCardinality(String) COMMENT '审计记录创建者标识',
+  updated_at   DateTime64(3) DEFAULT now64(3) COMMENT '最后更新时间,兼作版本列',
+  updated_by   LowCardinality(String) COMMENT '最后更新者标识'
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY tuple()
+ORDER BY lease_id
+COMMENT '容量租约审计:记录acquire/release生命周期,Redis LimiterCounter丢失后按未释放租约重建'""",
+    "ck_mining_run_audit": """CREATE TABLE IF NOT EXISTS {table} (
+  id             UUID DEFAULT generateUUIDv4() COMMENT '行主键',
+  namespace      LowCardinality(String) COMMENT '命名空间:mining/guardian',
+  run_id         String COMMENT '运行标识',
+  from_status    LowCardinality(String) COMMENT '转换前状态',
+  to_status      LowCardinality(String) COMMENT '转换后状态',
+  manifest_json  String COMMENT '转换后的manifest完整快照JSON',
+  error          Nullable(String) COMMENT '转换附带错误信息',
+  created_at     DateTime64(3) COMMENT '审计记录写入时间',
+  created_by     LowCardinality(String) COMMENT '写入者标识',
+  updated_at     DateTime64(3) DEFAULT now64(3) COMMENT '最后更新时间,兼作版本列',
+  updated_by     LowCardinality(String) COMMENT '最后更新者标识'
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY namespace
+ORDER BY (namespace, run_id, to_status, created_at)
+COMMENT 'mining运行审计:记录每次状态转换的快照,Redis状态机丢失后据此重建run'""",
 }
 
 # 建表顺序即 DDL 声明顺序（无外键依赖，保持稳定即可）
@@ -560,7 +678,7 @@ def _migration_v2_instruments_nullable(client: ClickHouseClient) -> None:
         )
 
 
-_MIGRATIONS: dict[int, object] = {
+_MIGRATIONS: dict[int, Callable[[ClickHouseClient], None]] = {
     2: _migration_v2_instruments_nullable,
 }
 

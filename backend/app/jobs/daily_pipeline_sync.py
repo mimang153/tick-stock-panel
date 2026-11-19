@@ -329,22 +329,25 @@ def _run_sync_index(s: _root._RunState) -> tuple[int, int]:
     from datetime import datetime as _dt
     from datetime import timedelta as _td
 
-    index_dir = s.repo.store.data_dir / "kline_index_enriched"
-    index_dates = (
-        sorted(
-            d.name[5:]
-            for d in index_dir.glob("date=*")
-            if d.is_dir() and d.name.startswith("date=")
+    storage = getattr(s.repo, "storage", None)
+    if storage is not None:
+        index_dates = storage.list_daily_dates("kline_index_enriched")
+    else:
+        index_dir = s.repo.store.data_dir / "kline_index_enriched"
+        raw_dates = (
+            sorted(
+                d.name[5:]
+                for d in index_dir.glob("date=*")
+                if d.is_dir() and d.name.startswith("date=")
+            )
+            if index_dir.exists()
+            else []
         )
-        if index_dir.exists()
-        else []
-    )
+        index_dates = [_date.fromisoformat(ds) for ds in raw_dates]
     if s.override_start_date:
         index_start = s.override_start_date
     else:
-        index_start = (
-            _date.fromisoformat(index_dates[-1]) if index_dates else s.today - _td(days=365)
-        )
+        index_start = index_dates[-1] if index_dates else s.today - _td(days=365)
     if s.index_stale_day is not None and index_start > s.index_stale_day:
         index_start = s.index_stale_day
 

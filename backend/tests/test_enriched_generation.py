@@ -662,7 +662,10 @@ def test_run_pipeline_abandons_claim_after_partial_write(tmp_path, monkeypatch, 
         frame.write_parquet(d / "part.parquet")
         ck_runtime.write_daily("kline_daily", frame)
 
-    original_write = EnrichedPublication.write_parquet
+    from app.enriched_generation import CKEnrichedPublication
+
+    # 显式 storage 下走 CK 发布适配器，故障注入必须打在实际写入点上。
+    original_write = CKEnrichedPublication.write_parquet
     calls = {"n": 0}
     failing = {"on": True}
 
@@ -672,7 +675,7 @@ def test_run_pipeline_abandons_claim_after_partial_write(tmp_path, monkeypatch, 
             raise RuntimeError("injected failure during write")
         return original_write(self, df, out)
 
-    monkeypatch.setattr(EnrichedPublication, "write_parquet", write_then_fail)
+    monkeypatch.setattr(CKEnrichedPublication, "write_parquet", write_then_fail)
     monkeypatch.setattr(pipeline_module, "_load_factors", lambda _p: pl.DataFrame())
 
     with pytest.raises(RuntimeError, match="injected"):
@@ -680,15 +683,14 @@ def test_run_pipeline_abandons_claim_after_partial_write(tmp_path, monkeypatch, 
 
     failing["on"] = False
     assert calls["n"] >= 2, "应至少写入一个分区后才失败"
-    marker = json.loads((tmp_path / ".matrix_generation_stock.json").read_text())
-    assert marker["state"] == "publishing", "部分写入后必须保持 fail-closed"
+    # RC-13: 显式 storage 下不再写本地 generation marker，失败通过 CK generation 表达。
+    assert not (tmp_path / ".matrix_generation_stock.json").exists()
+    failed = ck_runtime.publishing_generations("stock")
+    # fail_generation 已把该 generation 置为 failed，不在 publishing 列表中。
+    assert failed == []
 
-    # 同一进程内的下一个写入方应能立即接管 (无需等心跳超时)
-    out = tmp_path / "kline_daily_enriched" / "date=2026-08-14" / "part.parquet"
-    follower = EnrichedPublication(tmp_path, recover=True, claim_wait_s=0.2)
-    follower.write_parquet(_frame(10.0), out)
-    assert follower.commit()
-    assert (
-        get_enriched_generation(tmp_path, "stock")
-        == json.loads((tmp_path / ".matrix_generation_stock.json").read_text())["generation"]
-    )
+    # 下一次 run_pipeline 正常完成：CK 生成新的 ready generation，且不产生本地 marker。
+    assert pipeline_module.run_pipeline(data_dir=tmp_path, new_dates_only=True) >= 0
+    assert not (tmp_path / ".matrix_generation_stock.json").exists()
+    final = ck_runtime.current_generation("stock")
+    assert final and final["state"] == "ready" and final["generation_id"]

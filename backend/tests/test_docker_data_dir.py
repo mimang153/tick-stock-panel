@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from app import config
+
+
+def _settings(**overrides: Any) -> config.Settings:
+    """_env_file 是 pydantic-settings 的私有构造参数, 经 **kwargs 传递以避开 mypy 签名限制。"""
+    return config.Settings(**overrides)
 
 
 def mount_line(point: Path | str, filesystem: str = "ext4") -> str:
@@ -35,7 +41,7 @@ def test_docker_env_file_uses_mounted_app_data(docker_layout, tmp_path, value, c
     env = tmp_path / "example.env"
     env.write_text(f"DATA_DIR={value}\n")
     with caplog.at_level(logging.WARNING, logger="app.config"):
-        configured = config.Settings(_env_file=env)
+        configured = _settings(_env_file=env)
     assert configured.data_dir == app / "data"
     assert not (root / "data").exists()
     assert not (app / "data").exists()  # Resolution never creates or migrates data.
@@ -46,7 +52,7 @@ def test_docker_env_file_uses_mounted_app_data(docker_layout, tmp_path, value, c
 def test_docker_custom_relative_directory_uses_app_root(docker_layout):
     _, app, mounts = docker_layout
     mounts.write_text(mount_line(app / "custom"))
-    assert config.Settings(_env_file=None, data_dir="custom").data_dir == app / "custom"
+    assert _settings(_env_file=None, data_dir="custom").data_dir == app / "custom"
 
 
 def test_absolute_custom_directory_is_preserved(docker_layout, tmp_path, caplog):
@@ -56,7 +62,7 @@ def test_absolute_custom_directory_is_preserved(docker_layout, tmp_path, caplog)
     (legacy / "keep").write_bytes(b"legacy-data")
     custom = tmp_path / "external volume" / "nested"
     mounts.write_text(mount_line(custom.parent))
-    configured = config.Settings(_env_file=None, data_dir=custom)
+    configured = _settings(_env_file=None, data_dir=custom)
     assert configured.data_dir == custom
     assert not caplog.records
     assert not custom.exists()
@@ -65,12 +71,16 @@ def test_absolute_custom_directory_is_preserved(docker_layout, tmp_path, caplog)
 
 @pytest.mark.parametrize("docker,frozen", [("0", False), ("", False), ("1", True)])
 def test_source_and_desktop_relative_paths_are_unchanged(
-    docker_layout, monkeypatch, docker, frozen, caplog,
+    docker_layout,
+    monkeypatch,
+    docker,
+    frozen,
+    caplog,
 ):
     root, _, _ = docker_layout
     monkeypatch.setenv("TSP_DOCKER", docker)
     monkeypatch.setattr(config, "_IS_FROZEN", frozen)
-    assert config.Settings(_env_file=None, data_dir="./data").data_dir == root / "data"
+    assert _settings(_env_file=None, data_dir="./data").data_dir == root / "data"
     assert not caplog.records
 
 
@@ -81,14 +91,15 @@ def test_existing_mounted_legacy_directory_is_kept(docker_layout, caplog):
     saved = legacy / "secrets-sentinel"
     saved.write_bytes(b"keep-old-data")
     mounts.write_text(mount_line(legacy) + mount_line(app / "data"))
-    configured = config.Settings(_env_file=None, data_dir="./data")
+    configured = _settings(_env_file=None, data_dir="./data")
     assert configured.data_dir == legacy
     assert saved.read_bytes() == b"keep-old-data"
     assert "沿用" in caplog.text
 
 
 def test_unmounted_legacy_data_blocks_silent_switch_and_never_overwrites(
-    docker_layout, monkeypatch,
+    docker_layout,
+    monkeypatch,
 ):
     root, app, _ = docker_layout
     legacy = root / "data"
@@ -101,7 +112,7 @@ def test_unmounted_legacy_data_blocks_silent_switch_and_never_overwrites(
     new.write_bytes(b"new-credentials")
     monkeypatch.setenv("AI_API_KEY", "audit-secret-must-not-appear")
     with pytest.raises(RuntimeError, match="先备份") as failure:
-        config.Settings(_env_file=None, data_dir="./data")
+        _settings(_env_file=None, data_dir="./data")
     assert "audit-secret-must-not-appear" not in str(failure.value)
     assert old.read_bytes() == b"old-credentials"
     assert new.read_bytes() == b"new-credentials"
@@ -122,14 +133,26 @@ def test_unreadable_legacy_directory_does_not_switch(docker_layout, monkeypatch)
 
     monkeypatch.setattr(Path, "iterdir", iterdir)
     with pytest.raises(RuntimeError, match="无法检查"):
-        config.Settings(_env_file=None, data_dir="./data")
+        _settings(_env_file=None, data_dir="./data")
 
 
-@pytest.mark.parametrize("mounts_kind", [
-    "missing", "unreadable", "malformed", "root", "sibling", "tmpfs", "nested_tmpfs",
-])
+@pytest.mark.parametrize(
+    "mounts_kind",
+    [
+        "missing",
+        "unreadable",
+        "malformed",
+        "root",
+        "sibling",
+        "tmpfs",
+        "nested_tmpfs",
+    ],
+)
 def test_mount_check_warns_without_breaking_startup(
-    docker_layout, monkeypatch, mounts_kind, caplog,
+    docker_layout,
+    monkeypatch,
+    mounts_kind,
+    caplog,
 ):
     _, app, mounts = docker_layout
     if mounts_kind == "missing":
@@ -153,7 +176,7 @@ def test_mount_check_warns_without_breaking_startup(
         mounts.write_text(mount_line(app) + mount_line(app / "data", "tmpfs"))
     else:
         mounts.write_text(mount_line(app / "data", "tmpfs"))
-    assert config.Settings(_env_file=None, data_dir="./data").data_dir == app / "data"
+    assert _settings(_env_file=None, data_dir="./data").data_dir == app / "data"
     assert "持久化挂载" in caplog.text
 
 
@@ -164,4 +187,4 @@ def test_missing_mount_info_does_not_hide_unmigrated_data(docker_layout):
     (legacy / "keep").write_bytes(b"keep")
     mounts.unlink()
     with pytest.raises(RuntimeError, match="先备份"):
-        config.Settings(_env_file=None, data_dir="./data")
+        _settings(_env_file=None, data_dir="./data")

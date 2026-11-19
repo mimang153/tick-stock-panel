@@ -21,6 +21,7 @@
 ⚠️ 标点惯例: 本仓 `tests/` 共 288 个文件, 其中 271 个不含 RUF00x(全角标点)告警 ⇒ 本文件随多数派
   在**文档串/注释**里用 ASCII 标点(`(` `)` `,` `:` `;`), 以保持 `ruff check tests` 零新增。
 """
+
 from __future__ import annotations
 
 import logging
@@ -57,6 +58,7 @@ def test_does_not_start_when_preference_disabled(monkeypatch):
 
 def test_logs_and_does_not_start_when_tier_disallows(monkeypatch, caplog):
     """档位 none ⇒ 不启动 **且必须留日志**(09-16 事故的教训: 静默不可排查)。"""
+    monkeypatch.setattr(preferences, "save", lambda updates: None)
     qs, started = _make(monkeypatch, tier_allowed=False, pref_enabled=True)
     with caplog.at_level(logging.INFO, logger="app.services.quote_service"):
         qs.boot_check()

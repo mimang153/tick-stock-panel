@@ -12,13 +12,14 @@
 - 引用的注册因子(含 virtual)不内联表达式: 调用方用 materialize_scoring_columns
   物化成列, 编译产物统一以 pl.col(name) 引用; 运行期缺列即 fail-closed。
 """
+
 from __future__ import annotations
 
 import copy
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any
+from typing import Any, cast
 
 import polars as pl
 
@@ -27,10 +28,19 @@ from app.factors.registry import factor_dependencies, factor_warmup_bars, get_fa
 FACTOR_COLUMN = "__dsl_factor__"
 
 # 基准列 (设计文档 §3.1); 指标列 = 注册表 base 因子, 已注册因子 id 经注册表解析。
-BASE_COLUMNS: frozenset[str] = frozenset({
-    "open", "high", "low", "close", "volume", "amount",
-    "turnover_rate", "prev_close", "raw_close",
-})
+BASE_COLUMNS: frozenset[str] = frozenset(
+    {
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "turnover_rate",
+        "prev_close",
+        "raw_close",
+    }
+)
 
 MAX_AST_DEPTH = 12
 MAX_TOKENS = 200
@@ -67,10 +77,23 @@ OPERATORS: dict[str, tuple[int, tuple[str, ...]]] = {
     "sign": (1, ()),
     "sqrt": (1, ()),
 }
-TS_OPERATORS = frozenset({
-    "ts_mean", "ts_std", "ts_sum", "ts_max", "ts_min", "ts_delay", "ts_delta",
-    "ts_rank", "ts_zscore", "ts_corr", "ts_cov", "ts_quantile", "decay_linear",
-})
+TS_OPERATORS = frozenset(
+    {
+        "ts_mean",
+        "ts_std",
+        "ts_sum",
+        "ts_max",
+        "ts_min",
+        "ts_delay",
+        "ts_delta",
+        "ts_rank",
+        "ts_zscore",
+        "ts_corr",
+        "ts_cov",
+        "ts_quantile",
+        "decay_linear",
+    }
+)
 CROSS_OPERATORS = frozenset({"rank", "zscore", "winsorize"})
 
 
@@ -94,7 +117,9 @@ class DslError:
 class CompiledFormula:
     ok: bool
     errors: list[DslError] = field(default_factory=list)
-    frame_transform: Any | None = None  # (frame: pl.DataFrame) -> pl.DataFrame | None (缺列 None = E013)
+    frame_transform: Any | None = (
+        None  # (frame: pl.DataFrame) -> pl.DataFrame | None (缺列 None = E013)
+    )
     dependencies: frozenset[str] = frozenset()  # 展开到 enriched base 列
     referenced_factors: frozenset[str] = frozenset()  # 引用的注册因子 id (含 virtual, 需物化)
     warmup_bars: int = 1
@@ -157,8 +182,9 @@ class _Parser:
         node, error = self._or_expr()
         if error:
             return None, error
-        if self._peek() is not None:
-            _, value, offset = self._peek()
+        token = self._peek()
+        if token is not None:
+            _, value, offset = token
             return None, DslError("E014", f"语法错误: 多余的记号 '{value}'", offset=offset)
         return node, None
 
@@ -241,7 +267,9 @@ class _Parser:
             return {"kind": "num", "value": value, "children": [], "offset": offset}, None
         if kind == "ident":
             if value in _KEYWORDS:
-                return None, DslError("E014", f"语法错误: 关键字 '{value}' 不能作为操作数", offset=offset)
+                return None, DslError(
+                    "E014", f"语法错误: 关键字 '{value}' 不能作为操作数", offset=offset
+                )
             nxt = self._peek()
             if nxt and nxt[0] == "op" and nxt[1] == "(":
                 return self._call(value, offset)
@@ -303,22 +331,37 @@ def _const_value(node: dict) -> float | None:
     return None
 
 
-def _check_call(node: dict, errors: list[DslError]) -> dict[str, float]:
-    """检查函数签名与常量参数范围; 返回解析出的常量参数表。"""
-    name = node["value"]
-    args = node["children"]
+def _check_call_signature(
+    name: str, args: list[dict], node: dict, errors: list[DslError]
+) -> tuple[int, tuple[str, ...]] | None:
     if name not in OPERATORS:
-        errors.append(DslError("E002", f"未知函数: {name}", offset=node["offset"], detail={"name": name}))
-        return {}
+        errors.append(
+            DslError("E002", f"未知函数: {name}", offset=node["offset"], detail={"name": name})
+        )
+        return None
     n_expr, const_names = OPERATORS[name]
-    has_optional_k = name == "winsorize"
-    total_min, total_max = n_expr + (0 if has_optional_k else len(const_names)), n_expr + len(const_names)
+    total_min = n_expr + (0 if name == "winsorize" else len(const_names))
+    total_max = n_expr + len(const_names)
     if not (total_min <= len(args) <= total_max):
-        errors.append(DslError(
-            "E003", f"函数 {name} 参数数量不符: 期望 {total_min}~{total_max} 个, 实际 {len(args)}",
-            offset=node["offset"], detail={"name": name, "args": len(args)},
-        ))
-        return {}
+        errors.append(
+            DslError(
+                "E003",
+                f"函数 {name} 参数数量不符: 期望 {total_min}~{total_max} 个, 实际 {len(args)}",
+                offset=node["offset"],
+                detail={"name": name, "args": len(args)},
+            )
+        )
+        return None
+    return n_expr, const_names
+
+
+def _parse_call_constants(
+    name: str,
+    args: list[dict],
+    n_expr: int,
+    const_names: tuple[str, ...],
+    errors: list[DslError],
+) -> dict[str, float]:
     constants: dict[str, float] = {}
     for index, const_name in enumerate(const_names):
         arg_index = n_expr + index
@@ -329,39 +372,107 @@ def _check_call(node: dict, errors: list[DslError]) -> dict[str, float]:
         arg = args[arg_index]
         value = _const_value(arg)
         if value is None:
-            errors.append(DslError(
-                "E003", f"函数 {name} 的参数 {const_name} 必须是数字常量",
-                offset=arg["offset"], detail={"name": name, "param": const_name},
-            ))
+            errors.append(
+                DslError(
+                    "E003",
+                    f"函数 {name} 的参数 {const_name} 必须是数字常量",
+                    offset=arg["offset"],
+                    detail={"name": name, "param": const_name},
+                )
+            )
             continue
         constants[const_name] = value
+    return constants
+
+
+def _validate_call_constants(
+    name: str, constants: dict[str, float], node: dict, errors: list[DslError]
+) -> None:
     if "n" in constants:
         n_value = constants["n"]
         if n_value != int(n_value):
-            errors.append(DslError("E004", "窗口参数必须是整数", offset=node["offset"], detail={"n": n_value}))
+            errors.append(
+                DslError("E004", "窗口参数必须是整数", offset=node["offset"], detail={"n": n_value})
+            )
         else:
             n_int = int(n_value)
             if n_int < 0 and name in ("ts_delay", "ts_delta"):
-                errors.append(DslError(
-                    "E005", f"负 shift: {name} 的 n 必须 ≥ 0 (负数即未来函数)",
-                    offset=node["offset"], detail={"n": n_int},
-                ))
+                errors.append(
+                    DslError(
+                        "E005",
+                        f"负 shift: {name} 的 n 必须 ≥ 0 (负数即未来函数)",
+                        offset=node["offset"],
+                        detail={"n": n_int},
+                    )
+                )
             elif name == "ts_delay" and not (1 <= n_int <= DELAY_MAX):
-                errors.append(DslError("E004", f"ts_delay 的 n 必须在 [1,{DELAY_MAX}] 内", offset=node["offset"], detail={"n": n_int}))
+                errors.append(
+                    DslError(
+                        "E004",
+                        f"ts_delay 的 n 必须在 [1,{DELAY_MAX}] 内",
+                        offset=node["offset"],
+                        detail={"n": n_int},
+                    )
+                )
             elif name == "ts_delta" and not (0 <= n_int <= DELAY_MAX):
-                errors.append(DslError("E004", f"ts_delta 的 n 必须在 [0,{DELAY_MAX}] 内", offset=node["offset"], detail={"n": n_int}))
+                errors.append(
+                    DslError(
+                        "E004",
+                        f"ts_delta 的 n 必须在 [0,{DELAY_MAX}] 内",
+                        offset=node["offset"],
+                        detail={"n": n_int},
+                    )
+                )
             elif name not in ("ts_delay", "ts_delta") and not (WINDOW_MIN <= n_int <= WINDOW_MAX):
-                errors.append(DslError(
-                    "E004", f"窗口 n 必须在 [{WINDOW_MIN},{WINDOW_MAX}] 内", offset=node["offset"], detail={"n": n_int},
-                ))
+                errors.append(
+                    DslError(
+                        "E004",
+                        f"窗口 n 必须在 [{WINDOW_MIN},{WINDOW_MAX}] 内",
+                        offset=node["offset"],
+                        detail={"n": n_int},
+                    )
+                )
     if "q" in constants and not (0.0 < constants["q"] < 1.0):
-        errors.append(DslError("E004", "ts_quantile 的 q 必须在 (0,1) 开区间内", offset=node["offset"], detail={"q": constants["q"]}))
+        errors.append(
+            DslError(
+                "E004",
+                "ts_quantile 的 q 必须在 (0,1) 开区间内",
+                offset=node["offset"],
+                detail={"q": constants["q"]},
+            )
+        )
     if "c" in constants and abs(constants["c"]) > POWER_ABS_MAX:
-        errors.append(DslError("E010", f"power 指数 |c| ≤ {POWER_ABS_MAX}", offset=node["offset"], detail={"c": constants["c"]}))
+        errors.append(
+            DslError(
+                "E010",
+                f"power 指数 |c| ≤ {POWER_ABS_MAX}",
+                offset=node["offset"],
+                detail={"c": constants["c"]},
+            )
+        )
     if "k" in constants and not (WINSORIZE_K_RANGE[0] <= constants["k"] <= WINSORIZE_K_RANGE[1]):
-        errors.append(DslError("E011", "winsorize 的 k 必须在 [1,6] 内", offset=node["offset"], detail={"k": constants["k"]}))
+        errors.append(
+            DslError(
+                "E011",
+                "winsorize 的 k 必须在 [1,6] 内",
+                offset=node["offset"],
+                detail={"k": constants["k"]},
+            )
+        )
     if "lo" in constants and "hi" in constants and constants["lo"] > constants["hi"]:
         errors.append(DslError("E003", "clamp 的 lo 不能大于 hi", offset=node["offset"]))
+
+
+def _check_call(node: dict, errors: list[DslError]) -> dict[str, float]:
+    """检查函数签名与常量参数范围; 返回解析出的常量参数表。"""
+    name = node["value"]
+    args = node["children"]
+    signature = _check_call_signature(name, args, node, errors)
+    if signature is None:
+        return {}
+    n_expr, const_names = signature
+    constants = _parse_call_constants(name, args, n_expr, const_names, errors)
+    _validate_call_constants(name, constants, node, errors)
     return constants
 
 
@@ -394,22 +505,20 @@ def _safe_div(numerator: pl.Expr, denominator: pl.Expr) -> pl.Expr:
 
 def _rolling_apply(inner: pl.Expr, op: str, n: int, extra: dict[str, float]) -> pl.Expr:
     """对无 over 的内层序列应用窗口逻辑; 返回值同样不挂 over。"""
-    if op == "ts_mean":
-        return inner.rolling_mean(n, min_samples=n)
-    if op == "ts_std":
-        return inner.rolling_std(n, min_samples=n)
-    if op == "ts_sum":
-        return inner.rolling_sum(n, min_samples=n)
-    if op == "ts_max":
-        return inner.rolling_max(n, min_samples=n)
-    if op == "ts_min":
-        return inner.rolling_min(n, min_samples=n)
+    simple_ops = {
+        "ts_mean": inner.rolling_mean,
+        "ts_std": inner.rolling_std,
+        "ts_sum": inner.rolling_sum,
+        "ts_max": inner.rolling_max,
+        "ts_min": inner.rolling_min,
+        "ts_rank": inner.rolling_rank,
+    }
+    if op in simple_ops:
+        return simple_ops[op](n, min_samples=n)
     if op == "ts_delay":
         return inner.shift(n)
     if op == "ts_delta":
         return inner - inner.shift(n)
-    if op == "ts_rank":
-        return inner.rolling_rank(n, min_samples=n)
     if op == "ts_zscore":
         mean = inner.rolling_mean(n, min_samples=n)
         std = inner.rolling_std(n, min_samples=n)
@@ -425,6 +534,40 @@ def _rolling_apply(inner: pl.Expr, op: str, n: int, extra: dict[str, float]) -> 
         assert weighted is not None
         return _safe_div(weighted, pl.lit(float(n * (n + 1) / 2)))
     raise AssertionError(op)
+
+
+def _bin_op_expr(op: str, left: pl.Expr, right: pl.Expr) -> tuple[pl.Expr | None, bool]:
+    """二元运算分派, 返回 (表达式, 是否布尔结果)。"""
+    if op == "+":
+        return left + right, False
+    if op == "-":
+        return left - right, False
+    if op == "*":
+        return left * right, False
+    if op == "/":
+        return _safe_div(left, right), False
+    if op in _CMP_METHOD:
+        return getattr(left, _CMP_METHOD[op])(right), True
+    if op == "and":
+        return left & right, True
+    if op == "or":
+        return left | right, True
+    return None, False
+
+
+def _compile_bin(node: dict) -> tuple[pl.Expr | None, bool, bool]:
+    """二元节点: 编译左右子树并按需挂 over("symbol")。"""
+    op = node["value"]
+    left, left_window, _ = _compile_node(node["children"][0])
+    right, right_window, _ = _compile_node(node["children"][1])
+    if left is None or right is None:
+        return None, False, False
+    if left_window:
+        left = left.over("symbol")
+    if right_window:
+        right = right.over("symbol")
+    expr, is_bool = _bin_op_expr(op, left, right)
+    return expr, False, is_bool
 
 
 def _compile_node(node: dict) -> tuple[pl.Expr | None, bool, bool]:
@@ -445,91 +588,38 @@ def _compile_node(node: dict) -> tuple[pl.Expr | None, bool, bool]:
             return None, False, False
         return -operand, needs_window, False
     if kind == "bin":
-        op = node["value"]
-        left, left_window, _ = _compile_node(node["children"][0])
-        right, right_window, _ = _compile_node(node["children"][1])
-        if left is None or right is None:
-            return None, False, False
-        if left_window:
-            left = left.over("symbol")
-        if right_window:
-            right = right.over("symbol")
-        if op == "+":
-            return left + right, False, False
-        if op == "-":
-            return left - right, False, False
-        if op == "*":
-            return left * right, False, False
-        if op == "/":
-            return _safe_div(left, right), False, False
-        if op in _CMP_METHOD:
-            return getattr(left, _CMP_METHOD[op])(right), False, True
-        if op == "and":
-            return left & right, False, True
-        if op == "or":
-            return left | right, False, True
-        return None, False, False
+        return _compile_bin(node)
     if kind == "call":
         return _compile_call(node)
     return None, False, False
 
 
-def _compile_call(node: dict) -> tuple[pl.Expr | None, bool, bool]:
-    name = node["value"]
-    children = node["children"]
-    constants: dict[str, float] = node.get("_constants", {})
-    n_expr, _ = OPERATORS[name]
+def _elementwise_expr(
+    name: str, first: pl.Expr, resolved: list[pl.Expr], constants: dict[str, float]
+) -> pl.Expr | None:
+    """逐元素函数名 → 表达式; 未知函数返回 None 由调用方 fail-closed。"""
+    if name == "log":
+        return pl.when(first > 0).then(first.log()).otherwise(None)
+    if name == "abs":
+        return first.abs()
+    if name == "sign":
+        return first.sign()
+    if name == "sqrt":
+        return pl.when(first >= 0).then(first.sqrt()).otherwise(None)
+    if name == "power":
+        return first.pow(constants.get("c", 1.0))
+    if name == "clamp":
+        return first.clip(constants.get("lo"), constants.get("hi"))
+    if name == "min":
+        return pl.min_horizontal(*resolved)
+    if name == "max":
+        return pl.max_horizontal(*resolved)
+    return None
 
-    if name in TS_OPERATORS:
-        inner, _, _ = _compile_node(children[0])
-        if inner is None:
-            return None, False, False
-        if name in ("ts_corr", "ts_cov"):
-            second, _, _ = _compile_node(children[1])
-            if second is None:
-                return None, False, False
-            n = int(constants.get("n", 0))
-            expr = (
-                pl.rolling_corr(inner, second, window_size=n)
-                if name == "ts_corr"
-                else pl.rolling_cov(inner, second, window_size=n)
-            )
-            return expr, True, False
-        expr = _rolling_apply(inner, name, int(constants.get("n", 0)), constants)
-        return expr, True, False
 
-    if name in CROSS_OPERATORS:
-        inner, inner_window, _ = _compile_node(children[0])
-        if inner is None:
-            return None, False, False
-        if inner_window:
-            inner = inner.over("symbol")
-        if name == "rank":
-            count = inner.count().over("date")
-            return inner.rank(method="average").over("date") / count, False, False
-        if name == "zscore":
-            mean = inner.mean().over("date")
-            std = inner.std().over("date")
-            return pl.when(std > 0).then((inner - mean) / std).otherwise(None), False, False
-        k = constants.get("k", 3.0)
-        mean = inner.mean().over("date")
-        std = inner.std().over("date")
-        return inner.clip(mean - k * std, mean + k * std), False, False
-
-    if name == "if_else":
-        cond, cond_window, _ = _compile_node(children[0])
-        then_expr, then_window, _ = _compile_node(children[1])
-        else_expr, else_window, _ = _compile_node(children[2])
-        if cond is None or then_expr is None or else_expr is None:
-            return None, False, False
-        if cond_window:
-            cond = cond.over("symbol")
-        if then_window:
-            then_expr = then_expr.over("symbol")
-        if else_window:
-            else_expr = else_expr.over("symbol")
-        return pl.when(cond).then(then_expr).otherwise(else_expr), False, False
-
+def _compile_elementwise_call(
+    name: str, children: list[dict], constants: dict[str, float], n_expr: int
+) -> tuple[pl.Expr | None, bool, bool]:
     args: list[pl.Expr | None] = []
     arg_windows: list[bool] = []
     for index in range(n_expr):
@@ -540,32 +630,96 @@ def _compile_call(node: dict) -> tuple[pl.Expr | None, bool, bool]:
         return None, False, False
     resolved: list[pl.Expr] = []
     for arg, arg_window in zip(args, arg_windows, strict=True):
+        if arg is None:
+            return None, False, False
         resolved.append(arg.over("symbol") if arg_window else arg)
     first = resolved[0]
-    if name == "log":
-        return pl.when(first > 0).then(first.log()).otherwise(None), False, False
-    if name == "abs":
-        return first.abs(), False, False
-    if name == "sign":
-        return first.sign(), False, False
-    if name == "sqrt":
-        return pl.when(first >= 0).then(first.sqrt()).otherwise(None), False, False
-    if name == "power":
-        return first.pow(constants.get("c", 1.0)), False, False
-    if name == "clamp":
-        return first.clip(constants.get("lo"), constants.get("hi")), False, False
-    if name == "min":
-        return pl.min_horizontal(*resolved), False, False
-    if name == "max":
-        return pl.max_horizontal(*resolved), False, False
-    return None, False, False
+    expr = _elementwise_expr(name, first, resolved, constants)
+    return expr, False, False
 
 
-def compile_formula(text: str) -> CompiledFormula:
-    """编译公式文本; 永不抛异常, 失败以 errors 表达 (fail-closed)。"""
+def _compile_ts_call(
+    name: str, children: list[dict], constants: dict[str, float]
+) -> tuple[pl.Expr | None, bool, bool]:
+    """时序算子: 窗口逻辑保持未挂 over, 由上下文决定挂 symbol。"""
+    inner, _, _ = _compile_node(children[0])
+    if inner is None:
+        return None, False, False
+    if name in ("ts_corr", "ts_cov"):
+        second, _, _ = _compile_node(children[1])
+        if second is None:
+            return None, False, False
+        n = int(constants.get("n", 0))
+        expr = (
+            pl.rolling_corr(inner, second, window_size=n)
+            if name == "ts_corr"
+            else pl.rolling_cov(inner, second, window_size=n)
+        )
+        return expr, True, False
+    expr = _rolling_apply(inner, name, int(constants.get("n", 0)), constants)
+    return expr, True, False
+
+
+def _compile_cross_call(
+    name: str, children: list[dict], constants: dict[str, float]
+) -> tuple[pl.Expr | None, bool, bool]:
+    """横截面算子: 内部先挂 symbol, 再按 date 比较。"""
+    inner, inner_window, _ = _compile_node(children[0])
+    if inner is None:
+        return None, False, False
+    if inner_window:
+        inner = inner.over("symbol")
+    if name == "rank":
+        count = inner.count().over("date")
+        return inner.rank(method="average").over("date") / count, False, False
+    if name == "zscore":
+        mean = inner.mean().over("date")
+        std = inner.std().over("date")
+        return pl.when(std > 0).then((inner - mean) / std).otherwise(None), False, False
+    k = constants.get("k", 3.0)
+    mean = inner.mean().over("date")
+    std = inner.std().over("date")
+    return inner.clip(mean - k * std, mean + k * std), False, False
+
+
+def _compile_if_else(children: list[dict]) -> tuple[pl.Expr | None, bool, bool]:
+    """三元条件: 三个分支各自按需挂 symbol 后组装 when/then/otherwise。"""
+    cond, cond_window, _ = _compile_node(children[0])
+    then_expr, then_window, _ = _compile_node(children[1])
+    else_expr, else_window, _ = _compile_node(children[2])
+    if cond is None or then_expr is None or else_expr is None:
+        return None, False, False
+    if cond_window:
+        cond = cond.over("symbol")
+    if then_window:
+        then_expr = then_expr.over("symbol")
+    if else_window:
+        else_expr = else_expr.over("symbol")
+    return pl.when(cond).then(then_expr).otherwise(else_expr), False, False
+
+
+def _compile_call(node: dict) -> tuple[pl.Expr | None, bool, bool]:
+    name = node["value"]
+    children = node["children"]
+    constants: dict[str, float] = node.get("_constants", {})
+    n_expr, _ = OPERATORS[name]
+
+    if name in TS_OPERATORS:
+        return _compile_ts_call(name, children, constants)
+    if name in CROSS_OPERATORS:
+        return _compile_cross_call(name, children, constants)
+    if name == "if_else":
+        return _compile_if_else(children)
+    return _compile_elementwise_call(name, children, constants, n_expr)
+
+
+def _parse_and_validate_formula(
+    text: str,
+) -> tuple[dict, set[str], dict[int, dict], list[DslError]] | CompiledFormula:
     if not isinstance(text, str) or not text.strip():
-        return CompiledFormula(ok=False, errors=[DslError("E014", "语法错误: 表达式为空")], formula_text=text)
-
+        return CompiledFormula(
+            ok=False, errors=[DslError("E014", "语法错误: 表达式为空")], formula_text=text
+        )
     tokens, tokenize_error = _tokenize(text)
     errors: list[DslError] = [tokenize_error] if tokenize_error else []
     if len(tokens) > MAX_TOKENS:
@@ -576,25 +730,30 @@ def compile_formula(text: str) -> CompiledFormula:
     ast, parse_error = _Parser(tokens, text).parse()
     if parse_error:
         return CompiledFormula(ok=False, errors=[parse_error], formula_text=text)
-
+    ast = cast(dict, ast)
     if _ast_depth(ast) > MAX_AST_DEPTH:
-        errors.append(DslError("E006", f"嵌套深度超限: AST 深度 {_ast_depth(ast)} > {MAX_AST_DEPTH}"))
+        errors.append(
+            DslError("E006", f"嵌套深度超限: AST 深度 {_ast_depth(ast)} > {MAX_AST_DEPTH}")
+        )
 
     identifiers: set[str] = set()
     _collect_identifiers(ast, identifiers)
     if not identifiers:
         errors.append(DslError("E016", "常量表达式: 公式必须引用至少一个数据列或因子"))
-
-    for name in sorted(identifiers):
-        if name not in BASE_COLUMNS and get_factor(name) is None:
-            errors.append(DslError("E001", f"未知标识符: {name}", detail={"name": name}))
+    errors.extend(
+        DslError("E001", f"未知标识符: {name}", detail={"name": name})
+        for name in sorted(identifiers)
+        if name not in BASE_COLUMNS and get_factor(name) is None
+    )
 
     constants_by_call: dict[int, dict] = {}
     _semantic_walk(ast, errors, constants_by_call)
+    return ast, identifiers, constants_by_call, errors
 
+
+def _derive_formula_meta(ast: dict, identifiers: set[str], constants_by_call: dict[int, dict]):
     dependencies: set[str] = set()
     referenced_factors: set[str] = set()
-    cross_sectional = False
     for name in identifiers:
         if name in BASE_COLUMNS:
             dependencies.add(name)
@@ -609,8 +768,7 @@ def compile_formula(text: str) -> CompiledFormula:
 
     def collect_windows(node: dict, bars: int) -> None:
         if node["kind"] == "col":
-            name = node["value"]
-            windows[name] = max(windows.get(name, 0), bars)
+            windows[node["value"]] = max(windows.get(node["value"], 0), bars)
         if node["kind"] == "call" and node["value"] in TS_OPERATORS:
             n = constants_by_call.get(id(node), {}).get("n", 0)
             if 0 <= n <= max(WINDOW_MAX, DELAY_MAX):
@@ -620,77 +778,72 @@ def compile_formula(text: str) -> CompiledFormula:
 
     collect_windows(ast, 0)
     warmup = max((factor_warmup_bars([name]) + bars for name, bars in windows.items()), default=1)
+    return dependencies, referenced_factors, windows, warmup
 
-    def _find_cross(node: dict) -> None:
-        nonlocal cross_sectional
-        if node["kind"] == "call" and node["value"] in CROSS_OPERATORS:
-            cross_sectional = True
-        for child in node["children"]:
-            _find_cross(child)
 
-    _find_cross(ast)
+def _formula_contains_cross(node: dict) -> bool:
+    if node["kind"] == "call" and node["value"] in CROSS_OPERATORS:
+        return True
+    return any(_formula_contains_cross(child) for child in node["children"])
 
-    if errors:
-        return CompiledFormula(
-            ok=False, errors=errors, dependencies=frozenset(dependencies),
-            referenced_factors=frozenset(referenced_factors),
-            input_windows=tuple(sorted(windows.items())),
-            warmup_bars=warmup, cross_sectional=cross_sectional, formula_text=text,
-        )
 
+def _formula_cross_sectional(ast: dict) -> bool:
+    return _formula_contains_cross(ast)
+
+
+def _formula_failure(meta: tuple, errors: list[DslError], text: str) -> CompiledFormula:
+    dependencies, referenced_factors, windows, warmup, cross_sectional = meta
+    return CompiledFormula(
+        ok=False,
+        errors=errors,
+        dependencies=frozenset(dependencies),
+        referenced_factors=frozenset(referenced_factors),
+        input_windows=tuple(sorted(windows.items())),
+        warmup_bars=warmup,
+        cross_sectional=cross_sectional,
+        formula_text=text,
+    )
+
+
+def _attach_call_constants(node: dict, constants_by_call: dict[int, dict]) -> None:
     # 挂常量表必须在任何 deepcopy 之前 (deepcopy 携带 _constants; 事后按 id() 重挂会失联)
-    def _attach(node: dict) -> None:
-        if node["kind"] == "call":
-            node["_constants"] = constants_by_call.get(id(node), {})
-        for child in node["children"]:
-            _attach(child)
+    if node["kind"] == "call":
+        node["_constants"] = constants_by_call.get(id(node), {})
+    for child in node["children"]:
+        _attach_call_constants(child, constants_by_call)
 
-    _attach(ast)
 
+def _reject_cross_in_ts_ops(node: dict, errors: list[DslError]) -> None:
     # 阶段一: 校验并拒绝"截面算子嵌在时序窗口内" (无法单层 over 表达)
-    def _contains_cross(node: dict) -> bool:
-        if node["kind"] == "call" and node["value"] in CROSS_OPERATORS:
-            return True
-        return any(_contains_cross(child) for child in node["children"])
-
-    def _reject_cross_in_ts(node: dict) -> None:
-        if node["kind"] == "call" and node["value"] in TS_OPERATORS:
-            for child in node["children"]:
-                if _contains_cross(child):
-                    errors.append(DslError(
+    if node["kind"] == "call" and node["value"] in TS_OPERATORS:
+        for child in node["children"]:
+            if _formula_contains_cross(child):
+                errors.append(
+                    DslError(
                         "E009",
                         f"截面算子不能嵌在时序窗口内: {node['value']}(...) 的参数含 rank/zscore/winsorize",
                         offset=node["offset"],
-                    ))
-                    return
-        for child in node["children"]:
-            _reject_cross_in_ts(child)
+                    )
+                )
+                return
+    for child in node["children"]:
+        _reject_cross_in_ts_ops(child, errors)
 
-    _reject_cross_in_ts(ast)
-    if errors:
-        return CompiledFormula(
-            ok=False, errors=errors, dependencies=frozenset(dependencies),
-            referenced_factors=frozenset(referenced_factors),
-            input_windows=tuple(sorted(windows.items())),
-            warmup_bars=warmup, cross_sectional=cross_sectional, formula_text=text,
-        )
 
+def _needs_symbol_window(node: dict) -> bool:
+    kind = node["kind"]
+    if kind in ("num", "col"):
+        return False
+    if kind == "unary":
+        return _needs_symbol_window(node["children"][0])
+    if kind == "call" and node["value"] in TS_OPERATORS:
+        return True
+    return any(_needs_symbol_window(child) for child in node["children"])
+
+
+def _materialize_temp_roots(ast: dict) -> list[dict]:
     # 阶段二: 把窗口算子的含窗口操作数先物化为临时列 (Polars 嵌套窗口会静默全 null)
     # worklist 逐层下钻; temps 后进先出反转即依赖顺序 (深层先算)。
-    def _needs_symbol_window(node: dict) -> bool:
-        kind = node["kind"]
-        if kind in ("num", "col"):
-            return False
-        if kind == "unary":
-            return _needs_symbol_window(node["children"][0])
-        if node["kind"] == "call" and node["value"] in TS_OPERATORS:
-            return True
-        return any(_needs_symbol_window(child) for child in node["children"])
-
-    def _has_any_over(node: dict) -> bool:
-        # 含时序窗口 或 含截面算子(编译后自带 over("date")) 的子树都不能直接进截面上下文
-        return _needs_symbol_window(node) or _contains_cross(node)
-
     temp_roots: list[dict] = []
     pending: list[dict] = [ast]
     while pending:
@@ -698,16 +851,22 @@ def compile_formula(text: str) -> CompiledFormula:
         if current["kind"] == "call" and current["value"] in TS_OPERATORS | CROSS_OPERATORS:
             expr_count, _ = OPERATORS[current["value"]]
             for index, operand in enumerate(current["children"][:expr_count]):
-                if _has_any_over(operand):
+                if _needs_symbol_window(operand) or _formula_contains_cross(operand):
                     alias = f"__tsfx_{len(temp_roots)}__"
                     current["children"][index] = {
-                        "kind": "col", "value": alias, "children": [], "offset": operand["offset"],
+                        "kind": "col",
+                        "value": alias,
+                        "children": [],
+                        "offset": operand["offset"],
                     }
                     temp_roots.append({"alias": alias, "root": operand})
                     pending.append(operand)
         pending.extend(current.get("children", []))
+    return temp_roots
 
-    # 阶段三: 编译最终表达式与临时列表达式 (按依赖顺序: 深层在前)
+
+def _compile_staged_exprs(temp_roots: list[dict], errors: list[DslError]) -> list[pl.Expr]:
+    # 阶段三: 编译临时列表达式 (按依赖顺序: 深层在前)
     # _constants 已在 deepcopy 前挂载并被复制携带, 不得按 id() 重挂 (复制后 id 失联)
     temp_exprs: list[pl.Expr] = []
     for item in reversed(temp_roots):
@@ -719,17 +878,37 @@ def compile_formula(text: str) -> CompiledFormula:
         if needs_window:
             expr = expr.over("symbol")
         temp_exprs.append(expr.alias(item["alias"]))
+    return temp_exprs
 
+
+def compile_formula(text: str) -> CompiledFormula:
+    """编译公式文本; 永不抛异常, 失败以 errors 表达 (fail-closed)。"""
+    parsed = _parse_and_validate_formula(text)
+    if isinstance(parsed, CompiledFormula):
+        return parsed
+    ast, identifiers, constants_by_call, errors = parsed
+    dependencies, referenced_factors, windows, warmup = _derive_formula_meta(
+        ast, identifiers, constants_by_call
+    )
+    cross_sectional = _formula_cross_sectional(ast)
+    meta = (dependencies, referenced_factors, windows, warmup, cross_sectional)
+    if errors:
+        return _formula_failure(meta, errors, text)
+
+    _attach_call_constants(ast, constants_by_call)
+    _reject_cross_in_ts_ops(ast, errors)
+    if errors:
+        return _formula_failure(meta, errors, text)
+
+    temp_roots = _materialize_temp_roots(ast)
+    temp_exprs = _compile_staged_exprs(temp_roots, errors)
     final_ast = copy.deepcopy(ast)
     compiled, needs_window, is_bool = _compile_node(final_ast)
     if compiled is None or errors:
-        return CompiledFormula(
-            ok=False,
-            errors=errors or [DslError("E009", "产出类型非法: 无法编译为数值表达式")],
-            dependencies=frozenset(dependencies),
-            referenced_factors=frozenset(referenced_factors),
-            input_windows=tuple(sorted(windows.items())),
-            warmup_bars=warmup, cross_sectional=cross_sectional, formula_text=text,
+        return _formula_failure(
+            meta,
+            errors or [DslError("E009", "产出类型非法: 无法编译为数值表达式")],
+            text,
         )
     if needs_window:
         compiled = compiled.over("symbol")

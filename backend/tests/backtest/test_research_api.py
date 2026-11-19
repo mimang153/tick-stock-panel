@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from fastapi import HTTPException
@@ -12,10 +13,10 @@ from app.backtest.factor import FACTOR_COLUMNS
 
 def test_factor_batch_api_rejects_unknown_factor():
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
-    req = api.FactorBatchRequest(factor_names=["unknown"])
+    req = api.FactorBatchRequest(factor_names=["unknown"], n_groups=2)
 
     with pytest.raises(HTTPException) as exc_info:
-        api.factor_batch(req, request)
+        api.factor_batch(req, cast(Any, request))
     assert exc_info.value.status_code == 400
     assert "unknown" in str(exc_info.value.detail)
 
@@ -23,7 +24,7 @@ def test_factor_batch_api_rejects_unknown_factor():
 def test_factor_batch_request_accepts_full_research_catalog():
     factor_names = [item["id"] for item in FACTOR_COLUMNS]
 
-    request = api.FactorBatchRequest(factor_names=factor_names)
+    request = api.FactorBatchRequest(factor_names=factor_names, n_groups=2)
 
     assert len(request.factor_names) > 16
     assert request.factor_names == factor_names
@@ -31,19 +32,21 @@ def test_factor_batch_request_accepts_full_research_catalog():
 
 def test_candidate_api_create_list_and_update(monkeypatch, tmp_path):
     monkeypatch.setattr(api.settings, "data_dir", tmp_path)
-    created = api.candidate_create(api.CandidateCreateRequest(
-        kind="factor",
-        name="RSI 候选",
-        source_id="rsi_14",
-        config={"factor_name": "rsi_14"},
-        metrics={"ic_mean": 0.03},
-        data_as_of=date(2026, 8, 11),
-    ))
+    created = api.candidate_create(
+        api.CandidateCreateRequest(
+            kind="factor",
+            name="RSI 候选",
+            source_id="rsi_14",
+            config={"factor_name": "rsi_14"},
+            metrics={"ic_mean": 0.03},
+            data_as_of=date(2026, 8, 11),
+        )
+    )
 
     assert api.candidates_list()["items"][0]["id"] == created["id"]
     updated = api.candidate_update(
         created["id"],
-        api.CandidateUpdateRequest(status="validated"),
+        api.CandidateUpdateRequest(status="validated", name="updated"),
     )
     assert updated["status"] == "validated"
 

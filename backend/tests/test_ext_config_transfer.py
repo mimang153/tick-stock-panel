@@ -16,20 +16,36 @@ from app.services.ext_pull import _apply_auth
 @pytest.fixture
 def source(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
-    monkeypatch.setattr("app.secrets_store.load", lambda: {"vendor_api_key": "private-test-key-123"})
+    monkeypatch.setattr(
+        "app.secrets_store.load", lambda: {"vendor_api_key": "private-test-key-123"}
+    )
     monkeypatch.setattr("app.services.ext_data.get_ext_api_key", lambda _id: "private-test-key-123")
     store = ExtConfigStore(tmp_path)
-    store.upsert(ExtConfig(
-        id="auction", label="集合竞价", mode="timeseries",
-        fields=[ExtField("symbol"), ExtField("ts"), ExtField("price", "float")],
-        pull=PullConfig(
-            url="https://example.test/day?stride=5", auth={"type": "header", "header": "X-API-Key", "key_ref": "vendor_api_key"},
-            enabled=True, time_field="ts", since_param="since", date_param="date",
-            schedule_time="09:26", schedule_period="weekly", schedule_day=3,
-            page_param="page", page_size_param="size", page_size=100, timeout_seconds=120,
-            last_run="2026-11-04", last_message="private-test-key-123",
-        ),
-    ))
+    store.upsert(
+        ExtConfig(
+            id="auction",
+            label="集合竞价",
+            mode="timeseries",
+            fields=[ExtField("symbol"), ExtField("ts"), ExtField("price", "float")],
+            pull=PullConfig(
+                url="https://example.test/day?stride=5",
+                auth={"type": "header", "header": "X-API-Key", "key_ref": "vendor_api_key"},
+                enabled=True,
+                time_field="ts",
+                since_param="since",
+                date_param="date",
+                schedule_time="09:26",
+                schedule_period="weekly",
+                schedule_day=3,
+                page_param="page",
+                page_size_param="size",
+                page_size=100,
+                timeout_seconds=120,
+                last_run="2026-11-04",
+                last_message="private-test-key-123",
+            ),
+        )
+    )
     return tmp_path
 
 
@@ -60,10 +76,14 @@ def test_export_is_one_compatible_config_without_secrets_data_or_runtime_state(s
     assert config["pull"]["schedule_day"] == 3
     assert config["pull"]["page_size"] == 100
     assert config["pull"]["timeout_seconds"] == 120
-    assert ExtConfigStore(source).get("auction").pull.enabled is True
+    existing = ExtConfigStore(source).get("auction")
+    assert existing is not None and existing.pull is not None
+    assert existing.pull.enabled is True
 
 
-def test_recipient_can_import_and_use_own_key_without_source_reference(source, tmp_path, monkeypatch):
+def test_recipient_can_import_and_use_own_key_without_source_reference(
+    source, tmp_path, monkeypatch
+):
     data, _ = transfer.export_config(source, "auction")
     target = tmp_path / "recipient"
     preview = transfer.inspect_config(target, data)
@@ -71,10 +91,11 @@ def test_recipient_can_import_and_use_own_key_without_source_reference(source, t
     assert not (target / "ext_data").exists()
     result = transfer.import_config(target, data)
     config = ExtConfigStore(target).get("auction")
+    assert config is not None and config.pull is not None
     assert result["id"] == config.id
     assert config.pull.time_field == "ts" and config.pull.enabled is False
     monkeypatch.setattr("app.services.ext_data.get_ext_api_key", lambda _id: "recipient-key")
-    headers = {}
+    headers: dict = {}
     _apply_auth(config.id, config.pull.auth, config.pull.url, headers)
     assert headers["X-API-Key"] == "recipient-key"
 
@@ -102,12 +123,15 @@ def test_unexpected_or_unsafe_archive_members_are_rejected(source, name):
         transfer.import_config(source / "target", package(files))
 
 
-@pytest.mark.parametrize("change", [
-    lambda c: c.update(id="../outside"),
-    lambda c: c.update(mode="bad"),
-    lambda c: c.update(fields=[]),
-    lambda c: c["pull"].update(timeout_seconds=10000),
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda c: c.update(id="../outside"),
+        lambda c: c.update(mode="bad"),
+        lambda c: c.update(fields=[]),
+        lambda c: c["pull"].update(timeout_seconds=10000),
+    ],
+)
 def test_invalid_contracts_fail_before_creating_files(source, change):
     data, _ = transfer.export_config(source, "auction")
     files = entries(data)
@@ -123,6 +147,7 @@ def test_invalid_contracts_fail_before_creating_files(source, change):
 def test_legacy_query_and_header_credentials_are_removed_and_auth_can_be_refilled(source):
     store = ExtConfigStore(source)
     config = store.get("auction")
+    assert config is not None and config.pull is not None
     config.pull.auth = None
     config.pull.url = "https://example.test/day?token=private-test-key-123&stride=5"
     config.pull.headers = {"Cookie": "session=private", "Accept": "application/json"}
@@ -143,12 +168,14 @@ def test_legacy_query_and_header_credentials_are_removed_and_auth_can_be_refille
 def test_concurrent_imports_create_only_one_config(source):
     data, _ = transfer.export_config(source, "auction")
     target = source / "recipient"
+
     def apply(_):
         try:
             transfer.import_config(target, data)
             return True
         except FileExistsError:
             return False
+
     with ThreadPoolExecutor(8) as pool:
         results = list(pool.map(apply, range(8)))
     assert sum(results) == 1
@@ -161,8 +188,10 @@ def test_failed_atomic_publication_can_be_retried_without_leftover_reservation(s
     import app.services.fs_utils as fs
 
     replace = fs.os.replace
+
     def fail(*_args):
         raise OSError("simulated write failure")
+
     monkeypatch.setattr(fs.os, "replace", fail)
     with pytest.raises(OSError):
         transfer.import_config(target, data)
@@ -199,6 +228,7 @@ def test_import_rename_rejects_unsafe_and_windows_reserved_ids(source, bad_id):
 def test_invalid_url_error_does_not_echo_embedded_credentials(source):
     store = ExtConfigStore(source)
     config = store.get("auction")
+    assert config is not None and config.pull is not None
     config.pull.url = "https://user:private-test-key-123@[invalid"
     store.upsert(config)
     with pytest.raises(ValueError) as error:

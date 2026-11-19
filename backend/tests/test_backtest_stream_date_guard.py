@@ -4,6 +4,7 @@ signals.py 的 `/intraday/replay` 与 mining.py 的 `MiningRunRequest` 都把
 `date.fromisoformat` 包在校验里, 非法日期给出 400/422; backtest 的三个 SSE
 端点直接裸调 `date.fromisoformat`, 同样的入参会抛未捕获 ValueError。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -17,7 +18,10 @@ from app.config import settings
 STREAMS = [
     ("/api/backtest/strategy/stream", {"strategy_id": "ma_cross"}),
     # 旧 /optimize/stream 单窗样本内路径已于 P4 移除, 由稳健优化接替
-    ("/api/backtest/optimize-robust/stream", {"strategy_id": "ma_cross", "param_grid": '{"n": [5]}'}),
+    (
+        "/api/backtest/optimize-robust/stream",
+        {"strategy_id": "ma_cross", "param_grid": '{"n": [5]}'},
+    ),
     ("/api/backtest/walkforward/stream", {"strategy_id": "ma_cross", "param_grid": '{"n": [5]}'}),
 ]
 STREAM_IDS = [path.rsplit("/", 2)[1] for path, _ in STREAMS]

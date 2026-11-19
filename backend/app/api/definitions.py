@@ -3,6 +3,7 @@
 GET  /api/definitions         → 跨 kind 目录 (统一选择器的数据半边)
 POST /api/definitions/smoke   → 导入冒烟 (校验 + 编译 + 依赖可解析)
 """
+
 from __future__ import annotations
 
 import json
@@ -44,7 +45,7 @@ def smoke_definition(req: SmokeRequest) -> dict:
     return defs.smoke_definition(req.kind, req.definition)
 
 
-def _data_dir(request: Request):
+def _data_dir(request: Request | None):
     from app.config import settings
 
     _ = request  # 预留 request 级覆写口; 当前与各 API 一致用全局 settings
@@ -63,12 +64,20 @@ class ResourceExportRequest(BaseModel):
 
 @router.get("/resources")
 def list_resources(request: Request) -> dict:
-    return {"items": resource_bundle.list_resources(_data_dir(request), getattr(request.app.state, "strategy_engine", None))}
+    return {
+        "items": resource_bundle.list_resources(
+            _data_dir(request), getattr(request.app.state, "strategy_engine", None)
+        )
+    }
 
 
 def _export(req: ResourceExportRequest, request: Request):
     try:
-        return resource_bundle.build_resources(_data_dir(request), getattr(request.app.state, "strategy_engine", None), [r.model_dump() for r in req.resources])
+        return resource_bundle.build_resources(
+            _data_dir(request),
+            getattr(request.app.state, "strategy_engine", None),
+            [r.model_dump() for r in req.resources],
+        )
     except resource_bundle.ResourceBundleError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -85,8 +94,14 @@ def export_resources(req: ResourceExportRequest, request: Request) -> Response:
         raise HTTPException(status_code=409, detail="资源已变化，请重新预览后再下载")
     issues = [issue for entry in preview["entries"] for issue in entry["issues"]]
     if issues:
-        raise HTTPException(status_code=400, detail="资源依赖不完整，请先修复后再导出: " + "; ".join(issues[:6]))
-    return Response(data, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+        raise HTTPException(
+            status_code=400, detail="资源依赖不完整，请先修复后再导出: " + "; ".join(issues[:6])
+        )
+    return Response(
+        data,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 _RESOURCE_FILES = File(...)
@@ -117,14 +132,29 @@ async def inspect_resources(files: list[UploadFile] = _RESOURCE_FILES) -> dict:
 
 
 @router.post("/resources/apply")
-async def apply_resources(request: Request, files: list[UploadFile] = _RESOURCE_FILES,
-                          selected: str = Form(...), overwrite: str = Form("[]"), revision: str = Form(...)) -> dict:
+async def apply_resources(
+    request: Request,
+    files: list[UploadFile] = _RESOURCE_FILES,
+    selected: str = Form(...),
+    overwrite: str = Form("[]"),
+    revision: str = Form(...),
+) -> dict:
     try:
         selected_keys, overwrite_keys = json.loads(selected), json.loads(overwrite)
-        if not all(isinstance(keys, list) and all(isinstance(k, str) for k in keys) for keys in (selected_keys, overwrite_keys)):
+        if not all(
+            isinstance(keys, list) and all(isinstance(k, str) for k in keys)
+            for keys in (selected_keys, overwrite_keys)
+        ):
             raise ValueError("选择清单必须是资源 ID 数组")
-        result = await run_in_threadpool(resource_bundle.apply_resources, await _uploads(files), selected=selected_keys, overwrite=overwrite_keys,
-                                        revision=revision, engine=getattr(request.app.state, "strategy_engine", None), refresh=lambda: _refresh_resources(request))
+        result = await run_in_threadpool(
+            resource_bundle.apply_resources,
+            await _uploads(files),
+            selected=selected_keys,
+            overwrite=overwrite_keys,
+            revision=revision,
+            engine=getattr(request.app.state, "strategy_engine", None),
+            refresh=lambda: _refresh_resources(request),
+        )
     except (resource_bundle.ResourceBundleError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return result

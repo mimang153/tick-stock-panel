@@ -1,4 +1,5 @@
 """Fixed matrix-native strategy for controlled factor-rank research."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -66,11 +67,14 @@ _VALID_DIRECTIONS = {"high", "low"}
 
 
 class FactorRankResearchMatrixStrategy:
+    """受控多因子截面评分策略：按分数阈值与每日排名生成进出场信号。"""
+
     def __init__(
         self,
         scoring: dict[str, float] | None = None,
         directions: dict[str, str] | None = None,
     ) -> None:
+        """校验并保存构造函数传入的评分权重与方向。"""
         self._scoring = _validated_scoring(scoring) if scoring is not None else None
         self._directions = (
             _validated_directions(directions, self._scoring)
@@ -79,21 +83,26 @@ class FactorRankResearchMatrixStrategy:
         )
 
     def required_fields(self) -> frozenset[str]:
-        return frozenset({
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "amount",
-            "turnover_rate",
-        })
+        """返回策略所需的最小数据字段集。"""
+        return frozenset(
+            {
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "amount",
+                "turnover_rate",
+            }
+        )
 
     def required_warmup_bars(self, params: dict) -> int:
+        """返回预热根数（固定 60 根）。"""
         del params
         return 60
 
     def required_fields_for_params(self, params: dict) -> frozenset[str]:
+        """返回参数中声明的评分因子对应的数据字段。"""
         if self._scoring is not None:
             return frozenset(self._scoring)
         raw = params.get("scoring")
@@ -102,10 +111,9 @@ class FactorRankResearchMatrixStrategy:
         return frozenset(_validated_scoring(raw))
 
     def compute_signals(self, market: MarketDataMatrix, params: dict) -> SignalMatrix:
+        """按因子分数、入场阈值与每日排名上限生成信号矩阵。"""
         scoring = self._scoring or _validated_scoring(params.get("scoring"))
-        directions = self._directions or _validated_directions(
-            params.get("directions"), scoring
-        )
+        directions = self._directions or _validated_directions(params.get("directions"), scoring)
         entry_score = _bounded_float(params.get("entry_score", 70.0), "entry_score")
         exit_score = _bounded_float(params.get("exit_score", 40.0), "exit_score")
         top_rank = int(params.get("top_rank", 20))
@@ -172,14 +180,12 @@ def _validated_directions(
     directions: dict[str, str] = {}
     for name, value in raw.items():
         if value not in _VALID_DIRECTIONS:
-            raise ValueError(
-                f"direction for {name!r} must be one of {sorted(_VALID_DIRECTIONS)}"
-            )
+            raise ValueError(f"direction for {name!r} must be one of {sorted(_VALID_DIRECTIONS)}")
         directions[str(name)] = str(value)
     return directions
 
 
-def _bounded_float(value: object, name: str) -> float:
+def _bounded_float(value: float | int | str, name: str) -> float:
     try:
         number = float(value)
     except (TypeError, ValueError) as exc:

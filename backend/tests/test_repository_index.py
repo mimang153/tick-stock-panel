@@ -9,8 +9,8 @@ from app.tickflow.repository import DataStore, KlineRepository
 
 
 @pytest.fixture()
-def repo(tmp_path, ck_store):
-    return KlineRepository(DataStore(tmp_path), storage=ck_store)
+def repo(tmp_path, ck_runtime):
+    return KlineRepository(DataStore(tmp_path), storage=ck_runtime)
 
 
 def _write_index_instruments(repo, rows):
@@ -112,10 +112,8 @@ def test_name_map_cache_invalidated_on_instruments_refresh(repo):
 
 
 def _write_index_enriched(repo, dates_rows):
-    for ds, rows in dates_rows.items():
-        d = repo.store.data_dir / "kline_index_enriched" / f"date={ds}"
-        d.mkdir(parents=True, exist_ok=True)
-        pl.DataFrame(rows).write_parquet(d / "part.parquet")
+    for rows in dates_rows.values():
+        repo.storage.write_daily("kline_index_enriched", pl.DataFrame(rows))
 
 
 def _index_rows(ds, close=3000.0):
@@ -173,9 +171,13 @@ def test_flush_live_enriched_asset_index_updates_cache(repo):
     cached, dt = repo.get_enriched_latest_asset("index", refresh=False)
     assert str(dt) == "2026-07-25"
     assert cached["close"].to_list() == [3005.0]
-    assert (
-        repo.store.data_dir / "kline_index_enriched" / "date=2026-07-25" / "part.parquet"
-    ).exists()
+    stored = repo.storage.read_daily(
+        "kline_index_enriched", start=_dt.date(2026, 7, 25), end=_dt.date(2026, 7, 25)
+    )
+    assert stored["close"].to_list() == [3005.0]
+    # RC-11: 指数 enriched live 写也在 CK 上留下 ready generation
+    current = repo.storage.current_generation("index")
+    assert current and current["state"] == "ready" and current["generation_id"]
 
 
 def _merge_row(symbol, close):

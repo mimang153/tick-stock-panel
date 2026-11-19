@@ -59,21 +59,32 @@ MAX_HOLD_DAYS = 25
 
 
 class ActiveLimitGeneMatrixStrategy:
+    """涨停基因活跃股策略：筛选近期多次涨停且当日缩量休整的标的。"""
+
     def required_fields(self) -> frozenset[str]:
+        """返回策略所需的最小字段集。"""
         return frozenset({"close", "volume"})
 
     def required_warmup_bars(self, params: dict) -> int:
+        """返回预热根数（60 日涨停计数需 70 根）。"""
         del params
         return 70
 
     def compute_signals(self, market: MarketDataMatrix, params: dict) -> SignalMatrix:
-        entry = matrix_feature(market, "limit_up_count_60d") >= int(params.get("min_limit_count", 3))
+        """按涨停次数、休整量能与冷却条件生成进出场信号。"""
+        entry = matrix_feature(market, "limit_up_count_60d") >= int(
+            params.get("min_limit_count", 3)
+        )
         # 当日未涨停 (休整日而非情绪顶点) 且量能收敛
-        entry &= matrix_feature(market, "change_pct") < float(params.get("max_change_pct", 7.0)) / 100.0
+        entry &= (
+            matrix_feature(market, "change_pct") < float(params.get("max_change_pct", 7.0)) / 100.0
+        )
         entry &= matrix_feature(market, "vol_ratio_5d") <= float(params.get("vol_ratio_max", 1.2))
 
         # 出场: 股性冷却 (60日涨停计数回落到阈值下)
-        exit_ = matrix_feature(market, "limit_up_count_60d") < int(params.get("min_limit_count", 3)) - 1
+        exit_ = (
+            matrix_feature(market, "limit_up_count_60d") < int(params.get("min_limit_count", 3)) - 1
+        )
         return make_signal_matrix(
             market.shape,
             entry=entry.astype(np.uint8),

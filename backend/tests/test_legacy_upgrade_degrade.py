@@ -7,10 +7,12 @@
      用户已有定义/再次启动不重复种入;
   4. 失效策略文件归档: 仅「内置残留」类错误归档, 语法错误不动。
 """
+
 from __future__ import annotations
 
 import types
 from datetime import date
+from typing import Any, cast
 
 import pytest
 from fastapi import HTTPException
@@ -30,10 +32,11 @@ class _Engine:
             raise ValueError(f"unknown strategy: {strategy_id}")
         return types.SimpleNamespace(meta={"id": strategy_id})
 
-    def run_all(self, context, *, params_map=None, overrides_map=None, strategy_ids=None, parallel=True):
+    def run_all(
+        self, context, *, params_map=None, overrides_map=None, strategy_ids=None, parallel=True
+    ):
         return {
-            sid: ScreenerResult(as_of=context.as_of, strategy=sid)
-            for sid in strategy_ids or []
+            sid: ScreenerResult(as_of=context.as_of, strategy=sid) for sid in strategy_ids or []
         }
 
 
@@ -44,7 +47,9 @@ class _Svc:
     def latest_date(self):
         return date(2026, 7, 15)
 
-    def build_strategy_context(self, engine, as_of, strategy_ids, *, timeframe="1d", params_map=None, overrides_map=None):
+    def build_strategy_context(
+        self, engine, as_of, strategy_ids, *, timeframe="1d", params_map=None, overrides_map=None
+    ):
         return types.SimpleNamespace(as_of=as_of)
 
 
@@ -54,7 +59,8 @@ def test_builtin_factor_rank_research_shim_forwards_to_research_module():
 
     assert legacy is current
     # 旧策略文件的真实用法: from ... import 常量/类
-    from app.strategy.builtin.factor_rank_research import META  # noqa: F401
+    # 旧策略文件的真实用法: from ... import 常量/类 (shim 经模块 __getattr__ 转发)
+    assert cast(Any, legacy).META is cast(Any, current).META
 
 
 def test_run_all_skips_unknown_ids_and_reports_them(monkeypatch, tmp_path):
@@ -62,7 +68,7 @@ def test_run_all_skips_unknown_ids_and_reports_them(monkeypatch, tmp_path):
     engine = _Engine()
     repo = types.SimpleNamespace(store=types.SimpleNamespace(data_dir=tmp_path))
     state = types.SimpleNamespace(repo=repo, strategy_engine=engine)
-    request = types.SimpleNamespace(app=types.SimpleNamespace(state=state))
+    request: Any = types.SimpleNamespace(app=types.SimpleNamespace(state=state))
 
     monkeypatch.setattr(screener_api, "ScreenerService", _Svc)
     monkeypatch.setattr(screener_api, "_load_ext_value_maps", lambda *a, **k: {})
@@ -87,7 +93,7 @@ def test_run_all_all_unknown_still_404(monkeypatch, tmp_path):
     engine = _Engine()
     repo = types.SimpleNamespace(store=types.SimpleNamespace(data_dir=tmp_path))
     state = types.SimpleNamespace(repo=repo, strategy_engine=engine)
-    request = types.SimpleNamespace(app=types.SimpleNamespace(state=state))
+    request: Any = types.SimpleNamespace(app=types.SimpleNamespace(state=state))
 
     monkeypatch.setattr(screener_api, "ScreenerService", _Svc)
 
@@ -159,9 +165,7 @@ def test_seed_if_empty_does_not_overwrite_existing_seed_ids(tmp_path):
     d = tmp_path / "user_data" / "custom_signals"
     d.mkdir(parents=True)
     sentinel = {"id": "limit_up", "name": "我改过的涨停", "enabled": False}
-    (d / "limit_up.json").write_text(
-        json.dumps(sentinel, ensure_ascii=False), encoding="utf-8"
-    )
+    (d / "limit_up.json").write_text(json.dumps(sentinel, ensure_ascii=False), encoding="utf-8")
 
     n = custom_signals.seed_if_empty(tmp_path)
     assert n == len(SEED_SIGNALS) - 1
@@ -179,11 +183,19 @@ def test_archive_only_legacy_unloadable_files(tmp_path):
     syntax_err = custom / "editing_wip.py"
     syntax_err.write_text("# wip", encoding="utf-8")
 
-    archived = archive_unloadable_strategies([
-        {"file": str(broken_composite), "error": "composite strategy combo_old 引用的子策略 'boll_breakout' 不存在"},
-        {"file": str(syntax_err), "error": "SyntaxError: unexpected EOF"},
-        {"file": str(custom / "missing.py"), "error": "composite strategy x 引用的子策略 'y' 不存在"},
-    ])
+    archived = archive_unloadable_strategies(
+        [
+            {
+                "file": str(broken_composite),
+                "error": "composite strategy combo_old 引用的子策略 'boll_breakout' 不存在",
+            },
+            {"file": str(syntax_err), "error": "SyntaxError: unexpected EOF"},
+            {
+                "file": str(custom / "missing.py"),
+                "error": "composite strategy x 引用的子策略 'y' 不存在",
+            },
+        ]
+    )
 
     assert archived == ["combo_old.py"]
     assert not broken_composite.exists()

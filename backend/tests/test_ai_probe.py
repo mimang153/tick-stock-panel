@@ -4,6 +4,7 @@
 状态栏也不得把未验证的草稿展示为已生效。失败以 200 + ok=false 回报,
 由前端内联展示, 不触发全局 toast。
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -15,7 +16,9 @@ from app.api import settings as settings_api
 from app.services import ai_provider
 
 
-@pytest.mark.parametrize("failure", [None, "Codex CLI 不可用", "Codex CLI 调用失败: 405 Method Not Allowed"])
+@pytest.mark.parametrize(
+    "failure", [None, "Codex CLI 不可用", "Codex CLI 调用失败: 405 Method Not Allowed"]
+)
 def test_registered_codex_probe_route_returns_json_before_static_fallback(monkeypatch, failure):
     from unittest.mock import AsyncMock
 
@@ -28,7 +31,9 @@ def test_registered_codex_probe_route_returns_json_before_static_fallback(monkey
     monkeypatch.setattr(secrets_store, "get_ai_key", lambda: "")
     probe = AsyncMock(return_value="OK", side_effect=RuntimeError(failure) if failure else None)
     monkeypatch.setattr(ai_provider, "_probe_codex_cli", probe)
-    response = TestClient(app).post("/api/settings/ai/test", json={"provider": "codex_cli", "model": ""})
+    response = TestClient(app).post(
+        "/api/settings/ai/test", json={"provider": "codex_cli", "model": ""}
+    )
     assert response.status_code == 200
     probe.assert_awaited_once_with(model="")
     assert response.json()["ok"] is (failure is None)
@@ -43,19 +48,37 @@ def test_probe_requires_base_url_model_and_key(monkeypatch):
 
     with pytest.raises(ValueError, match="API 地址"):
         import asyncio
-        asyncio.run(ai_provider.probe_ai_config(
-            provider="openai_compat", api_key="sk-x", base_url="", model="m",
-        ))
+
+        asyncio.run(
+            ai_provider.probe_ai_config(
+                provider="openai_compat",
+                api_key="sk-x",
+                base_url="",
+                model="m",
+            )
+        )
     with pytest.raises(ValueError, match="模型"):
         import asyncio
-        asyncio.run(ai_provider.probe_ai_config(
-            provider="openai_compat", api_key="sk-x", base_url="https://x.example/v1", model="",
-        ))
+
+        asyncio.run(
+            ai_provider.probe_ai_config(
+                provider="openai_compat",
+                api_key="sk-x",
+                base_url="https://x.example/v1",
+                model="",
+            )
+        )
     with pytest.raises(RuntimeError, match="API Key"):
         import asyncio
-        asyncio.run(ai_provider.probe_ai_config(
-            provider="openai_compat", api_key="", base_url="https://x.example/v1", model="m",
-        ))
+
+        asyncio.run(
+            ai_provider.probe_ai_config(
+                provider="openai_compat",
+                api_key="",
+                base_url="https://x.example/v1",
+                model="m",
+            )
+        )
 
 
 def test_probe_codex_unavailable_raises(monkeypatch):
@@ -63,9 +86,14 @@ def test_probe_codex_unavailable_raises(monkeypatch):
 
     monkeypatch.setattr(ai_provider, "codex_cli_available", lambda: False)
     with pytest.raises(RuntimeError, match="Codex CLI 不可用"):
-        asyncio.run(ai_provider.probe_ai_config(
-            provider="codex_cli", api_key="", base_url="", model="",
-        ))
+        asyncio.run(
+            ai_provider.probe_ai_config(
+                provider="codex_cli",
+                api_key="",
+                base_url="",
+                model="",
+            )
+        )
 
 
 @pytest.mark.asyncio
@@ -89,6 +117,7 @@ async def test_probe_chat_protocol_uses_given_key_and_base(monkeypatch):
             self.chat = _Chat()
 
     import openai
+
     monkeypatch.setattr(openai, "AsyncOpenAI", _Client)
 
     text = await ai_provider.probe_ai_config(
@@ -101,10 +130,12 @@ async def test_probe_chat_protocol_uses_given_key_and_base(monkeypatch):
     assert text == "OK"
     assert captured_client["api_key"] == "sk-draft"
     assert "draft.example" in captured_client["base_url"]
-    assert calls == [{
-        "model": "draft-model",
-        "messages": [{"role": "user", "content": "Reply exactly: OK"}],
-    }]
+    assert calls == [
+        {
+            "model": "draft-model",
+            "messages": [{"role": "user", "content": "Reply exactly: OK"}],
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -121,6 +152,7 @@ async def test_probe_responses_protocol_calls_responses(monkeypatch):
             self.responses = _Responses()
 
     import openai
+
     monkeypatch.setattr(openai, "AsyncOpenAI", _Client)
 
     text = await ai_provider.probe_ai_config(
@@ -147,12 +179,14 @@ async def test_test_endpoint_failure_reports_error_without_saving(monkeypatch):
 
     monkeypatch.setattr(ai_provider, "probe_ai_config", boom)
 
-    result = await settings_api.test_ai_settings(settings_api.AiTestIn(
-        provider="openai_compat",
-        base_url="https://bad.example/v1",
-        api_key="sk-bad",
-        model="no-such-model",
-    ))
+    result = await settings_api.test_ai_settings(
+        settings_api.AiTestIn(
+            provider="openai_compat",
+            base_url="https://bad.example/v1",
+            api_key="sk-bad",
+            model="no-such-model",
+        )
+    )
 
     assert result["ok"] is False
     assert "不存在" in result["error"]
@@ -171,13 +205,15 @@ async def test_test_endpoint_falls_back_to_saved_key(monkeypatch):
     monkeypatch.setattr(ai_provider, "probe_ai_config", fake_probe)
     monkeypatch.setattr(settings_api.secrets_store, "get_ai_key", lambda: "sk-saved")
 
-    result = await settings_api.test_ai_settings(settings_api.AiTestIn(
-        provider="openai_compat",
-        base_url="https://api.example/v1",
-        api_key=None,
-        model="m1",
-        protocol="responses",
-    ))
+    result = await settings_api.test_ai_settings(
+        settings_api.AiTestIn(
+            provider="openai_compat",
+            base_url="https://api.example/v1",
+            api_key=None,
+            model="m1",
+            protocol="responses",
+        )
+    )
 
     assert result["ok"] is True
     assert seen["api_key"] == "sk-saved"
@@ -185,7 +221,9 @@ async def test_test_endpoint_falls_back_to_saved_key(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_codex_probe_uses_draft_model_and_default_without_saved_provider(monkeypatch, tmp_path):
+async def test_codex_probe_uses_draft_model_and_default_without_saved_provider(
+    monkeypatch, tmp_path
+):
     import tomllib
     from pathlib import Path
 
@@ -205,9 +243,15 @@ async def test_codex_probe_uses_draft_model_and_default_without_saved_provider(m
 
     monkeypatch.setattr(ai_provider, "_run_codex_process", fake_process)
     for model in ("draft-model", ""):
-        assert await ai_provider.probe_ai_config(
-            provider="codex_cli", api_key="", base_url="", model=model,
-        ) == "OK"
+        assert (
+            await ai_provider.probe_ai_config(
+                provider="codex_cli",
+                api_key="",
+                base_url="",
+                model=model,
+            )
+            == "OK"
+        )
     assert calls[0][0][calls[0][0].index("--model") + 1] == "draft-model"
     assert calls[0][1]["model"] == "draft-model"
     assert "--model" not in calls[1][0]
@@ -217,10 +261,16 @@ async def test_codex_probe_uses_draft_model_and_default_without_saved_provider(m
 def test_codex_custom_provider_passes_only_its_configured_environment_key(monkeypatch, tmp_path):
     import tomllib
 
-    monkeypatch.setattr(ai_provider, "_read_codex_config", lambda: {
-        "model_provider": "custom",
-        "model_providers": {"custom": {"base_url": "https://example.test", "env_key": "CUSTOM_TOKEN"}},
-    })
+    monkeypatch.setattr(
+        ai_provider,
+        "_read_codex_config",
+        lambda: {
+            "model_provider": "custom",
+            "model_providers": {
+                "custom": {"base_url": "https://example.test", "env_key": "CUSTOM_TOKEN"}
+            },
+        },
+    )
     monkeypatch.setattr(ai_provider, "current_ai_model", lambda: "")
     monkeypatch.setattr(ai_provider, "current_codex_reasoning_effort", lambda: "")
     monkeypatch.setenv("CUSTOM_TOKEN", "test-token")

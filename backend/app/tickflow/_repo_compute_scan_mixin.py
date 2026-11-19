@@ -21,6 +21,31 @@ class _ComputeScanMixin(_RepoMixinBase):
     # Polars 查询内部方法
     # ================================================================
 
+    def _read_daily_from_ck(
+        self,
+        table: str,
+        symbols: list[str],
+        start: date,
+        end: date,
+        columns: list[str] | None,
+        sort_cols: list[str],
+    ) -> pl.DataFrame | None:
+        """CK 优先读取日K；无门面/查不到数据时返回 None 走本地兼容路径。"""
+        store = self._ck_store()
+        if store is None:
+            return None
+        try:
+            df = store.read_daily(table, symbols=symbols, start=start, end=end)
+        except Exception as e:  # noqa: BLE001 - 读 CK 失败要降级到本地, 不能让页面报错
+            logger.warning("CK 日K读取失败(%s): %s", table, e)
+            return None
+        if df.is_empty():
+            return None
+        df = df.sort(sort_cols)
+        if columns:
+            df = df.select([c for c in columns if c in df.columns])
+        return df
+
     def _compute_enriched_range(self, df: pl.DataFrame) -> pl.DataFrame:
         """对14列enriched数据即时计算完整指标+信号。输入应含足够预热行数。"""
         from app.indicators.pipeline import (
@@ -83,6 +108,11 @@ class _ComputeScanMixin(_RepoMixinBase):
     def _scan_daily_symbol(
         self, symbol: str, start: date, end: date, columns: list[str] | None
     ) -> pl.DataFrame:
+        ck = self._read_daily_from_ck(
+            "kline_daily_enriched", [symbol], start, end, columns, ["date"]
+        )
+        if ck is not None:
+            return ck
         try:
             lf = (
                 scan_enriched_parquet(
@@ -107,6 +137,11 @@ class _ComputeScanMixin(_RepoMixinBase):
     def _scan_daily_batch(
         self, symbols: list[str], start: date, end: date, columns: list[str] | None
     ) -> pl.DataFrame:
+        ck = self._read_daily_from_ck(
+            "kline_daily_enriched", symbols, start, end, columns, ["symbol", "date"]
+        )
+        if ck is not None:
+            return ck
         try:
             lf = (
                 scan_enriched_parquet(
@@ -131,6 +166,11 @@ class _ComputeScanMixin(_RepoMixinBase):
     def _scan_index_daily_symbol(
         self, symbol: str, start: date, end: date, columns: list[str] | None
     ) -> pl.DataFrame:
+        ck = self._read_daily_from_ck(
+            "kline_index_enriched", [symbol], start, end, columns, ["date"]
+        )
+        if ck is not None:
+            return ck
         try:
             lf = (
                 scan_enriched_parquet(
@@ -156,6 +196,9 @@ class _ComputeScanMixin(_RepoMixinBase):
     def _scan_etf_daily_symbol(
         self, symbol: str, start: date, end: date, columns: list[str] | None
     ) -> pl.DataFrame:
+        ck = self._read_daily_from_ck("kline_etf_enriched", [symbol], start, end, columns, ["date"])
+        if ck is not None:
+            return ck
         try:
             lf = (
                 scan_enriched_parquet(

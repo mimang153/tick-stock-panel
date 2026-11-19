@@ -19,6 +19,7 @@
   v1 文件 (entries/archived 结构) → 池取 entries 顺序, 属性折入 meta。
 前端每次变更向旧偏好键影子写入纯 ID 数组, 保证降级回滚可用。
 """
+
 from __future__ import annotations
 
 import json
@@ -68,10 +69,11 @@ def _normalize_meta(raw: object) -> dict | None:
 
 
 def _normalize_state(raw: dict) -> dict:
-    groups: list[dict] = []
-    for item in raw.get("groups") or []:
-        if isinstance(item, dict) and item.get("id") and item.get("name"):
-            groups.append({"id": str(item["id"]), "name": str(item["name"])})
+    groups: list[dict] = [
+        {"id": str(item["id"]), "name": str(item["name"])}
+        for item in raw.get("groups") or []
+        if isinstance(item, dict) and item.get("id") and item.get("name")
+    ]
     group_ids = {g["id"] for g in groups}
 
     pool: list[str] = []
@@ -91,6 +93,15 @@ def _normalize_state(raw: dict) -> dict:
         meta[key] = record
     revision = raw.get("revision", 0)
     return {"version": 2, "revision": revision, "groups": groups, "pool": pool, "meta": meta}
+
+
+def _validate_pool_groups(raw: dict) -> None:
+    """校验策略分组结构: 每组须有非空字符串 id 与非空名称。"""
+    for group in raw.get("groups", []):
+        if not isinstance(group, dict) or not isinstance(group.get("id"), str) or not group["id"]:
+            raise ValueError("策略分组缺少合法 ID")
+        if not isinstance(group.get("name"), str) or not group["name"].strip():
+            raise ValueError("策略分组缺少名称")
 
 
 def validate_snapshot(raw: object) -> dict:
@@ -113,11 +124,7 @@ def validate_snapshot(raw: object) -> dict:
         raise ValueError("策略池 pool 必须是数组、meta 必须是对象")
     if any(not isinstance(sid, str) or not sid for sid in raw.get("pool", [])):
         raise ValueError("策略池包含非法策略 ID")
-    for group in raw.get("groups", []):
-        if not isinstance(group, dict) or not isinstance(group.get("id"), str) or not group["id"]:
-            raise ValueError("策略分组缺少合法 ID")
-        if not isinstance(group.get("name"), str) or not group["name"].strip():
-            raise ValueError("策略分组缺少名称")
+    _validate_pool_groups(raw)
     if any(not isinstance(value, dict) for value in raw.get("meta", {}).values()):
         raise ValueError("策略库记录必须是对象")
     state = _normalize_state(raw)
@@ -228,7 +235,9 @@ def library_metadata(data_dir: Path) -> dict[str, dict]:
             return {}
         state = validate_snapshot(json.loads(path.read_text(encoding="utf-8")))
     names = {group["id"]: group["name"] for group in state["groups"]}
-    return {sid: {**meta, "group_name": names.get(meta["group"])} for sid, meta in state["meta"].items()}
+    return {
+        sid: {**meta, "group_name": names.get(meta["group"])} for sid, meta in state["meta"].items()
+    }
 
 
 def restore_snapshot(raw: object, *, allow_overwrite: bool = False) -> dict:
@@ -317,7 +326,9 @@ def _validate_group_id(group_id: str | None, groups: list[dict]) -> None:
 # ── 池成员 (纯顺序语义) ─────────────────────────────────
 
 
-def set_pool(ids: list[str], *, only_if_empty: bool = False, expected_revision: int | None = None) -> dict:
+def set_pool(
+    ids: list[str], *, only_if_empty: bool = False, expected_revision: int | None = None
+) -> dict:
     """整体替换池 (顺序即池顺序); 重复 ID 拒绝。已归档策略拒绝入池。"""
     with _LOCK:
         state = _read()
@@ -442,8 +453,10 @@ def rename_group(group_id: str, name: str) -> dict:
         target = next((g for g in state["groups"] if g["id"] == group_id), None)
         if target is None:
             raise KeyError(group_id)
-        if any(g["id"] != group_id and g["name"].casefold() == normalized.casefold()
-               for g in state["groups"]):
+        if any(
+            g["id"] != group_id and g["name"].casefold() == normalized.casefold()
+            for g in state["groups"]
+        ):
             raise ValueError("分组名称已存在")
         target["name"] = normalized
         _write(state)

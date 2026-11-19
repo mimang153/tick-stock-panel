@@ -7,6 +7,7 @@ v2: 特征计算与条件求值统一走 intraday_features 特征帧 + custom_si
   存量监控规则零迁移;
 - 自定义盘中信号(timeframe="intraday", csgi_ 前缀)与内置信号一并评估注入。
 """
+
 from __future__ import annotations
 
 import logging
@@ -37,7 +38,10 @@ def uses_intraday_signals(rule: dict) -> bool:
         (
             isinstance(c, dict)
             and c.get("op") == "truth"
-            and (c.get("field") in INTRADAY_SIGNAL_FIELDS or str(c.get("field", "")).startswith(custom_signals.INTRADAY_PREFIX))
+            and (
+                c.get("field") in INTRADAY_SIGNAL_FIELDS
+                or str(c.get("field", "")).startswith(custom_signals.INTRADAY_PREFIX)
+            )
         )
         for c in rule.get("conditions", [])
     )
@@ -50,18 +54,34 @@ def _legacy_builtin_definitions() -> list[dict]:
     build_intraday_expressions 的「条件上升沿」完全一致。
     """
     return [
-        {"id": "signal_intraday_avg_cross_up", "timeframe": "intraday", "enabled": True,
-         "conditions": [{"left": "price", "op": "cross_up", "right": "field:vwap"}],
-         "min_bars": _LEGACY_MIN_BARS},
-        {"id": "signal_intraday_avg_cross_down", "timeframe": "intraday", "enabled": True,
-         "conditions": [{"left": "price", "op": "cross_down", "right": "field:vwap"}],
-         "min_bars": _LEGACY_MIN_BARS},
-        {"id": "signal_intraday_zero_cross_up", "timeframe": "intraday", "enabled": True,
-         "conditions": [{"left": "pct_vs_prev_close", "op": "cross_up", "right": 0}],
-         "min_bars": _LEGACY_MIN_BARS},
-        {"id": "signal_intraday_zero_cross_down", "timeframe": "intraday", "enabled": True,
-         "conditions": [{"left": "pct_vs_prev_close", "op": "cross_down", "right": 0}],
-         "min_bars": _LEGACY_MIN_BARS},
+        {
+            "id": "signal_intraday_avg_cross_up",
+            "timeframe": "intraday",
+            "enabled": True,
+            "conditions": [{"left": "price", "op": "cross_up", "right": "field:vwap"}],
+            "min_bars": _LEGACY_MIN_BARS,
+        },
+        {
+            "id": "signal_intraday_avg_cross_down",
+            "timeframe": "intraday",
+            "enabled": True,
+            "conditions": [{"left": "price", "op": "cross_down", "right": "field:vwap"}],
+            "min_bars": _LEGACY_MIN_BARS,
+        },
+        {
+            "id": "signal_intraday_zero_cross_up",
+            "timeframe": "intraday",
+            "enabled": True,
+            "conditions": [{"left": "pct_vs_prev_close", "op": "cross_up", "right": 0}],
+            "min_bars": _LEGACY_MIN_BARS,
+        },
+        {
+            "id": "signal_intraday_zero_cross_down",
+            "timeframe": "intraday",
+            "enabled": True,
+            "conditions": [{"left": "pct_vs_prev_close", "op": "cross_down", "right": 0}],
+            "min_bars": _LEGACY_MIN_BARS,
+        },
     ]
 
 
@@ -92,7 +112,8 @@ class IntradaySignalEvaluator:
         """返回本分钟触发信号的行列表(每 symbol 一行, 仅新出现的 bar 触发)。"""
         active_keys = {(asset_type, symbol) for symbol in symbols}
         self._last_bar = {
-            key: value for key, value in self._last_bar.items()
+            key: value
+            for key, value in self._last_bar.items()
             if key[0] != asset_type or key in active_keys
         }
         definitions = _legacy_builtin_definitions() + list(signals or [])
@@ -119,9 +140,7 @@ class IntradaySignalEvaluator:
             custom_signals.intraday_column_name(d["id"]): int(d.get("min_bars", 0) or 0)
             for d in definitions
         }
-        min_bars_by_col.update({
-            name: _LEGACY_MIN_BARS for name in INTRADAY_SIGNAL_FIELDS
-        })
+        min_bars_by_col.update({name: _LEGACY_MIN_BARS for name in INTRADAY_SIGNAL_FIELDS})
 
         evaluated = custom_signals.apply_intraday_edges(frame, exprs)
         # min_bars 门槛: 当日已完成 bar 数不足时强制不触发
@@ -152,7 +171,7 @@ class IntradaySignalEvaluator:
             # 只有出现新 bar 才可能触发; 首次见到该标的只建状态不发信号
             if last_seen is None or last_time <= last_seen or last_time.date() != last_seen.date():
                 continue
-            row = {name: bool(part[name][-1]) for name in signal_cols}
+            row: dict[str, Any] = {name: bool(part[name][-1]) for name in signal_cols}
             if any(row.values()):
                 row["symbol"] = symbol
                 results.append(row)
@@ -167,12 +186,14 @@ class IntradaySignalEvaluator:
         if signals:
             cols = sorted({f for s in signals for f in s if f != "symbol"})
             out = out.join(pl.DataFrame(signals).select(["symbol", *cols]), on="symbol", how="left")
-        out = out.with_columns([
-            (
-                pl.col(field).fill_null(False).cast(pl.Boolean).alias(field)
-                if field in out.columns
-                else pl.lit(False, dtype=pl.Boolean).alias(field)
-            )
-            for field in fields
-        ])
+        out = out.with_columns(
+            [
+                (
+                    pl.col(field).fill_null(False).cast(pl.Boolean).alias(field)
+                    if field in out.columns
+                    else pl.lit(False, dtype=pl.Boolean).alias(field)
+                )
+                for field in fields
+            ]
+        )
         return out

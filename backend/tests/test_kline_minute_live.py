@@ -4,6 +4,7 @@
 /api/kline/minute 的本地优先启发式会拦截实时补拉, 详情分时图停在
 上一增量轮 (≥60s 滞后)。live=1 让详情轮询在连续竞价时段绕过本地优先。
 """
+
 from __future__ import annotations
 
 from datetime import date, datetime
@@ -27,38 +28,41 @@ class _FakeRepo:
     def __init__(self) -> None:
         # /minute 读取 repo.store.data_dir 判断分钟基准标记 (无标记即旧行为)
         import tempfile
-        from types import SimpleNamespace
         from pathlib import Path
+        from types import SimpleNamespace
+
         self.store = SimpleNamespace(data_dir=Path(tempfile.mkdtemp()))
 
     def resolve_asset_type(self, symbol: str) -> str:
         return "stock"
 
     def get_instruments(self) -> pl.DataFrame:
-        return pl.DataFrame(
-            {"symbol": [], "name": [], "total_shares": [], "float_shares": []}
-        )
+        return pl.DataFrame({"symbol": [], "name": [], "total_shares": [], "float_shares": []})
 
     def get_daily_asset(self, asset_type, symbol, start, end, columns=None):
         return pl.DataFrame({"date": [], "close": []})
 
     def get_minute(self, symbol, trade_date, asset_type="stock") -> pl.DataFrame:
-        return pl.DataFrame({
-            "datetime": [
-                datetime(2026, 8, 26, 9, 30 + offset // 60, offset % 60)
-                for offset in range(_LOCAL_ROWS)
-            ],
-            "close": [10.0] * _LOCAL_ROWS,
-        })
+        return pl.DataFrame(
+            {
+                "datetime": [
+                    datetime(2026, 8, 26, 9, 30 + offset // 60, offset % 60)
+                    for offset in range(_LOCAL_ROWS)
+                ],
+                "close": [10.0] * _LOCAL_ROWS,
+            }
+        )
 
 
 def _client() -> TestClient:
     app = FastAPI()
     app.include_router(router)
     app.state.repo = _FakeRepo()
-    app.state.capabilities = CapabilitySet({
-        Cap.KLINE_MINUTE_BY_SYMBOL: CapabilityLimits(),
-    })
+    app.state.capabilities = CapabilitySet(
+        {
+            Cap.KLINE_MINUTE_BY_SYMBOL: CapabilityLimits(),
+        }
+    )
     return TestClient(app)
 
 
@@ -76,23 +80,21 @@ def _patch_live_fetch(monkeypatch) -> None:
     import app.api.kline as kline_api
 
     def _fake_fetch(symbol, trade_date, asset_type="stock", *, capset, raw_basis=False):
-        return pl.DataFrame({
-            "datetime": [datetime(2026, 8, 26, 9, 59)],
-            "close": [11.11],
-        })
+        return pl.DataFrame(
+            {
+                "datetime": [datetime(2026, 8, 26, 9, 59)],
+                "close": [11.11],
+            }
+        )
 
-    monkeypatch.setattr(
-        kline_api.kline_sync, "fetch_minute_single", _fake_fetch
-    )
+    monkeypatch.setattr(kline_api.kline_sync, "fetch_minute_single", _fake_fetch)
 
 
 def test_minute_live_param_bypasses_local_first_during_session(monkeypatch):
     _patch_market(monkeypatch, in_session=True)
     _patch_live_fetch(monkeypatch)
 
-    resp = _client().get(
-        "/api/kline/minute", params={"symbol": "600000.SH", "live": 1}
-    )
+    resp = _client().get("/api/kline/minute", params={"symbol": "600000.SH", "live": 1})
 
     assert resp.status_code == 200
     body = resp.json()
@@ -104,9 +106,7 @@ def test_minute_without_live_keeps_local_first(monkeypatch):
     _patch_market(monkeypatch, in_session=True)
     _patch_live_fetch(monkeypatch)
 
-    resp = _client().get(
-        "/api/kline/minute", params={"symbol": "600000.SH"}
-    )
+    resp = _client().get("/api/kline/minute", params={"symbol": "600000.SH"})
 
     assert resp.status_code == 200
     body = resp.json()
@@ -119,9 +119,7 @@ def test_minute_live_param_falls_back_to_local_off_session(monkeypatch):
     _patch_market(monkeypatch, in_session=False)
     _patch_live_fetch(monkeypatch)
 
-    resp = _client().get(
-        "/api/kline/minute", params={"symbol": "600000.SH", "live": 1}
-    )
+    resp = _client().get("/api/kline/minute", params={"symbol": "600000.SH", "live": 1})
 
     assert resp.status_code == 200
     body = resp.json()

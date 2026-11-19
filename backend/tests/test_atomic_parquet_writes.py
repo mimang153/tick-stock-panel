@@ -214,13 +214,13 @@ def test_enrich_names_interrupted_keeps_existing_table(tmp_path: Path, ck_runtim
 # ---------- 财务表 ----------
 
 
-def test_financial_table_interrupted_keeps_existing_file(tmp_path: Path, crash, ck_runtime) -> None:
-    target = tmp_path / "financials" / "income" / "part.parquet"
-    # period_end 是 CK 主键分量, 缺它整表拒写 (本地 parquet 与 CK 保持同一口径)
+def test_financial_table_interrupted_keeps_existing_table(
+    tmp_path: Path, monkeypatch, ck_runtime
+) -> None:
     old = pl.DataFrame(
         {"symbol": ["600000.SH"], "period_end": [date(2026, 3, 2)], "revenue": [1.0]}
     )
-    _seed(old, target)
+    ck_runtime.write_financials("financials_income", old)
     new = pl.DataFrame(
         {
             "symbol": ["600000.SH", "000001.SZ"],
@@ -229,15 +229,26 @@ def test_financial_table_interrupted_keeps_existing_file(tmp_path: Path, crash, 
         }
     )
 
-    crash.armed = True
+    real_write = ck_runtime.write_financials
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("simulated kill")
+
+    monkeypatch.setattr(ck_runtime, "write_financials", _boom)
     with pytest.raises(OSError, match="simulated kill"):
         financial_sync._write_table("income", new, tmp_path)
-    assert_frame_equal(pl.read_parquet(target), old)
+    stored = ck_runtime.read_financials("financials_income").select(
+        "symbol", "period_end", "revenue"
+    )
+    assert_frame_equal(stored.sort("symbol"), old)
 
-    crash.armed = False
+    monkeypatch.setattr(ck_runtime, "write_financials", real_write)
     assert financial_sync._write_table("income", new, tmp_path) == 2
-    assert_frame_equal(pl.read_parquet(target), new)
-    assert _no_tmp_left(target)
+    stored = ck_runtime.read_financials("financials_income").select(
+        "symbol", "period_end", "revenue"
+    )
+    expected = pl.concat([old, new]).sort(["symbol", "period_end"])
+    assert_frame_equal(stored.sort(["symbol", "period_end"]), expected)
 
 
 # ---------- 主线 / 情绪时序 (读旧 → 合并 → 写回) ----------

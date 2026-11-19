@@ -62,11 +62,15 @@ class BreakoutNewHigh60dMatrixStrategy:
         return 70
 
     def compute_signals(self, market: MarketDataMatrix, params: dict) -> SignalMatrix:
-        prior_high = shift(matrix_feature(market, "high_60d"), 1)   # 昨日及以前的60日高点
+        prior_high = shift(matrix_feature(market, "high_60d"), 1)  # 昨日及以前的60日高点
         entry = market.close > prior_high
-        entry &= matrix_feature(market, "change_pct") >= float(params.get("min_change_pct", 2.0)) / 100.0
+        entry &= (
+            matrix_feature(market, "change_pct") >= float(params.get("min_change_pct", 2.0)) / 100.0
+        )
         if params.get("require_volume", True):
-            entry &= matrix_feature(market, "vol_ratio_5d") >= float(params.get("vol_ratio_min", 1.3))
+            entry &= matrix_feature(market, "vol_ratio_5d") >= float(
+                params.get("vol_ratio_min", 1.3)
+            )
         ma20 = matrix_feature(market, "ma20")
         exit_ = market.close < ma20
         return make_signal_matrix(

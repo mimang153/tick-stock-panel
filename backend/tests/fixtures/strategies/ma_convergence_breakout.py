@@ -86,7 +86,9 @@ class MAConvergenceBreakoutMatrixStrategy:
 
         # 今日变盘: 放量阳线脱离粘合带, 收盘站上三线上方
         entry = squeeze & (market.close > band_top)
-        entry &= matrix_feature(market, "change_pct") >= float(params.get("min_change_pct", 2.0)) / 100.0
+        entry &= (
+            matrix_feature(market, "change_pct") >= float(params.get("min_change_pct", 2.0)) / 100.0
+        )
         if params.get("require_volume", True):
             entry &= matrix_feature(market, "vol_ratio_5d") >= 1.2
 

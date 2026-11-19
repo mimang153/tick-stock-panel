@@ -55,6 +55,17 @@ services:
       - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-tsp}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-tsp}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-tsp123456}
+      # ---- S4 四后端默认 redis（跨 worker 共享；容器走 host.docker.internal） ----
+      - CACHE_BACKEND=${CACHE_BACKEND:-redis}
+      - CACHE_REDIS_URL=${CACHE_REDIS_URL_CONTAINER:-redis://host.docker.internal:6379/0}
+      - CACHE_REDIS_PREFIX=${CACHE_REDIS_PREFIX:-tickflow:cache:}
+      - EVENT_BUS_BACKEND=${EVENT_BUS_BACKEND:-redis}
+      - EVENT_BUS_REDIS_URL=${EVENT_BUS_REDIS_URL_CONTAINER:-redis://host.docker.internal:6379/0}
+      - COORDINATION_BACKEND=${COORDINATION_BACKEND:-redis}
+      - COORDINATION_REDIS_URL=${COORDINATION_REDIS_URL_CONTAINER:-redis://host.docker.internal:6379/0}
+      - MINING_STORE_BACKEND=${MINING_STORE_BACKEND:-redis}
+      # ---- PostgreSQL 账户事务层(DES-005; 复用宿主机 pg_dev.sh 容器) ----
+      - PAPER_PG_URL=${PAPER_PG_URL_CONTAINER:-postgresql://tsp:123456@host.docker.internal:5432/tsp_dev}
     depends_on:
       # 后端启动即连 CK 且 fail-closed, 必须等容器健康后再起, 否则启动直接失败
       clickhouse:
@@ -106,8 +117,8 @@ services:
       nofile:
         soft: 262144
         hard: 262144
-    # 与 config.d 里的 max_server_memory_usage(3.5 GB) 配套: 超限时是 CK 报错而非内核 OOM
-    mem_limit: 4g
+    # 与 41-tsp-dev-memory.xml 配套: 全量测试并发建表需要比生产更高的 CK 内存上限
+    mem_limit: 5g
     volumes:
       # CK 数据独立于面板数据目录(./data): 不被"清空数据"、备份打包和升级搬迁逻辑波及
       - ./ckdata:/var/lib/clickhouse
@@ -116,6 +127,8 @@ services:
       # 只挂单个 drop-in: 整个 config.d 目录挂载会覆盖镜像自带的
       # docker_related_config.xml(其中含 listen_host), 导致 CK 只监听 127.0.0.1
       - ./deploy/clickhouse/config.d/40-tsp-container.xml:/etc/clickhouse-server/config.d/40-tsp-container.xml:ro
+      # 开发专用覆盖: 40 号文件保留生产保守值, 这里按全量测试峰值上调
+      - ./deploy/clickhouse/config.d/41-tsp-dev-memory.xml:/etc/clickhouse-server/config.d/41-tsp-dev-memory.xml:ro
     healthcheck:
       # /ping 无需认证, 避免账号密码参与健康判定
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8123/ping || exit 1"]

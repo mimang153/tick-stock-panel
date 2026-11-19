@@ -3,6 +3,7 @@
 覆盖: 全部编译期错误码 E001-E008/E010/E011/E014/E016、窗口纪律 (只向后看)、
 数值正确性 (与手算基准对拍)、依赖/预热推导、运行期 fail-closed。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -16,16 +17,20 @@ from app.factors.dsl import BASE_COLUMNS, FACTOR_COLUMN, compile_formula
 def _panel() -> pl.DataFrame:
     # 两个 symbol x 6 日, 便于验证 over("symbol") 不串组
     rows = []
-    for symbol, closes in (("A", [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]),
-                           ("B", [100.0, 90.0, 80.0, 70.0, 60.0, 50.0])):
+    for symbol, closes in (
+        ("A", [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]),
+        ("B", [100.0, 90.0, 80.0, 70.0, 60.0, 50.0]),
+    ):
         for index, close in enumerate(closes):
-            rows.append({
-                "symbol": symbol,
-                "date": date(2026, 1, index + 1),
-                "close": close,
-                "volume": 1000.0 + index * 100,
-                "amount": (1000.0 + index * 100) * close,
-            })
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "date": date(2026, 1, index + 1),
+                    "close": close,
+                    "volume": 1000.0 + index * 100,
+                    "amount": (1000.0 + index * 100) * close,
+                }
+            )
     return pl.DataFrame(rows).sort(["symbol", "date"])
 
 
@@ -41,25 +46,29 @@ def _eval(formula: str, panel: pl.DataFrame | None = None) -> pl.Series:
 
 # ------------------------------------------------------------- 错误码覆盖
 
-@pytest.mark.parametrize("formula, code", [
-    ("clos + 1", "E001"),                       # 未知标识符
-    ("foo(close)", "E002"),                     # 未知函数
-    ("ts_mean(close)", "E003"),                 # 缺窗口参数
-    ("ts_mean(close, close)", "E003"),          # 窗口参数必须是常量
-    ("ts_mean(close, 1)", "E004"),              # 窗口 < 2
-    ("ts_mean(close, 600)", "E004"),            # 窗口 > 512
-    ("ts_quantile(close, 5, 1.5)", "E004"),     # q 不在 (0,1)
-    ("ts_delay(close, -5)", "E005"),            # 负 shift = 未来函数
-    ("ts_delta(close, -1)", "E005"),
-    ("power(close, 5)", "E010"),                # 指数越界
-    ("winsorize(close, 9)", "E011"),            # k 越界
-    ("close / 0", "E008"),                      # 静态除零
-    ("1 + 2", "E016"),                          # 常量表达式
-    ("close +", "E014"),                        # 语法错误
-    ("(close", "E014"),
-    ("close $ 1", "E014"),
-    ("", "E014"),
-])
+
+@pytest.mark.parametrize(
+    "formula, code",
+    [
+        ("clos + 1", "E001"),  # 未知标识符
+        ("foo(close)", "E002"),  # 未知函数
+        ("ts_mean(close)", "E003"),  # 缺窗口参数
+        ("ts_mean(close, close)", "E003"),  # 窗口参数必须是常量
+        ("ts_mean(close, 1)", "E004"),  # 窗口 < 2
+        ("ts_mean(close, 600)", "E004"),  # 窗口 > 512
+        ("ts_quantile(close, 5, 1.5)", "E004"),  # q 不在 (0,1)
+        ("ts_delay(close, -5)", "E005"),  # 负 shift = 未来函数
+        ("ts_delta(close, -1)", "E005"),
+        ("power(close, 5)", "E010"),  # 指数越界
+        ("winsorize(close, 9)", "E011"),  # k 越界
+        ("close / 0", "E008"),  # 静态除零
+        ("1 + 2", "E016"),  # 常量表达式
+        ("close +", "E014"),  # 语法错误
+        ("(close", "E014"),
+        ("close $ 1", "E014"),
+        ("", "E014"),
+    ],
+)
 def test_error_codes(formula: str, code: str) -> None:
     compiled = compile_formula(formula)
     assert not compiled.ok
@@ -91,6 +100,7 @@ def test_error_payload_shape() -> None:
 
 # ------------------------------------------------------------- 依赖与预热
 
+
 def test_dependencies_and_warmup() -> None:
     compiled = compile_formula("rank(-ts_sum(change_pct, 5))")
     assert compiled.ok
@@ -116,6 +126,7 @@ def test_base_columns_contract() -> None:
 
 
 # ------------------------------------------------------------- 数值正确性
+
 
 def test_ts_delay_backward_only() -> None:
     values = _eval("ts_delay(close, 2)")
@@ -199,6 +210,7 @@ def test_ts_corr_two_series() -> None:
 
 
 # --------------------------------------------------------- 运行期 fail-closed
+
 
 def test_runtime_missing_column_fails_closed() -> None:
     compiled = compile_formula("close * volume")

@@ -21,7 +21,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import psutil
 
@@ -57,12 +57,22 @@ def _finish_takeover(app_state: Any, lock: MiningProcessLock) -> None:
     except (MiningRunStoreError, OSError) as exc:
         app_state.mining_lock_acquired = False
         lock.release()
-        raise MiningLockAdminError("已获取锁，但恢复任务状态失败，请检查数据目录权限后重试") from exc
+        raise MiningLockAdminError(
+            "已获取锁，但恢复任务状态失败，请检查数据目录权限后重试"
+        ) from exc
     app_state.mining_lock_acquired = True
 
 
 def ensure_mining_lock(app_state: Any) -> bool:
-    """Recover a free lock without terminating processes or deleting lock files."""
+    """Recover a free lock without terminating processes or deleting lock files.
+
+    方案 C（redis mining store）下 flock 门控已出局：run 状态由 Redis Lua 权威
+    串行化，调度防重走共享 store 的 claim，不再需要本机文件锁，直接放行。
+    """
+    from app.config import settings
+
+    if settings.mining_store_backend == "redis":
+        return True
     with _RECOVERY_LOCK:
         lock = getattr(app_state, "mining_process_lock", None)
         if lock is None:
@@ -132,12 +142,19 @@ def lock_status(
             else:
                 holder = {"pid": located_pid, "role": "unknown", "process_started_at": created_at}
                 holder_source = "os-scan"
-    mine = owns_lock if lock is not None else (held and bool(holder) and holder.get("pid") == pid)
+    mine = (
+        owns_lock
+        if lock is not None
+        else (held and holder is not None and holder.get("pid") == pid)
+    )
     holder_pid = holder.get("pid") if holder else None
     holder_alive = bool(mine) or (_pid_alive(holder_pid) if holder_pid else False)
+    holder_info: dict[str, Any] = holder or {}
     pid_consistent = (
         _pid_matches_start_time(
-            holder_pid, holder.get("started_at"), holder.get("process_started_at"),
+            cast(int, holder_pid),
+            holder_info.get("started_at"),
+            holder_info.get("process_started_at"),
         )
         if holder_alive and not mine
         else True
@@ -162,9 +179,7 @@ def lock_status(
         "holder_alive": holder_alive,
         "pid_consistent": pid_consistent,
         "active_runs": active_runs,
-        "store_idle_seconds": (
-            round(store_idle, 1) if store_idle is not None else None
-        ),
+        "store_idle_seconds": (round(store_idle, 1) if store_idle is not None else None),
         "stale_after_seconds": stale_after,
         "force_releasable": releasable,
         "reason": reason,
@@ -197,7 +212,7 @@ def force_release(
         raise MiningLockAdminError("无法核验持有者进程，请重新检查") from exc
     recorded = status["holder"].get("process_started_at")
     if recorded is not None:
-        if not isinstance(recorded, (int, float)) or not abs(created_at - recorded) <= 0.01:
+        if not isinstance(recorded, int | float) or not abs(created_at - recorded) <= 0.01:
             raise MiningLockAdminError("持有者进程已变化，请重新检查后确认")
     elif created_at > datetime.fromisoformat(status["holder"]["started_at"]).timestamp() + 1:
         raise MiningLockAdminError("持有者进程已变化，请重新检查后确认")
@@ -213,15 +228,11 @@ def force_release(
         lambda: (not _pid_alive(target_pid)) or (not probe_lock_held(data_dir)),
         _TERMINATE_GRACE_SECONDS + _RELEASE_WAIT_SECONDS,
     ):
-        raise MiningLockAdminError(
-            f"持有者 pid={target_pid} 未能终止或锁未释放, 请手动处理"
-        )
+        raise MiningLockAdminError(f"持有者 pid={target_pid} 未能终止或锁未释放, 请手动处理")
     try:
         lock.acquire()
     except MiningProcessLockError as exc:
-        raise MiningLockAdminError(
-            "持有者已终止, 但锁仍被其他进程抢先获取; 请重试"
-        ) from exc
+        raise MiningLockAdminError("持有者已终止, 但锁仍被其他进程抢先获取; 请重试") from exc
     return {
         "released": True,
         "terminated_pid": target_pid,
@@ -276,7 +287,10 @@ def _pid_matches_start_time(pid: int, started_at: Any, process_started_at: Any =
     try:
         actual = psutil.Process(pid).create_time()
         if process_started_at is not None:
-            return isinstance(process_started_at, (int, float)) and abs(actual - process_started_at) <= 0.01
+            return (
+                isinstance(process_started_at, int | float)
+                and abs(actual - process_started_at) <= 0.01
+            )
         # Legacy started_at records lock acquisition, which can be long after process start.
         recorded = datetime.fromisoformat(started_at).timestamp()
         return actual <= recorded + 1

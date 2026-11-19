@@ -1,8 +1,10 @@
 """扶摇流式日K同步: 大历史不得在内存中累积后再写入。"""
+
 from __future__ import annotations
 
 import os
 from datetime import date, datetime
+from typing import Any, cast
 
 import polars as pl
 import pytest
@@ -12,10 +14,18 @@ from app.tickflow.repository import DataStore, KlineRepository
 
 
 def _daily(symbol: str, day: date) -> pl.DataFrame:
-    return pl.DataFrame({
-        "symbol": [symbol], "date": [day], "open": [10.0], "high": [11.0],
-        "low": [9.0], "close": [10.5], "volume": [100.0], "amount": [1050.0],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": [symbol],
+            "date": [day],
+            "open": [10.0],
+            "high": [11.0],
+            "low": [9.0],
+            "close": [10.5],
+            "volume": [100.0],
+            "amount": [1050.0],
+        }
+    )
 
 
 class _StreamingProvider:
@@ -42,6 +52,7 @@ def repo(tmp_path):
 def _route_fuyao(monkeypatch, provider):
     monkeypatch.setattr(kline_sync.preferences, "get_daily_data_provider", lambda: "fuyao")
     from app.data_providers import custom
+
     monkeypatch.setattr(
         custom,
         "provider_has_dataset",
@@ -51,10 +62,12 @@ def _route_fuyao(monkeypatch, provider):
 
 
 def test_sync_promotes_staged_files_without_reading_them_back(monkeypatch, repo):
-    provider = _StreamingProvider([
-        _daily("000001.SZ", date(2020, 1, 2)),
-        _daily("000002.SZ", date(2020, 1, 2)),
-    ])
+    provider = _StreamingProvider(
+        [
+            _daily("000001.SZ", date(2020, 1, 2)),
+            _daily("000002.SZ", date(2020, 1, 2)),
+        ]
+    )
     _route_fuyao(monkeypatch, provider)
     monkeypatch.setattr(
         kline_sync.pl,
@@ -63,8 +76,11 @@ def test_sync_promotes_staged_files_without_reading_them_back(monkeypatch, repo)
     )
 
     written = kline_sync.sync_and_persist_daily_batch(
-        ["000001.SZ", "000002.SZ"], repo, object(),
-        start_date=datetime(2020, 1, 1), end_date=datetime(2020, 1, 2),
+        ["000001.SZ", "000002.SZ"],
+        repo,
+        cast(Any, object()),
+        start_date=datetime(2020, 1, 1),
+        end_date=datetime(2020, 1, 2),
     )
 
     assert written == 2
@@ -75,15 +91,20 @@ def test_sync_promotes_staged_files_without_reading_them_back(monkeypatch, repo)
 
 
 def test_sync_persists_streamed_fuyao_chunks_only_after_fetch(monkeypatch, repo):
-    provider = _StreamingProvider([
-        _daily("000001.SZ", date(2020, 1, 2)),
-        _daily("000002.SZ", date(2020, 1, 2)),
-    ])
+    provider = _StreamingProvider(
+        [
+            _daily("000001.SZ", date(2020, 1, 2)),
+            _daily("000002.SZ", date(2020, 1, 2)),
+        ]
+    )
     _route_fuyao(monkeypatch, provider)
 
     written = kline_sync.sync_and_persist_daily_batch(
-        ["000001.SZ", "000002.SZ"], repo, object(),
-        start_date=datetime(2020, 1, 1), end_date=datetime(2020, 1, 2),
+        ["000001.SZ", "000002.SZ"],
+        repo,
+        cast(Any, object()),
+        start_date=datetime(2020, 1, 1),
+        end_date=datetime(2020, 1, 2),
     )
 
     assert written == 2
@@ -98,12 +119,18 @@ def test_sync_merges_after_direct_promotion_without_duplicate_rows(monkeypatch, 
     provider = _StreamingProvider([_daily("000001.SZ", date(2020, 1, 2))])
     _route_fuyao(monkeypatch, provider)
     kline_sync.sync_and_persist_daily_batch(
-        ["000001.SZ"], repo, object(),
-        start_date=datetime(2020, 1, 1), end_date=datetime(2020, 1, 2),
+        ["000001.SZ"],
+        repo,
+        cast(Any, object()),
+        start_date=datetime(2020, 1, 1),
+        end_date=datetime(2020, 1, 2),
     )
     kline_sync.sync_and_persist_daily_batch(
-        ["000001.SZ"], repo, object(),
-        start_date=datetime(2020, 1, 1), end_date=datetime(2020, 1, 2),
+        ["000001.SZ"],
+        repo,
+        cast(Any, object()),
+        start_date=datetime(2020, 1, 1),
+        end_date=datetime(2020, 1, 2),
     )
 
     files = sorted((repo.store.data_dir / "kline_daily" / "date=2020-01-02").glob("*.parquet"))
@@ -115,15 +142,22 @@ def test_sync_merges_after_direct_promotion_without_duplicate_rows(monkeypatch, 
 def test_sync_merges_into_existing_daily_partition(monkeypatch, repo):
     target = repo.store.data_dir / "kline_daily" / "date=2020-01-02"
     target.mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": ["000001.SZ"], "date": [date(2020, 1, 2)], "close": [9.0],
-    }).write_parquet(target / "part.parquet")
+    pl.DataFrame(
+        {
+            "symbol": ["000001.SZ"],
+            "date": [date(2020, 1, 2)],
+            "close": [9.0],
+        }
+    ).write_parquet(target / "part.parquet")
     provider = _StreamingProvider([_daily("000002.SZ", date(2020, 1, 2))])
     _route_fuyao(monkeypatch, provider)
 
     written = kline_sync.sync_and_persist_daily_batch(
-        ["000002.SZ"], repo, object(),
-        start_date=datetime(2020, 1, 1), end_date=datetime(2020, 1, 2),
+        ["000002.SZ"],
+        repo,
+        cast(Any, object()),
+        start_date=datetime(2020, 1, 1),
+        end_date=datetime(2020, 1, 2),
     )
 
     assert written == 1
@@ -139,14 +173,19 @@ def test_sync_merges_partition_holding_a_realtime_snapshot_with_quote_ts(monkeyp
     _daily("000002.SZ", date(2020, 1, 2)).with_columns(
         quote_ts=pl.lit(1577948400000, dtype=pl.Int64),
     ).write_parquet(target / "part.parquet")
-    provider = _StreamingProvider([
-        _daily("000002.SZ", date(2020, 1, 2)).with_columns(close=pl.lit(10.8)),
-    ])
+    provider = _StreamingProvider(
+        [
+            _daily("000002.SZ", date(2020, 1, 2)).with_columns(close=pl.lit(10.8)),
+        ]
+    )
     _route_fuyao(monkeypatch, provider)
 
     written = kline_sync.sync_and_persist_daily_batch(
-        ["000002.SZ"], repo, object(),
-        start_date=datetime(2020, 1, 1), end_date=datetime(2020, 1, 2),
+        ["000002.SZ"],
+        repo,
+        cast(Any, object()),
+        start_date=datetime(2020, 1, 1),
+        end_date=datetime(2020, 1, 2),
     )
 
     assert written == 1
@@ -166,8 +205,11 @@ def test_sync_discards_staging_when_streaming_fails(monkeypatch, repo):
 
     with pytest.raises(RuntimeError, match="network lost"):
         kline_sync.sync_and_persist_daily_batch(
-            ["000001.SZ"], repo, object(),
-            start_date=datetime(2020, 1, 1), end_date=datetime(2020, 1, 2),
+            ["000001.SZ"],
+            repo,
+            cast(Any, object()),
+            start_date=datetime(2020, 1, 1),
+            end_date=datetime(2020, 1, 2),
         )
 
     assert not list((repo.store.data_dir / "kline_daily").glob("date=*"))
@@ -185,8 +227,11 @@ def test_sync_sweeps_only_stale_staging(monkeypatch, repo):
     _route_fuyao(monkeypatch, provider)
 
     written = kline_sync.sync_and_persist_daily_batch(
-        ["000001.SZ"], repo, object(),
-        start_date=datetime(2020, 1, 1), end_date=datetime(2020, 1, 2),
+        ["000001.SZ"],
+        repo,
+        cast(Any, object()),
+        start_date=datetime(2020, 1, 1),
+        end_date=datetime(2020, 1, 2),
     )
 
     assert written == 0

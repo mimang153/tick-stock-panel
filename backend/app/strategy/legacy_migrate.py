@@ -9,6 +9,7 @@
 分类保守: 只归档明确由「内置世界残留」引起的失败, 语法错误等普通
 失败仍走原有 load_errors 提示, 绝不误归档用户编辑中的文件。
 """
+
 from __future__ import annotations
 
 import logging
@@ -22,10 +23,10 @@ ARCHIVE_DIRNAME = "_archive_unloadable"
 
 # 归档条件: 错误信息命中任一模式 = 「内置残留」类失败
 _ARCHIVE_PATTERNS = (
-    re.compile(r"app\.strategy\.builtin"),          # import 已删除的内置模块 (垫片之外的)
-    re.compile(r"子策略.*不存在"),                    # composite 断链
+    re.compile(r"app\.strategy\.builtin"),  # import 已删除的内置模块 (垫片之外的)
+    re.compile(r"子策略.*不存在"),  # composite 断链
     re.compile(r"composite strategy.*不存在"),
-    re.compile(r"unknown strategy"),                 # META/引用指向不存在的策略
+    re.compile(r"unknown strategy"),  # META/引用指向不存在的策略
 )
 
 
@@ -46,14 +47,12 @@ def archive_unloadable_strategies(load_errors: list[dict]) -> list[str]:
         error = str(item.get("error", ""))
         if not f.exists() or not is_legacy_unloadable(error):
             continue
-        # 只处理 data/strategies/ 下的文件 (研究模板等代码文件不动)
         if "strategies" not in f.parts:
             continue
         try:
             dest_dir = f.parent / ARCHIVE_DIRNAME
             dest_dir.mkdir(parents=True, exist_ok=True)
             dest = dest_dir / f.name
-            # 同名碰撞: 追加序号, 不覆盖既有归档
             i = 1
             while dest.exists():
                 dest = dest_dir / f"{f.stem}_{i}{f.suffix}"

@@ -6,6 +6,7 @@
 
 依赖 PR2a 的 StrategyOptimizer 做每折训练区间的网格优化。
 """
+
 from __future__ import annotations
 
 import logging
@@ -98,7 +99,7 @@ def aggregate_oos(fold_records: list[dict], objective: str, direction: str = "ma
     n_positive = 0
     for f in fold_records:
         r = float(f["oos_stats"].get("total_return", 0.0) or 0.0)
-        equity *= (1 + r)
+        equity *= 1 + r
         if r > 0:
             n_positive += 1
         curve.append({"fold": f["index"], "date": str(f["test_end"]), "value": round(equity, 4)})
@@ -109,7 +110,8 @@ def aggregate_oos(fold_records: list[dict], objective: str, direction: str = "ma
     avg_oos = round(float(sum(oos_vals) / len(oos_vals)), 4) if oos_vals else None
     degradation = (
         round(_norm(avg_is, direction) - _norm(avg_oos, direction), 4)
-        if (avg_is is not None and avg_oos is not None) else None
+        if (avg_is is not None and avg_oos is not None)
+        else None
     )
 
     return {
@@ -135,7 +137,7 @@ class WalkForwardConfig:
     test_days: int = 63
     step_days: int = 63
     direction: str | None = None
-    min_trades_oos: int = 10            # 每折 OOS 段最小交易数 (<=0 关闭)
+    min_trades_oos: int = 10  # 每折 OOS 段最小交易数 (<=0 关闭)
     max_workers: int = 4
     base_params: dict = field(default_factory=dict)
     overrides: dict | None = None
@@ -192,173 +194,203 @@ class WalkForwardService:
             matrix_cache_max_bytes=int(cfg.matrix_cache_max_mb) * 1024 * 1024,
         )
 
-    def run(
-        self,
-        cfg: WalkForwardConfig,
-        progress_cb=None,
-        cancel_event=None,
-    ) -> dict:
-        from app.backtest.optimizer import OptimizeConfig, default_direction
+    @staticmethod
+    def _emit_progress(progress_cb, done, n_total, fold_index):
+        """统一上报每折进度, 保持所有跳过/成功分支的回调结构一致。"""
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "type": "walkforward_progress",
+                    "done": done,
+                    "total": n_total,
+                    "fold": fold_index,
+                }
+            )
+
+    @staticmethod
+    def _shared_window_has_data(shared_date_labels, window_start: date, window_end: date) -> bool:
+        """共享矩阵日期标签上判断窗口是否有可用行情 (ISO 日期串比较)。"""
+        index = bisect_left(shared_date_labels, window_start.isoformat())
+        return (
+            index < len(shared_date_labels) and shared_date_labels[index] <= window_end.isoformat()
+        )
+
+    def _optimize_fold(self, cfg, f, is_backtest_kwargs, shared_market_data, cancel_event):
+        """训练区间网格优化, 返回 (best_params, is_score)。"""
+        from app.backtest.optimizer import OptimizeConfig
+
+        opt_cfg = OptimizeConfig(
+            strategy_id=cfg.strategy_id,
+            symbols=cfg.symbols,
+            start=f.train_start,
+            end=f.train_end,
+            param_grid=cfg.param_grid,
+            objective=cfg.objective,
+            direction=cfg.direction,
+            max_workers=cfg.max_workers,
+            base_params=cfg.base_params,
+            overrides=cfg.overrides,
+            backtest_kwargs=is_backtest_kwargs,  # IS 强制 position, 堵前视泄漏
+        )
+        if shared_market_data is None:
+            opt_res = self.optimizer.optimize(opt_cfg, cancel_event=cancel_event)
+        else:
+            opt_res = self.optimizer.optimize(
+                opt_cfg,
+                cancel_event=cancel_event,
+                prepared_market_data=shared_market_data,
+            )
+        return opt_res.get("best_params"), opt_res.get("best_score")
+
+    def _run_oos_backtest(self, cfg, f, best_params, shared_market_data, cancel_event):
+        """测试区间用最优参数做样本外回测, 返回 oos_res。"""
         from app.backtest.strategy import StrategyBacktestConfig
 
-        t0 = time.perf_counter()
-        direction = cfg.direction or default_direction(cfg.objective)
-        folds = generate_folds(cfg.start, cfg.end, cfg.train_days, cfg.test_days, cfg.step_days)
-        n_total = len(folds)
-
-        shared_prepared = self._prepare_shared_matrix(cfg, folds)
-        shared_market_data = (
-            shared_prepared.market_data if shared_prepared is not None else None
+        merged = {**cfg.base_params, **best_params}
+        oos_cfg = StrategyBacktestConfig(
+            strategy_id=cfg.strategy_id,
+            symbols=cfg.symbols,
+            start=f.test_start,
+            end=f.test_end,
+            params=merged,
+            overrides=cfg.overrides,
+            **cfg.backtest_kwargs,
         )
-        shared_date_labels = (
-            tuple(label[:10] for label in shared_market_data.timestamp_labels)
-            if shared_market_data is not None
-            else ()
-        )
-
-        def _shared_window_has_data(window_start: date, window_end: date) -> bool:
-            index = bisect_left(shared_date_labels, window_start.isoformat())
-            return index < len(shared_date_labels) and shared_date_labels[index] <= window_end.isoformat()
-
-        # 遥测: 首尾快照 PanelCache, 量化跨折重叠区间重复扫盘的 IO 占比 (是否值得进一步优化)。
-        cache_before = self.service.engine.cache_stats()
-
-        valid_records: list[dict] = []   # IS 与 OOS 都成功, 计入聚合
-        skipped: list[dict] = []          # 无优化结果 或 OOS 失败, 不计入聚合 (避免伪装成有效折)
-        done = 0
-
-        # IS 训练区间强制 position 模式: full 模式会让训练折未平仓持仓用 train_end 之后
-        # (即 OOS 区间) 的真实 K 线平仓, IS 分数被未来数据污染 -> 优化选参乐观偏移, 使过拟合
-        # 被掩盖。OOS 回测保留用户所选 mode。参数扫描优化只看正式区间内的表现即可。
-        is_backtest_kwargs = {**cfg.backtest_kwargs, "mode": "position"}
-
-        for f in folds:
-            if cancel_event is not None and cancel_event.is_set():
-                break
-
-            base = {
-                "index": f.index,
-                "train_start": str(f.train_start),
-                "train_end": str(f.train_end),
-                "test_start": str(f.test_start),
-                "test_end": str(f.test_end),
-            }
-            missing_window = None
+        oos_prepared = None
+        try:
             if shared_market_data is not None:
-                if not _shared_window_has_data(f.train_start, f.train_end):
-                    missing_window = "训练区间无可用行情数据"
-                elif not _shared_window_has_data(f.test_start, f.test_end):
-                    missing_window = "测试区间无可用行情数据"
-            if missing_window is not None:
-                skipped.append({**base, "reason": missing_window})
-                done += 1
-                if progress_cb is not None:
-                    progress_cb({"type": "walkforward_progress", "done": done, "total": n_total, "fold": f.index})
-                continue
-
-            # 训练区间: 网格优化选最优参数
-            opt_cfg = OptimizeConfig(
-                strategy_id=cfg.strategy_id,
-                symbols=cfg.symbols,
-                start=f.train_start,
-                end=f.train_end,
-                param_grid=cfg.param_grid,
-                objective=cfg.objective,
-                direction=cfg.direction,
-                max_workers=cfg.max_workers,
-                base_params=cfg.base_params,
-                overrides=cfg.overrides,
-                backtest_kwargs=is_backtest_kwargs,  # IS 强制 position, 堵前视泄漏
-            )
-            if shared_market_data is None:
-                opt_res = self.optimizer.optimize(opt_cfg, cancel_event=cancel_event)
-            else:
-                opt_res = self.optimizer.optimize(
-                    opt_cfg,
-                    cancel_event=cancel_event,
-                    prepared_market_data=shared_market_data,
+                oos_prepared = self.service.prepare_matrix_optimization(
+                    [oos_cfg],
+                    matrix_cache_max_bytes=int(cfg.matrix_cache_max_mb) * 1024 * 1024,
+                    market_data_override=shared_market_data,
                 )
-            best_params = opt_res.get("best_params")
-            is_score = opt_res.get("best_score")
+            if oos_prepared is None:
+                oos_res = self.service.run(oos_cfg, cancel_event=cancel_event)
+            else:
+                oos_res = self.service.run(
+                    oos_cfg, cancel_event=cancel_event, prepared=oos_prepared
+                )
+        finally:
+            if oos_prepared is not None:
+                oos_prepared.compute_cache.close()
+        return oos_res
+
+    def _skip_fold(
+        self,
+        skipped: list,
+        base: dict,
+        done: int,
+        n_total: int,
+        f,
+        progress_cb,
+        **fields,
+    ) -> int:
+        """记录跳过折并推进进度; done 由调用方按阶段递增后传入。"""
+        skipped.append({**base, **fields})
+        self._emit_progress(progress_cb, done, n_total, f.index)
+        return done
+
+    @staticmethod
+    def _fold_record(base, best_params, is_score, oos_objective, oos_degraded, stats) -> dict:
+        """组装有效折记录; 字段顺序与历史结果契约一致。"""
+        return {
+            **base,
+            "best_params": best_params,
+            "is_score": is_score,
+            "oos_objective": oos_objective,
+            "oos_degraded": oos_degraded,
+            "oos_stats": stats,
+        }
+
+    def _run_one_fold(
+        self,
+        f,
+        cfg,
+        direction,
+        n_total,
+        done,
+        valid_records,
+        skipped,
+        shared_market_data,
+        shared_date_labels,
+        is_backtest_kwargs,
+        cancel_event,
+        progress_cb,
+    ):
+        """处理单折: 数据缺口/优化失败/OOS 失败/交易数不足标记跳过, 否则计入有效折。"""
+        base = {
+            "index": f.index,
+            "train_start": str(f.train_start),
+            "train_end": str(f.train_end),
+            "test_start": str(f.test_start),
+            "test_end": str(f.test_end),
+        }
+
+        def skip(**fields) -> int:
+            """记录当前折跳过原因并推进进度; done 闭包引用随阶段递增。"""
+            return self._skip_fold(skipped, base, done, n_total, f, progress_cb, **fields)
+
+        missing_window = None
+        if shared_market_data is not None:
+            if not self._shared_window_has_data(shared_date_labels, f.train_start, f.train_end):
+                missing_window = "训练区间无可用行情数据"
+            elif not self._shared_window_has_data(shared_date_labels, f.test_start, f.test_end):
+                missing_window = "测试区间无可用行情数据"
+        if missing_window is not None:
             done += 1
+            return skip(reason=missing_window)
 
-            # 训练区间没优化出参数 (全组失败/取消) -> 跳过, 不用默认参数硬跑 OOS 伪装成有效折
-            if best_params is None:
-                skipped.append({**base, "reason": "训练区间未优化出参数"})
-                if progress_cb is not None:
-                    progress_cb({"type": "walkforward_progress", "done": done, "total": n_total, "fold": f.index})
-                continue
+        best_params, is_score = self._optimize_fold(
+            cfg,
+            f,
+            is_backtest_kwargs,
+            shared_market_data,
+            cancel_event,
+        )
+        done += 1
+        if best_params is None:
+            return skip(reason="训练区间未优化出参数")
 
-            # 测试区间: 用最优参数做样本外回测
-            merged = {**cfg.base_params, **best_params}
-            oos_cfg = StrategyBacktestConfig(
-                strategy_id=cfg.strategy_id,
-                symbols=cfg.symbols,
-                start=f.test_start,
-                end=f.test_end,
-                params=merged,
-                overrides=cfg.overrides,
-                **cfg.backtest_kwargs,
+        oos_res = self._run_oos_backtest(cfg, f, best_params, shared_market_data, cancel_event)
+        if oos_res.error:
+            return skip(best_params=best_params, reason=f"OOS 回测失败: {oos_res.error}")
+
+        # 交易数门槛 (共享护栏): 少数几笔的 OOS 段统计意义不足, 混入复利曲线
+        # 会被运气主导 —— 标记无效折跳过, 与数据缺口折同一透明处理。
+        if not trades_ok(oos_res.stats, cfg.min_trades_oos):
+            n_trades = oos_res.stats.get("n_trades") or 0
+            return skip(
+                best_params=best_params,
+                reason=f"OOS 交易数不足 ({n_trades} < {cfg.min_trades_oos})",
             )
-            oos_prepared = None
-            try:
-                if shared_market_data is not None:
-                    oos_prepared = self.service.prepare_matrix_optimization(
-                        [oos_cfg],
-                        matrix_cache_max_bytes=int(cfg.matrix_cache_max_mb) * 1024 * 1024,
-                        market_data_override=shared_market_data,
-                    )
-                if oos_prepared is None:
-                    oos_res = self.service.run(
-                        oos_cfg,
-                        cancel_event=cancel_event,
-                    )
-                else:
-                    oos_res = self.service.run(
-                        oos_cfg,
-                        cancel_event=cancel_event,
-                        prepared=oos_prepared,
-                    )
-            finally:
-                if oos_prepared is not None:
-                    oos_prepared.compute_cache.close()
 
-            # OOS 失败 (含 cancelled) -> 跳过, 不把空/0 收益混入复利曲线
-            if oos_res.error:
-                skipped.append({**base, "best_params": best_params, "reason": f"OOS 回测失败: {oos_res.error}"})
-                if progress_cb is not None:
-                    progress_cb({"type": "walkforward_progress", "done": done, "total": n_total, "fold": f.index})
-                continue
-
-            # 交易数门槛 (共享护栏): 少数几笔的 OOS 段统计意义不足, 混入复利曲线
-            # 会被运气主导 —— 标记无效折跳过, 与数据缺口折同一透明处理。
-            if not trades_ok(oos_res.stats, cfg.min_trades_oos):
-                skipped.append({
-                    **base, "best_params": best_params,
-                    "reason": f"OOS 交易数不足 ({oos_res.stats.get('n_trades') or 0} < {cfg.min_trades_oos})",
-                })
-                if progress_cb is not None:
-                    progress_cb({"type": "walkforward_progress", "done": done, "total": n_total, "fold": f.index})
-                continue
-
-            oos_objective = oos_res.stats.get(cfg.objective)
-            # 该折 OOS 是否较 IS 退化 (方向感知: min 类目标数值更大才是退化)
-            oos_degraded = (
-                _norm(oos_objective, direction) < _norm(is_score, direction)
-                if (oos_objective is not None and is_score is not None) else None
+        oos_objective = oos_res.stats.get(cfg.objective)
+        # 该折 OOS 是否较 IS 退化 (方向感知: min 类目标数值更大才是退化)
+        oos_degraded = (
+            _norm(oos_objective, direction) < _norm(is_score, direction)
+            if (oos_objective is not None and is_score is not None)
+            else None
+        )
+        valid_records.append(
+            self._fold_record(
+                base, best_params, is_score, oos_objective, oos_degraded, oos_res.stats
             )
-            valid_records.append({
-                **base,
-                "best_params": best_params,
-                "is_score": is_score,
-                "oos_objective": oos_objective,
-                "oos_degraded": oos_degraded,
-                "oos_stats": oos_res.stats,
-            })
+        )
+        self._emit_progress(progress_cb, done, n_total, f.index)
+        return done
 
-            if progress_cb is not None:
-                progress_cb({"type": "walkforward_progress", "done": done, "total": n_total, "fold": f.index})
-
+    def _finalize(
+        self,
+        cfg,
+        direction,
+        t0,
+        cache_before,
+        shared_prepared,
+        valid_records,
+        skipped,
+        n_total,
+    ):
+        """聚合有效折 + 收尾遥测 + 组装返回结构。"""
         summary = aggregate_oos(valid_records, cfg.objective, direction)
 
         shared_matrix_bytes = (
@@ -384,8 +416,12 @@ class WalkForwardService:
         }
         logger.info(
             "walk-forward IO 占比: load_panel %.3fs (%.1f%% of %.1fms) | 扫盘 %d 次 命中 %d 复用 %d",
-            io_seconds, io_pct, elapsed_ms,
-            cache_telemetry["scans"], cache_telemetry["hits"], cache_telemetry["single_flight_reuses"],
+            io_seconds,
+            io_pct,
+            elapsed_ms,
+            cache_telemetry["scans"],
+            cache_telemetry["hits"],
+            cache_telemetry["single_flight_reuses"],
         )
 
         return {
@@ -403,3 +439,65 @@ class WalkForwardService:
             "shared_market_data_status": shared_matrix_status,
             "elapsed_ms": elapsed_ms,
         }
+
+    def run(
+        self,
+        cfg: WalkForwardConfig,
+        progress_cb=None,
+        cancel_event=None,
+    ) -> dict:
+        from app.backtest.optimizer import default_direction
+
+        t0 = time.perf_counter()
+        direction = cfg.direction or default_direction(cfg.objective)
+        folds = generate_folds(cfg.start, cfg.end, cfg.train_days, cfg.test_days, cfg.step_days)
+        n_total = len(folds)
+
+        shared_prepared = self._prepare_shared_matrix(cfg, folds)
+        shared_market_data = shared_prepared.market_data if shared_prepared is not None else None
+        shared_date_labels = (
+            tuple(label[:10] for label in shared_market_data.timestamp_labels)
+            if shared_market_data is not None
+            else ()
+        )
+
+        # 遥测: 首尾快照 PanelCache, 量化跨折重叠区间重复扫盘的 IO 占比 (是否值得进一步优化)。
+        cache_before = self.service.engine.cache_stats()
+
+        valid_records: list[dict] = []  # IS 与 OOS 都成功, 计入聚合
+        skipped: list[dict] = []  # 无优化结果 或 OOS 失败, 不计入聚合 (避免伪装成有效折)
+        done = 0
+
+        # IS 训练区间强制 position 模式: full 模式会让训练折未平仓持仓用 train_end 之后
+        # (即 OOS 区间) 的真实 K 线平仓, IS 分数被未来数据污染 -> 优化选参乐观偏移, 使过拟合
+        # 被掩盖。OOS 回测保留用户所选 mode。参数扫描优化只看正式区间内的表现即可。
+        is_backtest_kwargs = {**cfg.backtest_kwargs, "mode": "position"}
+
+        for f in folds:
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            done = self._run_one_fold(
+                f,
+                cfg,
+                direction,
+                n_total,
+                done,
+                valid_records,
+                skipped,
+                shared_market_data,
+                shared_date_labels,
+                is_backtest_kwargs,
+                cancel_event,
+                progress_cb,
+            )
+
+        return self._finalize(
+            cfg,
+            direction,
+            t0,
+            cache_before,
+            shared_prepared,
+            valid_records,
+            skipped,
+            n_total,
+        )

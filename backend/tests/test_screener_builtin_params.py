@@ -30,13 +30,15 @@ class _CapturingScreenerService:
         params_map=None,
         overrides_map=None,
     ):
-        self.calls.append({
-            "kind": "context",
-            "strategy_ids": strategy_ids,
-            "timeframe": timeframe,
-            "params_map": params_map,
-            "overrides_map": overrides_map,
-        })
+        self.calls.append(
+            {
+                "kind": "context",
+                "strategy_ids": strategy_ids,
+                "timeframe": timeframe,
+                "params_map": params_map,
+                "overrides_map": overrides_map,
+            }
+        )
         return types.SimpleNamespace(as_of=as_of)
 
 
@@ -52,22 +54,28 @@ class _CapturingStrategyEngine:
         return types.SimpleNamespace(meta={"id": strategy_id})
 
     def run(self, strategy_id, context, *, pool=None, params=None, overrides=None):
-        self.calls.append({
-            "kind": "run",
-            "strategy_id": strategy_id,
-            "pool": pool,
-            "params": params,
-            "overrides": overrides,
-        })
+        self.calls.append(
+            {
+                "kind": "run",
+                "strategy_id": strategy_id,
+                "pool": pool,
+                "params": params,
+                "overrides": overrides,
+            }
+        )
         return ScreenerResult(as_of=context.as_of, strategy=strategy_id)
 
-    def run_all(self, context, *, params_map=None, overrides_map=None, strategy_ids=None, parallel=True):
-        self.calls.append({
-            "kind": "run_all",
-            "params_map": params_map,
-            "overrides_map": overrides_map,
-            "strategy_ids": strategy_ids,
-        })
+    def run_all(
+        self, context, *, params_map=None, overrides_map=None, strategy_ids=None, parallel=True
+    ):
+        self.calls.append(
+            {
+                "kind": "run_all",
+                "params_map": params_map,
+                "overrides_map": overrides_map,
+                "strategy_ids": strategy_ids,
+            }
+        )
         return {
             strategy_id: ScreenerResult(as_of=context.as_of, strategy=strategy_id)
             for strategy_id in strategy_ids or []
@@ -114,20 +122,30 @@ def test_single_run_passes_saved_params_to_strategy_engine(monkeypatch, tmp_path
 
 @pytest.mark.parametrize("timeframe", ["1d", "1m"])
 @pytest.mark.parametrize("asset_type", ["stock", "etf"])
-def test_single_run_accepts_legacy_null_filter_without_reporting_changed_params(monkeypatch, tmp_path, timeframe, asset_type):
+def test_single_run_accepts_legacy_null_filter_without_reporting_changed_params(
+    monkeypatch, tmp_path, timeframe, asset_type
+):
     engine = _CapturingStrategyEngine()
     request = _api_request(tmp_path, engine)
     _install_api_fakes(monkeypatch)
-    saved = {"params": {"threshold": 3.0, "enabled": False},
-             "basic_filter": {"amount_min": None, "price_min": 0, "enabled": False}}
+    saved = {
+        "params": {"threshold": 3.0, "enabled": False},
+        "basic_filter": {"amount_min": None, "price_min": 0, "enabled": False},
+    }
     screener_api.strategy_config.save_override(tmp_path, "builtin_strategy", saved)
     path = tmp_path / "user_data" / "strategy_overrides" / "builtin_strategy.json"
     before = path.read_bytes()
 
-    payload = screener_api.run_preset(screener_api.PresetRequest(
-        strategy_id="builtin_strategy", as_of=date(2026, 7, 15),
-        asset_type=asset_type, timeframe=timeframe, ensure=True,
-    ), request)
+    payload = screener_api.run_preset(
+        screener_api.PresetRequest(
+            strategy_id="builtin_strategy",
+            as_of=date(2026, 7, 15),
+            asset_type=asset_type,
+            timeframe=timeframe,
+            ensure=True,
+        ),
+        request,
+    )
 
     assert payload["strategy"] == "builtin_strategy"
     run_call = next(call for call in engine.calls if call["kind"] == "run")
@@ -168,7 +186,9 @@ def test_batch_summary_response_still_writes_full_cache(monkeypatch, tmp_path):
     _install_api_fakes(monkeypatch)
     written = []
     monkeypatch.setattr(screener_api.strategy_config, "list_overrides", lambda *_args: {})
-    monkeypatch.setattr(screener_api.strategy_cache, "write_cache", lambda *args, **kwargs: written.append(args))
+    monkeypatch.setattr(
+        screener_api.strategy_cache, "write_cache", lambda *args, **kwargs: written.append(args)
+    )
 
     payload = screener_api.run_all(
         request,

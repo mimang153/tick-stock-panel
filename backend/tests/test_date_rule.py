@@ -3,7 +3,10 @@
 date 规则是纯日历、无行情条件, 由 quote_service 盘中轮询调用
 MonitorRuleEngine.evaluate_date_rules()。这里只测引擎与规则存储层。
 """
+
 from __future__ import annotations
+
+from typing import Any, cast
 
 import polars as pl
 import pytest
@@ -14,11 +17,17 @@ from app.strategy.monitor import MonitorRuleEngine, format_alert_quote
 
 def _rule(**kw):
     r = {
-        "id": "date1", "name": "批次到期", "type": "date",
-        "asset_type": "stock", "scope": "symbols",
+        "id": "date1",
+        "name": "批次到期",
+        "type": "date",
+        "asset_type": "stock",
+        "scope": "symbols",
         "symbols": ["600519.SH"],
-        "remind_date": "2026-08-30", "lead_days": 3,
-        "cooldown_seconds": 86400, "severity": "info", "enabled": True,
+        "remind_date": "2026-08-30",
+        "lead_days": 3,
+        "cooldown_seconds": 86400,
+        "severity": "info",
+        "enabled": True,
         "message": "批次到期提醒 · 2026-08-30",
     }
     r.update(kw)
@@ -28,23 +37,30 @@ def _rule(**kw):
 # ── 窗口纯函数 ──────────────────────────────────────────
 def test_window_pure_unit_cases():
     w = monitor_rules.date_rule_in_window
-    assert w("2026-08-30", 3, "2026-08-28") is True   # 窗口左界内
-    assert w("2026-08-30", 3, "2026-08-27") is True   # 恰在左界 (含)
+    assert w("2026-08-30", 3, "2026-08-28") is True  # 窗口左界内
+    assert w("2026-08-30", 3, "2026-08-27") is True  # 恰在左界 (含)
     assert w("2026-08-30", 3, "2026-08-26") is False  # 早于左界
-    assert w("2026-08-30", 3, "2026-08-30") is True   # 到期当天
+    assert w("2026-08-30", 3, "2026-08-30") is True  # 到期当天
     assert w("2026-08-30", 3, "2026-08-31") is False  # 过期
-    assert w("2026-08-30", 0, "2026-08-30") is True   # 不提前
+    assert w("2026-08-30", 0, "2026-08-30") is True  # 不提前
     assert w("2026-08-30", 0, "2026-08-29") is False
-    assert w("not-a-date", 3, "2026-08-28") is False   # 非法输入 fail-safe
-    assert w("2026-08-30", "x", "2026-08-28") is False
+    assert w("not-a-date", 3, "2026-08-28") is False  # 非法输入 fail-safe
+    assert w("2026-08-30", cast(Any, "x"), "2026-08-28") is False
 
 
 def test_validate_and_normalize_date():
-    valid = {"id": "date2", "name": "n", "type": "date", "scope": "symbols",
-             "symbols": ["600519.SH"], "remind_date": "2026-09-01", "lead_days": 2}
+    valid = {
+        "id": "date2",
+        "name": "n",
+        "type": "date",
+        "scope": "symbols",
+        "symbols": ["600519.SH"],
+        "remind_date": "2026-09-01",
+        "lead_days": 2,
+    }
     monitor_rules.validate(valid)
     n = monitor_rules.normalize(valid)
-    assert n["cooldown_seconds"] == 86400   # 每天最多一次
+    assert n["cooldown_seconds"] == 86400  # 每天最多一次
     assert n["conditions"] == []
     assert n["scope"] == "symbols"
 
@@ -53,13 +69,15 @@ def test_validate_and_normalize_date():
         monitor_rules.validate({**valid, "symbols": []})
 
     with pytest.raises(ValueError):
-        monitor_rules.validate({**valid, "remind_date": None})          # 必填
+        monitor_rules.validate({**valid, "remind_date": None})  # 必填
     with pytest.raises(ValueError):
         monitor_rules.validate({**valid, "remind_date": "2026/09/01"})  # 格式
     with pytest.raises(ValueError):
-        monitor_rules.validate({**valid, "lead_days": -1})              # 非负
+        monitor_rules.validate({**valid, "lead_days": -1})  # 非负
     with pytest.raises(ValueError):
-        monitor_rules.validate({**valid, "conditions": [{"field": "close", "op": ">=", "value": 10.0}]})
+        monitor_rules.validate(
+            {**valid, "conditions": [{"field": "close", "op": ">=", "value": 10.0}]}
+        )
     assert "date" in monitor_rules.RULE_TYPES
 
 
@@ -106,9 +124,19 @@ def test_date_engine_skips_outside_window(monkeypatch):
 def test_date_engine_ignores_disabled_and_non_date(monkeypatch):
     _monkey_today(monkeypatch, "2026-08-28")
     eng = MonitorRuleEngine()
-    eng.set_rules([_rule(enabled=False), _rule(id="price1", type="price", conditions=[
-        {"field": "close", "op": ">=", "value": 100.0},
-    ], message="")])
+    eng.set_rules(
+        [
+            _rule(enabled=False),
+            _rule(
+                id="price1",
+                type="price",
+                conditions=[
+                    {"field": "close", "op": ">=", "value": 100.0},
+                ],
+                message="",
+            ),
+        ]
+    )
     assert eng.evaluate_date_rules() == []
 
 
@@ -117,7 +145,7 @@ def test_date_engine_once_per_day(monkeypatch):
     eng = MonitorRuleEngine()
     eng.set_rules([_rule()])
     assert len(eng.evaluate_date_rules()) == 1
-    assert eng.evaluate_date_rules() == []          # 同日 cooldown 去重
+    assert eng.evaluate_date_rules() == []  # 同日 cooldown 去重
     # 跨天: 窗口内仍命中 → 再提醒一次
     _monkey_today(monkeypatch, "2026-08-29")
     assert len(eng.evaluate_date_rules()) == 1
@@ -146,6 +174,6 @@ def test_date_not_evaluated_by_quote_evaluate(monkeypatch):
 def test_format_alert_quote():
     assert format_alert_quote(1500.0, 0.1) == "现价 1500.0 · +10.0%"
     assert format_alert_quote(1425.0, -0.05) == "现价 1425.0 · -5.0%"
-    assert format_alert_quote(None, None) == ""          # 日期提醒等无行情
+    assert format_alert_quote(None, None) == ""  # 日期提醒等无行情
     assert format_alert_quote(None, 0.03) == "+3.0%"
     assert format_alert_quote(10.0, None) == "现价 10.0"

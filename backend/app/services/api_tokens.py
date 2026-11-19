@@ -7,6 +7,7 @@
   - last_used_at 节流落盘 (≥60s 才写一次), 避免热路径每请求写文件。
 进程内写互斥沿用域模块惯例 (PAPER_LOCK 模式); 读取无锁 (json 小文件)。
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -52,7 +53,7 @@ def load_tokens(data_dir: Path) -> list[dict]:
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
         return raw.get("tokens", [])
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - 配置文件损坏时按无 Token 处理,不阻断鉴权初始化
         logger.warning("api_tokens.json 解析失败 (视为无 Token): %s", e)
         return []
 
@@ -72,17 +73,17 @@ def _hash(plaintext: str) -> str:
 
 def list_tokens(data_dir: Path) -> list[dict]:
     """管理列表视图: 去掉哈希, 附加 scope 有效性 (未知 scope 标 invalid)。"""
-    out = []
-    for t in load_tokens(data_dir):
-        out.append({
+    return [
+        {
             "id": t["id"],
             "name": t["name"],
             "scopes": t["scopes"],
             "created_at": t["created_at"],
             "last_used_at": t.get("last_used_at"),
             "revoked": bool(t.get("revoked")),
-        })
-    return out
+        }
+        for t in load_tokens(data_dir)
+    ]
 
 
 def create_token(data_dir: Path, name: str, scopes: list[str]) -> tuple[dict, str]:
@@ -155,5 +156,5 @@ def _touch(data_dir: Path, record: dict, now: datetime) -> None:
                 if t["id"] == record["id"]:
                     t["last_used_at"] = record["last_used_at"]
             _save(data_dir, tokens)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - 使用时间落盘失败可忽略,不影响本次鉴权结果
         logger.warning("api_tokens last_used_at 落盘失败 (忽略): %s", e)

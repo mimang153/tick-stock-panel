@@ -72,21 +72,36 @@ _CANCEL_FLAGS_LOCK = threading.Lock()
 
 
 def request_cancel(job_id: str) -> bool:
-    """请求取消指定 job。返回是否存在该 job 的 flag。"""
+    """请求取消指定 job。跨实例模式下本地无 flag 时由协调层处理。"""
+    from app.services.coordination import coordination
+
     with _CANCEL_FLAGS_LOCK:
         ev = _CANCEL_FLAGS.get(job_id)
         if ev is None:
-            return False
-        ev.set()
-        return True
+            result = coordination.cancel_flags.set(job_id)
+        else:
+            ev.set()
+            result = coordination.cancel_flags.set(job_id)
+    from app.services import coordination_audit
+
+    if result and coordination_audit.enabled():
+        coordination_audit.record_cancel(job_id)
+    return result
 
 
 def is_cancelled(job_id: str) -> bool:
+    from app.services.coordination import coordination
+
     ev = _CANCEL_FLAGS.get(job_id)
-    return ev is not None and ev.is_set()
+    if ev is not None and ev.is_set():
+        return True
+    # 其他实例发起的取消：本地 Event 未置位，需查协调层
+    return coordination.cancel_flags.is_set(job_id)
 
 
 def _register_cancel_flag(job_id: str) -> None:
+    from app.services.coordination import coordination
+
     with _CANCEL_FLAGS_LOCK:
         if job_id not in _CANCEL_FLAGS:
             _CANCEL_FLAGS[job_id] = threading.Event()
@@ -94,6 +109,7 @@ def _register_cancel_flag(job_id: str) -> None:
         while len(_CANCEL_FLAGS) > _CANCEL_FLAG_MAX:
             oldest = next(iter(_CANCEL_FLAGS))
             _CANCEL_FLAGS.pop(oldest)
+    coordination.cancel_flags.register(job_id)
 
 
 def _default_store_dir() -> Path:
@@ -148,6 +164,12 @@ class JobStore:
             logger.warning("failed to write job file %s", path)
             with contextlib.suppress(OSError):
                 tmp.unlink()
+        from app.services import coordination_audit
+        from app.services.coordination import coordination
+
+        coordination.job_state.put(job["id"], job)
+        if coordination_audit.enabled():
+            coordination_audit.record_job_state(job)
 
     def _read_file(self, job_id: str) -> dict[str, Any] | None:
         """从磁盘读取单个 job 文件。"""
@@ -423,8 +445,13 @@ class JobStore:
             j = self._active_jobs.get(job_id)
             if j:
                 return j
-            # 否则从磁盘读
-            return self._read_file(job_id)
+            # 否则从磁盘读；本地无快照时回退协调层（跨实例任务）
+            local = self._read_file(job_id)
+            if local is not None:
+                return local
+            from app.services.coordination import coordination
+
+            return coordination.job_state.get(job_id)
 
     def list_recent(self, limit: int = 20) -> list[dict[str, Any]]:
         return self.recent_snapshot(limit)["jobs"]
@@ -432,10 +459,18 @@ class JobStore:
     def recent_snapshot(self, limit: int = 20) -> dict[str, Any]:
         """Read one consistent status snapshot without disk I/O or the writer lock."""
         active_id, summaries = self._summary_snapshot
-        return {
-            "active_id": active_id,
-            "jobs": [dict(j) for j in summaries[: max(1, limit)]],
-        }
+        jobs = [dict(j) for j in summaries[: max(1, limit)]]
+        if len(jobs) < limit:
+            # 其他实例的任务不在本地摘要中，从协调层补齐。
+            from app.services.coordination import coordination
+
+            for remote in coordination.job_state.recent(limit):
+                if any(j.get("id") == remote.get("id") for j in jobs):
+                    continue
+                jobs.append(_summary(remote))
+                if len(jobs) >= limit:
+                    break
+        return {"active_id": active_id, "jobs": jobs}
 
     def active_id(self) -> str | None:
         return self._active_id

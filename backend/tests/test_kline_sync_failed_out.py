@@ -5,9 +5,11 @@ daily_pipeline (#514) 的修复/定向分支传 failed_out=repair_failed_symbols
 (v0.3.21/v0.3.22 用户同步失败截图: "got an unexpected keyword argument
 'failed_out'")。
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any, cast
 
 import polars as pl
 import pytest
@@ -32,16 +34,15 @@ def test_accepts_failed_out_and_surfaces_failed_symbols(monkeypatch, repo):
     failed: list[str] = []
 
     written = kline_sync.sync_and_persist_daily_batch(
-        ["600519.SH", "000001.SZ"], repo, capset, failed_out=failed)
+        ["600519.SH", "000001.SZ"], repo, cast(Any, capset), failed_out=failed
+    )
 
     assert written == 0
     assert failed == ["600519.SH", "000001.SZ"]
 
 
 def test_failed_out_omitted_still_works(monkeypatch, repo):
-    monkeypatch.setattr(
-        kline_sync, "sync_daily_batch", lambda symbols, **kw: pl.DataFrame())
+    monkeypatch.setattr(kline_sync, "sync_daily_batch", lambda symbols, **kw: pl.DataFrame())
     capset = SimpleNamespace(has=lambda cap: True, limits=lambda cap: None)
 
-    assert kline_sync.sync_and_persist_daily_batch(
-        ["600519.SH"], repo, capset) == 0
+    assert kline_sync.sync_and_persist_daily_batch(["600519.SH"], repo, cast(Any, capset)) == 0

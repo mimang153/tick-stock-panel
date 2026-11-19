@@ -1,4 +1,5 @@
 """strategy_run_queue 单测 — 耗时排序、耗时落盘、handle 状态、单飞管理器。"""
+
 from __future__ import annotations
 
 import threading
@@ -134,14 +135,23 @@ def test_manager_serializes_different_keys():
 
 # ── 完成后保留 (TTL) + 重跑新执行 + 分钟摘要 ─────────────────────────
 
+
 def test_done_handle_kept_for_polling_then_rerun_is_fresh():
     """完成后进暂存区供轮询; TTL 内重跑同 key 应是新执行 (旧行为不搭车)。"""
     mgr = q.StrategyRunManager()
-    h1 = mgr.get_or_submit(("stock", "1d", "2026-03-02", ()), ["s1"], lambda handle: handle.complete("s1", {"total": 1}))
+    h1 = mgr.get_or_submit(
+        ("stock", "1d", "2026-03-02", ()),
+        ["s1"],
+        lambda handle: handle.complete("s1", {"total": 1}),
+    )
     _wait_done(h1)
 
     # 完成后仍可从 minute_summaries/暂存区读到 (key 非 1m 不导出摘要, 但 handle 在)
-    h2 = mgr.get_or_submit(("stock", "1d", "2026-03-02", ()), ["s1"], lambda handle: handle.complete("s1", {"total": 2}))
+    h2 = mgr.get_or_submit(
+        ("stock", "1d", "2026-03-02", ()),
+        ["s1"],
+        lambda handle: handle.complete("s1", {"total": 2}),
+    )
     assert h2 is not h1, "已完成的重跑必须是新执行, 不能搭车旧结果"
     _wait_done(h2)
 
@@ -200,7 +210,9 @@ def test_ensure_reuses_completed_matching_version_but_manual_run_is_fresh():
 
     first = mgr.get_or_submit(("k",), ["s"], job, reuse_completed_ms=5000, source_version="v1")
     _wait_done(first)
-    assert mgr.get_or_submit(("k",), ["s"], job, reuse_completed_ms=5000, source_version="v1") is first
+    assert (
+        mgr.get_or_submit(("k",), ["s"], job, reuse_completed_ms=5000, source_version="v1") is first
+    )
     changed = mgr.get_or_submit(("k",), ["s"], job, reuse_completed_ms=5000, source_version="v2")
     _wait_done(changed)
     assert changed is not first
@@ -234,7 +246,9 @@ def test_failed_handle_has_terminal_timestamp_and_does_not_poison_ensure():
     _wait_done(first)
     assert first.finished_at_ms is not None
     assert mgr.get_or_submit(("k",), ["s"], lambda handle: None, reuse_completed_ms=5000) is first
-    second = mgr.get_or_submit(("k",), ["s"], lambda handle: None, reuse_completed_ms=5000, source_version="new")
+    second = mgr.get_or_submit(
+        ("k",), ["s"], lambda handle: None, reuse_completed_ms=5000, source_version="new"
+    )
     assert second is not first
     _wait_done(second)
 

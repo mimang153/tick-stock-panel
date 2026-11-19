@@ -9,6 +9,15 @@ from app.indicators import pipeline
 from app.services import preferences
 
 
+def _read_enriched_ck() -> pl.DataFrame:
+    """CK-only 发布后 enriched 的唯一在线读源。"""
+    from app.storage.runtime import get_storage
+
+    storage = get_storage()
+    assert storage is not None
+    return storage.store.read_daily("kline_daily_enriched")
+
+
 @pytest.fixture
 def sample(tmp_path, monkeypatch, ck_runtime):
     monkeypatch.setattr(preferences, "get_enriched_batch_size", lambda: 2)
@@ -105,7 +114,7 @@ def test_incremental_batches_preserve_values_and_generation(
     generation = get_enriched_generation(tmp_path)
     symbols = raw["symbol"].unique().to_list() if adjustment_only else None
     written = pipeline.run_pipeline(tmp_path, symbols=symbols, new_dates_only=True)
-    actual = pl.read_parquet(str(tmp_path / "kline_daily_enriched/**/*.parquet"))
+    actual = _read_enriched_ck()
     if adjustment_only:
         actual = actual.select(expected.columns)
     assert written > 0

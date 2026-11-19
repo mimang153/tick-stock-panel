@@ -10,6 +10,7 @@
     任何条件对 null 判 false, 绝不把数据不足伪装成 0。
   - 纯函数: 不做 IO, 分钟帧由调用方传入(cutoff 过滤也由调用方决定)。
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -72,15 +73,31 @@ def build_feature_frame(
         schema={"symbol": pl.Utf8, "datetime": pl.Datetime, "date": pl.Date}
         | {name: pl.Float64 for name in INTRADAY_FEATURES}
     )
-    if minute_df is None or minute_df.is_empty() or not set(_REQUIRED_COLS).issubset(minute_df.columns):
+    if (
+        minute_df is None
+        or minute_df.is_empty()
+        or not set(_REQUIRED_COLS).issubset(minute_df.columns)
+    ):
         return empty
 
+    df = _prepare_minute_frame(minute_df, cutoff)
+    if df is None:
+        return empty
+    df, cols = _daily_cumulative_exprs(df, prev_close)
+    cols.update(_volume_ratio_exprs(df))
+    cols.update(_open_30m_exprs(df))
+    return df.with_columns(
+        [expr.cast(pl.Float64).alias(name) for name, expr in cols.items()]
+    ).select(["symbol", "date", "datetime", *INTRADAY_FEATURES.keys()])
+
+
+def _prepare_minute_frame(minute_df: pl.DataFrame, cutoff: datetime | None) -> pl.DataFrame | None:
     df = minute_df
     if "symbol" in df.columns:
         df = df.with_columns(pl.col("symbol").cast(pl.Utf8))
     dt_expr = pl.col("datetime")
     if df.schema["datetime"].time_zone is not None:
-        dt_expr = dt_expr.dt.convert_time_zone(CN_TZ.key).dt.replace_time_zone(None)
+        dt_expr = dt_expr.dt.convert_time_zone("Asia/Shanghai").dt.replace_time_zone(None)
     df = df.with_columns(dt_expr.alias("datetime"))
     if cutoff is not None:
         cut = _naive(cutoff)
@@ -88,17 +105,19 @@ def build_feature_frame(
             df = df.filter(pl.col("datetime") < cut)
     df = df.drop_nulls("datetime").sort(["symbol", "datetime"])
     if df.is_empty():
-        return empty
-
+        return None
     df = df.with_columns(
         pl.col("datetime").dt.date().alias("date"),
         # 会话归属: 13:00 及以后为午后续时段, 滚动窗口不与上午合并
         pl.when(pl.col("datetime").dt.hour() >= 13).then(1).otherwise(0).alias("session"),
     )
-    df = df.with_columns(pl.int_range(pl.len()).over(_SESSION_KEY).alias("session_idx"))
+    return df.with_columns(pl.int_range(pl.len()).over(_SESSION_KEY).alias("session_idx"))
 
+
+def _daily_cumulative_exprs(
+    df: pl.DataFrame, prev_close: dict[str, float] | None
+) -> tuple[pl.DataFrame, dict]:
     cols = {"price": pl.col("close").cast(pl.Float64)}
-
     # ── 日累计特征(跨上午/下午累计) ──
     if {"volume", "amount"}.issubset(df.columns):
         cum_vol = pl.col("volume").cast(pl.Float64).cum_sum().over(_DAY_KEY)
@@ -109,7 +128,10 @@ def build_feature_frame(
 
     if prev_close:
         pc = pl.DataFrame(
-            {"symbol": list(prev_close.keys()), "_prev_close": [float(v) for v in prev_close.values()]}
+            {
+                "symbol": list(prev_close.keys()),
+                "_prev_close": [float(v) for v in prev_close.values()],
+            }
         )
         df = df.join(pc, on="symbol", how="left")
         cols["pct_vs_prev_close"] = pl.when(
@@ -135,20 +157,24 @@ def build_feature_frame(
         cols["day_low_dist"] = pl.when(day_low > 0).then(pl.col("close") / day_low - 1.0)
     else:
         cols["day_low_dist"] = pl.lit(None, dtype=pl.Float64)
+    return df, cols
 
-    # ── 滚动放量比(今日基准): 当前 N 根 bar 量和 / 此前 N 根 bar 量和 ──
+
+def _volume_ratio_exprs(df: pl.DataFrame) -> dict:
     # 滚动窗口按(symbol, date, session)分组 → 不跨午休、不跨日; 窗口不满自然为 null。
-    if "volume" in df.columns:
-        vol = pl.col("volume").cast(pl.Float64)
-        for n, name in _VOL_WINDOWS.items():
-            win = vol.rolling_sum(n).over(_SESSION_KEY)
-            prev_win = win.shift(n).over(_SESSION_KEY)
-            cols[name] = pl.when(prev_win > 0).then(win / prev_win)
-    else:
-        for name in _VOL_WINDOWS.values():
-            cols[name] = pl.lit(None, dtype=pl.Float64)
+    if "volume" not in df.columns:
+        return {name: pl.lit(None, dtype=pl.Float64) for name in _VOL_WINDOWS.values()}
+    vol = pl.col("volume").cast(pl.Float64)
+    cols = {}
+    for n, name in _VOL_WINDOWS.items():
+        win = vol.rolling_sum(n).over(_SESSION_KEY)
+        prev_win = win.shift(n).over(_SESSION_KEY)
+        cols[name] = pl.when(prev_win > 0).then(win / prev_win)
+    return cols
 
-    # ── 开盘 30 分钟高低点: 上午时段第 30 根 bar 的累计高/低, 全日广播 ──
+
+def _open_30m_exprs(df: pl.DataFrame) -> dict:
+    # 开盘 30 分钟高低点: 上午时段第 30 根 bar 的累计高/低, 全日广播
     if "high" in df.columns:
         marker_h = (
             pl.when((pl.col("session") == 0) & (pl.col("session_idx") == 29))
@@ -157,9 +183,9 @@ def build_feature_frame(
             .forward_fill()
             .over(_DAY_KEY)
         )
-        cols["open_30m_high_dist"] = pl.when(marker_h > 0).then(pl.col("close") / marker_h - 1.0)
+        high_expr = pl.when(marker_h > 0).then(pl.col("close") / marker_h - 1.0)
     else:
-        cols["open_30m_high_dist"] = pl.lit(None, dtype=pl.Float64)
+        high_expr = pl.lit(None, dtype=pl.Float64)
 
     if "low" in df.columns:
         marker_l = (
@@ -169,10 +195,7 @@ def build_feature_frame(
             .forward_fill()
             .over(_DAY_KEY)
         )
-        cols["open_30m_low_dist"] = pl.when(marker_l > 0).then(pl.col("close") / marker_l - 1.0)
+        low_expr = pl.when(marker_l > 0).then(pl.col("close") / marker_l - 1.0)
     else:
-        cols["open_30m_low_dist"] = pl.lit(None, dtype=pl.Float64)
-
-    return df.with_columns([expr.cast(pl.Float64).alias(name) for name, expr in cols.items()]).select(
-        ["symbol", "date", "datetime", *INTRADAY_FEATURES.keys()]
-    )
+        low_expr = pl.lit(None, dtype=pl.Float64)
+    return {"open_30m_high_dist": high_expr, "open_30m_low_dist": low_expr}

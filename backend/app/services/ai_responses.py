@@ -12,13 +12,14 @@
 配置读取全部经 ai_provider 模块限定调用(非 from-import 名字绑定),
 保证测试可 monkeypatch ai_provider.current_ai_provider 等。
 """
+
 from __future__ import annotations
 
 import asyncio
 import inspect
 from collections.abc import AsyncIterator, Sequence
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 from app.services import ai_provider
 from app.services.ai_provider import Message
@@ -57,24 +58,28 @@ def chat_input(messages: Sequence[Message]) -> list[dict[str, Any]]:
     for m in messages:
         role = str(m.get("role") or "user")
         if role == "tool":
-            items.append({
-                "type": "function_call_output",
-                "call_id": str(m.get("tool_call_id") or ""),
-                "output": str(m.get("content") or ""),
-            })
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": str(m.get("tool_call_id") or ""),
+                    "output": str(m.get("content") or ""),
+                }
+            )
             continue
         tool_calls = m.get("tool_calls")
         if role == "assistant" and tool_calls:
             if m.get("content"):
                 items.append({"role": "assistant", "content": str(m["content"])})
-            for tc in tool_calls:
+            for tc in cast(list[dict[str, Any]], tool_calls):
                 fn = tc.get("function") or {}
-                items.append({
-                    "type": "function_call",
-                    "call_id": str(tc.get("id") or ""),
-                    "name": str(fn.get("name") or ""),
-                    "arguments": str(fn.get("arguments") or ""),
-                })
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": str(tc.get("id") or ""),
+                        "name": str(fn.get("name") or ""),
+                        "arguments": str(fn.get("arguments") or ""),
+                    }
+                )
             continue
         items.append({"role": role, "content": str(m.get("content") or "")})
     return items
@@ -235,14 +240,16 @@ def _response_calls(resp) -> list[Any]:
     for item in getattr(resp, "output", None) or []:
         if str(getattr(item, "type", "") or "") != "function_call":
             continue
-        calls.append(SimpleNamespace(
-            id=str(getattr(item, "call_id", None) or getattr(item, "id", "") or ""),
-            type="function",
-            function=SimpleNamespace(
-                name=str(getattr(item, "name", "") or ""),
-                arguments=str(getattr(item, "arguments", "") or ""),
-            ),
-        ))
+        calls.append(
+            SimpleNamespace(
+                id=str(getattr(item, "call_id", None) or getattr(item, "id", "") or ""),
+                type="function",
+                function=SimpleNamespace(
+                    name=str(getattr(item, "name", "") or ""),
+                    arguments=str(getattr(item, "arguments", "") or ""),
+                ),
+            )
+        )
     return calls
 
 
@@ -276,7 +283,9 @@ async def run_text(
     resp = await _create_with_retry(client, payload=payload, stream=False)
     text = _response_text(resp).strip()
     _check_terminal_response(
-        resp, content_seen=bool(text), reasoning_seen=_response_reasoning_seen(resp),
+        resp,
+        content_seen=bool(text),
+        reasoning_seen=_response_reasoning_seen(resp),
     )
     return text
 
@@ -303,7 +312,9 @@ async def run_message_once(
     if not calls:
         # 无工具调用时才做终态/空正文防御; 有调用时由上层执行工具进入下一轮。
         _check_terminal_response(
-            resp, content_seen=bool(text), reasoning_seen=_response_reasoning_seen(resp),
+            resp,
+            content_seen=bool(text),
+            reasoning_seen=_response_reasoning_seen(resp),
         )
     return SimpleNamespace(content=text, tool_calls=calls)
 
@@ -338,6 +349,16 @@ def _is_reasoning_event(event_type: str) -> bool:
     return event_type.startswith(_REASONING_EVENT_PREFIXES)
 
 
+def _raise_responses_stream_error(event) -> None:
+    """统一处理 Responses 流的 failed/error 事件, 保留原始错误细节。"""
+    resp = getattr(event, "response", None)
+    if resp is not None and getattr(resp, "error", None) is not None:
+        raise RuntimeError(f"AI 服务请求失败: {_response_error_detail(resp)}")
+    err = getattr(event, "error", None)
+    if err is not None:
+        raise RuntimeError(f"AI 服务请求失败: {_response_error_detail(SimpleNamespace(error=err))}")
+
+
 async def iter_text(stream) -> AsyncIterator[str]:
     """Responses 事件流 → 文本增量, 防御与 _iter_openai_text 等价。"""
     content_seen = False
@@ -362,15 +383,12 @@ async def iter_text(stream) -> AsyncIterator[str]:
         elif event_type in ("response.completed", "response.incomplete"):
             completed = getattr(event, "response", None)
         elif event_type in ("response.failed", "error"):
-            resp = getattr(event, "response", None)
-            if resp is not None and getattr(resp, "error", None) is not None:
-                raise RuntimeError(f"AI 服务请求失败: {_response_error_detail(resp)}")
-            err = getattr(event, "error", None)
-            if err is not None:
-                raise RuntimeError(f"AI 服务请求失败: {_response_error_detail(SimpleNamespace(error=err))}")
+            _raise_responses_stream_error(event)
 
     if completed is not None:
-        _check_terminal_response(completed, content_seen=content_seen, reasoning_seen=reasoning_seen)
+        _check_terminal_response(
+            completed, content_seen=content_seen, reasoning_seen=reasoning_seen
+        )
     if not content_seen:
         _raise_no_content(reasoning_seen)
 
@@ -399,12 +417,88 @@ def _completed_calls(resp) -> list[dict[str, Any]]:
     for item in getattr(resp, "output", None) or []:
         if str(getattr(item, "type", "") or "") != "function_call":
             continue
-        calls.append({
-            "id": str(getattr(item, "call_id", None) or getattr(item, "id", "") or ""),
-            "name": str(getattr(item, "name", "") or ""),
-            "arguments": str(getattr(item, "arguments", "") or ""),
-        })
+        calls.append(
+            {
+                "id": str(getattr(item, "call_id", None) or getattr(item, "id", "") or ""),
+                "name": str(getattr(item, "name", "") or ""),
+                "arguments": str(getattr(item, "arguments", "") or ""),
+            }
+        )
     return calls
+
+
+def _accumulate_tool_call(
+    event,
+    event_type: str,
+    calls: dict[str, dict[str, Any]],
+    ordered: list[dict[str, Any]],
+) -> None:
+    if event_type == "response.function_call_arguments.delta":
+        key = _event_item_id(event)
+        entry = calls.get(key)
+        if entry is None:
+            entry = {"id": "", "name": "", "arguments": ""}
+            calls[key] = entry
+            ordered.append(entry)
+        delta = getattr(event, "delta", None)
+        if delta:
+            entry["arguments"] += str(delta)
+        return
+
+    item = getattr(event, "item", None)
+    if item is None or str(getattr(item, "type", "") or "") != "function_call":
+        return
+    key = _event_item_id(event)
+    entry = calls.get(key)
+    if entry is None:
+        entry = {"id": "", "name": "", "arguments": ""}
+        calls[key] = entry
+        ordered.append(entry)
+    call_id = getattr(item, "call_id", None)
+    if call_id:
+        entry["id"] = str(call_id)
+    if getattr(item, "name", None):
+        entry["name"] = str(item.name)
+    if event_type == "response.output_item.done" and getattr(item, "arguments", None):
+        entry["arguments"] = str(item.arguments)
+
+
+def _stream_round_failure(event) -> None:
+    """统一抛出一轮补全中 failed/error 事件的错误。"""
+    resp = getattr(event, "response", None)
+    err = getattr(event, "error", None)
+    if err is None and resp is not None:
+        err = getattr(resp, "error", None)
+    raise RuntimeError(f"AI 服务请求失败: {_response_error_detail(SimpleNamespace(error=err))}")
+
+
+async def _close_responses_stream(stream) -> None:
+    """关闭 SDK 流对象; 兼容同步与协程两种 close 签名。"""
+    close = getattr(stream, "close", None)
+    if close is None:
+        return
+    if inspect.iscoroutinefunction(close):
+        await close()
+    else:
+        await asyncio.to_thread(close)
+
+
+def _completed_response(event, final_calls: list[dict[str, Any]] | None):
+    """提取 completed/incomplete 事件的响应及其工具调用列表。"""
+    response = getattr(event, "response", None)
+    if response is None:
+        return None, final_calls
+    return response, _completed_calls(response)
+
+
+def _finish_stream_round(completed, content_seen: bool, reasoning_seen: bool) -> None:
+    """流收尾校验: 先核对终端响应, 再确保至少产出过文本内容。"""
+    if completed is not None:
+        _check_terminal_response(
+            completed, content_seen=content_seen, reasoning_seen=reasoning_seen
+        )
+    if not content_seen:
+        _raise_no_content(reasoning_seen)
 
 
 async def stream_round(
@@ -442,66 +536,19 @@ async def stream_round(
                 yield {"type": "text", "delta": str(text)}
         elif _is_reasoning_event(event_type):
             reasoning_seen = True
-        elif event_type == "response.output_item.added":
-            item = getattr(event, "item", None)
-            if item is not None and str(getattr(item, "type", "") or "") == "function_call":
-                key = _event_item_id(event)
-                entry = {"id": "", "name": "", "arguments": ""}
-                calls[key] = entry
-                ordered.append(entry)
-                call_id = getattr(item, "call_id", None)
-                if call_id:
-                    entry["id"] = str(call_id)
-                if getattr(item, "name", None):
-                    entry["name"] = str(item.name)
-        elif event_type == "response.function_call_arguments.delta":
-            key = _event_item_id(event)
-            entry = calls.get(key)
-            if entry is None:
-                entry = {"id": "", "name": "", "arguments": ""}
-                calls[key] = entry
-                ordered.append(entry)
-            delta = getattr(event, "delta", None)
-            if delta:
-                entry["arguments"] += str(delta)
-        elif event_type == "response.output_item.done":
-            item = getattr(event, "item", None)
-            if item is not None and str(getattr(item, "type", "") or "") == "function_call":
-                # done item 是权威值, 整条覆盖累积分片 (网关分片乱序/缺失时兜底)。
-                key = _event_item_id(event)
-                entry = calls.get(key)
-                if entry is None:
-                    entry = {"id": "", "name": "", "arguments": ""}
-                    calls[key] = entry
-                    ordered.append(entry)
-                call_id = getattr(item, "call_id", None)
-                if call_id:
-                    entry["id"] = str(call_id)
-                if getattr(item, "name", None):
-                    entry["name"] = str(item.name)
-                if getattr(item, "arguments", None):
-                    entry["arguments"] = str(item.arguments)
+        elif event_type in (
+            "response.output_item.added",
+            "response.function_call_arguments.delta",
+            "response.output_item.done",
+        ):
+            _accumulate_tool_call(event, event_type, calls, ordered)
         elif event_type in ("response.completed", "response.incomplete"):
-            completed = getattr(event, "response", None)
-            if completed is not None:
-                final_calls = _completed_calls(completed)
+            completed, final_calls = _completed_response(event, final_calls)
         elif event_type in ("response.failed", "error"):
-            resp = getattr(event, "response", None)
-            err = getattr(event, "error", None)
-            if err is None and resp is not None:
-                err = getattr(resp, "error", None)
-            raise RuntimeError(
-                f"AI 服务请求失败: {_response_error_detail(SimpleNamespace(error=err))}"
-            )
+            _stream_round_failure(event)
 
-    # 让 SDK 流对象尽快释放(部分兼容网关要求显式 close); SDK 2.x 的
-    # AsyncStream.close 是协程, 必须区分同步/异步两种签名。
-    close = getattr(stream, "close", None)
-    if close is not None:
-        if inspect.iscoroutinefunction(close):
-            await close()
-        else:
-            await asyncio.to_thread(close)
+    # 让 SDK 流对象尽快释放(部分兼容网关要求显式 close)
+    await _close_responses_stream(stream)
 
     if final_calls is None:
         final_calls = ordered
@@ -509,8 +556,5 @@ async def stream_round(
         yield {"type": "round_end", "tool_calls": final_calls, "finish_reason": "tool_calls"}
         return
 
-    if completed is not None:
-        _check_terminal_response(completed, content_seen=content_seen, reasoning_seen=reasoning_seen)
-    if not content_seen:
-        _raise_no_content(reasoning_seen)
+    _finish_stream_round(completed, content_seen, reasoning_seen)
     yield {"type": "round_end", "tool_calls": [], "finish_reason": "stop"}

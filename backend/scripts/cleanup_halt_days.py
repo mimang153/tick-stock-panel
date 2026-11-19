@@ -10,6 +10,7 @@
     .venv/bin/python -m scripts.cleanup_halt_days          # 清理 + dry-run 关闭
     .venv/bin/python -m scripts.cleanup_halt_days --dry-run # 仅扫描，不写盘
 """
+
 from __future__ import annotations
 
 import argparse
@@ -60,16 +61,14 @@ def _clean_table(table: str, dry_run: bool) -> int:
             continue
         removed += diff
         if dry_run:
-            logger.info("[%s %s] 将删除 %d 行 (停牌), 剩余 %d 行 [dry-run]",
-                        table, dt, diff, after)
+            logger.info("[%s %s] 将删除 %d 行 (停牌), 剩余 %d 行 [dry-run]", table, dt, diff, after)
             continue
         if after == 0:
             part.unlink()
             logger.info("[%s %s] 删除 %d 行后分区为空, 已移除文件", table, dt, diff)
         else:
             cleaned.write_parquet(part)
-            logger.info("[%s %s] 删除 %d 行 (停牌), 剩余 %d 行已重写",
-                        table, dt, diff, after)
+            logger.info("[%s %s] 删除 %d 行 (停牌), 剩余 %d 行已重写", table, dt, diff, after)
     return removed
 
 

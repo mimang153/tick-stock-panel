@@ -7,6 +7,7 @@
   4. publish 拒绝非 AI 策略 / 已公开策略
   5. _set_meta_bool_field 的插入与替换两条路径
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -58,10 +59,12 @@ def _request(tmp_path):
     custom_dir = tmp_path / "strategies" / "custom"
     engine = StrategyEngine(strategy_dirs=[custom_dir, ai_dir])
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
-    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo, strategy_engine=engine)))
+    return SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(repo=repo, strategy_engine=engine))
+    )
 
 
-def _save_ai(tmp_path, sid: str) -> dict:
+def _save_ai(tmp_path, sid: str) -> tuple:
     """保存一个 AI 来源的新建策略, 返回 (request, save_result)。"""
     request = _request(tmp_path)
     req = StrategyCodeSaveRequest(
@@ -102,7 +105,9 @@ def test_custom_strategy_not_gated(tmp_path):
     result = _save_strategy_code(req, request)
 
     assert result["research_only"] is False
-    assert request.app.state.strategy_engine.get("custom_draft").meta.get("research_only") is not True
+    assert (
+        request.app.state.strategy_engine.get("custom_draft").meta.get("research_only") is not True
+    )
 
 
 def test_publish_ai_strategy_flips_to_public(tmp_path):

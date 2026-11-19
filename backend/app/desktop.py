@@ -13,6 +13,7 @@
 
 不含: 业务逻辑、配置持久化、监控告警 (全在 app.main 里)。
 """
+
 from __future__ import annotations
 
 import errno
@@ -24,7 +25,7 @@ import sys
 import threading
 import time
 import traceback
-from typing import BinaryIO
+from typing import Any, BinaryIO, cast
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +76,8 @@ def _ensure_data_dir_writable() -> None:
         probe = data_root / ".write_probe"
         probe.write_text("ok", encoding="utf-8")
         probe.unlink(missing_ok=True)
-    except Exception as e:  # noqa: BLE001
-        logger.error("数据目录不可写, 桌面版无法运行: %s (%s)", data_root, e)
+    except Exception:
+        logger.exception("数据目录不可写, 桌面版无法运行: %s", data_root)
         raise
 
 
@@ -131,7 +132,8 @@ def _acquire_single_instance() -> bool:
                 import msvcrt
 
                 stream.seek(0)
-                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt_api = cast(Any, msvcrt)
+                msvcrt_api.locking(stream.fileno(), msvcrt_api.LK_NBLCK, 1)
             else:
                 import fcntl
 
@@ -175,15 +177,24 @@ def _guard_streams() -> None:
     修法: console=False 下把 stdout/stderr 换成丢弃写入的空对象 (devnull),
     让 logging / reconfigure / 任何 print 都安全落地。console=True 不动 (有真控制台)。
     """
-    import os
 
     class _NullStream:
         """丢弃所有写入的空流 (替代 None 的 stdout/stderr)。"""
-        def write(self, _s): return 0
-        def flush(self): pass
-        def reconfigure(self, *a, **kw): pass
-        def isatty(self): return False
-        def fileno(self): raise OSError("no fileno")
+
+        def write(self, _s):
+            return 0
+
+        def flush(self):
+            pass
+
+        def reconfigure(self, *a, **kw):
+            pass
+
+        def isatty(self):
+            return False
+
+        def fileno(self):
+            raise OSError("no fileno")
 
     # 仅在 stdout/stderr 缺失或不可写时替换 (有真控制台时保持原样)
     for name in ("stdout", "stderr"):
@@ -220,8 +231,8 @@ def _show_crash(title: str, text: str) -> None:
             import ctypes
 
             ctypes.windll.user32.MessageBoxW(0, text, title, 0x10)
-        except Exception as e:  # noqa: BLE001
-            logger.error("弹框失败 (已写日志文件): %s", e)
+        except Exception:
+            logger.exception("弹框失败 (已写日志文件)")
     else:
         logger.error("%s: %s", title, text)
 
@@ -237,17 +248,17 @@ def _pid_alive(pid: int) -> bool:
         # 正在运行的实例 (例如探测子进程重启自身时)。
         import ctypes
 
-        STILL_ACTIVE = 259
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        still_active = 259
+        process_query_limited_information = 0x1000
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
         if not handle:
             return False
         try:
             exit_code = ctypes.c_ulong()
             if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
                 return False
-            return exit_code.value == STILL_ACTIVE
+            return exit_code.value == still_active
         finally:
             kernel32.CloseHandle(handle)
     else:
@@ -296,7 +307,7 @@ def _run_uvmicorn(port: int, ready_event: threading.Event) -> None:
         host="127.0.0.1",  # 仅本机, 不暴露外网 (桌面版无需远程访问)
         port=port,
         log_level="info",
-        access_log=False,    # 桌面版不需要访问日志
+        access_log=False,  # 桌面版不需要访问日志
         loop="auto",
         # log_config=None: uvicorn 默认给 uvicorn.* 挂独立 console handler 且
         # propagate=False, windowed 模式下 stderr 已被守护替换, lifespan 启动
@@ -309,6 +320,7 @@ def _run_uvmicorn(port: int, ready_event: threading.Event) -> None:
     # 线程结束时通知主线程 (无论正常退出还是异常)
     def _signal_done(*exc):
         ready_event.set()
+
     server.config.callback_notify = None  # 不用 notify 机制
 
     try:
@@ -333,8 +345,8 @@ def _wait_for_server(
     调用方抛异常, 只表现为 server.run() 正常返回) —— 此时不可能出现就绪,
     立即返回 False, 不再傻等满 timeout 把「启动失败」伪装成「超时」。
     """
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     url = f"http://127.0.0.1:{port}/health"
     deadline = time.monotonic() + timeout
@@ -374,8 +386,10 @@ def _open_window(url: str) -> None:
     )
     # 继承隐藏启动标志时首次显示可能被抑制, GUI 就绪后再显式显示 (同失败页)。
     webview.start(
-        lambda: window.show(), debug=False,
-        private_mode=False, storage_path=str(storage_path),
+        lambda: window.show(),
+        debug=False,
+        private_mode=False,
+        storage_path=str(storage_path),
     )
 
 
@@ -395,18 +409,85 @@ def _open_static_window(html_text: str) -> None:
     webview.start(lambda: window.show(), debug=False)
 
 
-def main() -> int:
-    """桌面客户端主入口。返回进程退出码。"""
-    # 必须最先执行: console=False 下 stdout/stderr 可能无效, 不守护会导致
-    # 后续 logging.basicConfig 创建的 StreamHandler 写日志时进程崩溃。
+def _bootstrap_logging() -> None:
     _guard_streams()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-    # 追加文件日志: console=False 下 stderr 被吞, 必须落盘否则查无对证。
-    # 放在 basicConfig 之后 (它先建好 root logger 的格式), 这里只追加 handler。
     _setup_logging()
+
+
+def _start_backend(port: int) -> tuple[threading.Thread, threading.Event]:
+    ready = threading.Event()
+    server_thread = threading.Thread(
+        target=_run_uvmicorn,
+        args=(port, ready),
+        daemon=True,
+        name="uvicorn",
+    )
+    server_thread.start()
+    return server_thread, ready
+
+
+def _report_backend_not_ready(ready: threading.Event, server_thread: threading.Thread) -> int:
+    reason = "后端进程已提前退出，详情见 data\\logs\\desktop.log" if ready.is_set() else None
+    logger.error("后端未就绪 (reason=%s), 桌面版退出", reason)
+    if not ready.is_set():
+        ident = server_thread.ident
+        frame = sys._current_frames().get(ident) if ident is not None else None
+        if frame is not None:
+            logger.error("启动超时，后端线程调用栈:\n%s", "".join(traceback.format_stack(frame)))
+    _open_static_window(_failed_html(reason))
+    return 1
+
+
+def _report_startup_failure() -> int:
+    logger.exception("桌面客户端启动失败")
+    _show_crash("TSP 启动失败", traceback.format_exc())
+    return 1
+
+
+def _run_desktop_app() -> int:
+    instance_acquired = False
+    try:
+        _ensure_data_dir_writable()
+        if not _acquire_single_instance():
+            return 0
+        instance_acquired = True
+
+        from app.config import settings
+        from app.services.data_dir_upgrade import recover_desktop_data
+
+        recover_desktop_data(settings.data_dir)
+
+        conflict = _precheck_mining_lock()
+        if conflict is not None:
+            logger.warning("启动预检: %s", conflict.replace("\n", " "))
+
+        port = _find_free_port(_BASE_PORT)
+        logger.info("桌面版后端将监听 127.0.0.1:%d", port)
+        server_thread, ready = _start_backend(port)
+        if not _wait_for_server(port, timeout=60.0, done_event=ready):
+            return _report_backend_not_ready(ready, server_thread)
+
+        url = f"http://127.0.0.1:{port}"
+        logger.info("打开桌面窗口: %s", url)
+        _open_window(url)
+        logger.info("窗口已关闭, 桌面版退出")
+        return 0
+    except KeyboardInterrupt:
+        return 0
+    except Exception:  # noqa: BLE001 - 桌面启动异常统一收敛为失败页
+        return _report_startup_failure()
+    finally:
+        if instance_acquired:
+            _release_single_instance()
+
+
+def main() -> int:
+    """桌面客户端主入口。返回进程退出码。"""
+    _bootstrap_logging()
 
     # TdxQuant 探测 worker 哨兵 (见 probe.run): 打包版以「重执行自身 + 哨兵」
     # 拉起独立探测进程, 必须先于单实例锁/后端/窗口等任何桌面启动动作分发。
@@ -415,73 +496,7 @@ def main() -> int:
 
         return run_worker()
 
-    instance_acquired = False
-    try:
-        _ensure_data_dir_writable()
-
-        if not _acquire_single_instance():
-            return 0
-        instance_acquired = True
-
-        # Restore before app.main imports or its startup log reads Key/prefs.
-        from app.config import settings
-        from app.services.data_dir_upgrade import recover_desktop_data
-
-        recover_desktop_data(settings.data_dir)
-
-        # 撞挖掘锁只降级, 其他预检异常必须同样落盘、弹框并释放桌面锁。
-        conflict = _precheck_mining_lock()
-        if conflict is not None:
-            logger.warning("启动预检: %s", conflict.replace("\n", " "))
-
-        port = _find_free_port(_BASE_PORT)
-        logger.info("桌面版后端将监听 127.0.0.1:%d", port)
-
-        # 后台线程起 uvicorn
-        ready = threading.Event()
-        server_thread = threading.Thread(
-            target=_run_uvmicorn, args=(port, ready), daemon=True,
-            name="uvicorn",
-        )
-        server_thread.start()
-
-        # 轮询 health 接口等后端就绪 (含 lifespan 初始化, 最多 60s);
-        # ready 由后端线程 finally 置位 → 线程已退出时立刻返回, 不等满超时
-        if not _wait_for_server(port, timeout=60.0, done_event=ready):
-            reason = (
-                "后端进程已提前退出，详情见 data\\logs\\desktop.log"
-                if ready.is_set() else None
-            )
-            logger.error("后端未就绪 (reason=%s), 桌面版退出", reason)
-            if not ready.is_set():
-                frame = sys._current_frames().get(server_thread.ident)
-                if frame is not None:
-                    logger.error(
-                        "启动超时，后端线程调用栈:\n%s",
-                        "".join(traceback.format_stack(frame)),
-                    )
-            _open_static_window(_failed_html(reason))
-            return 1
-
-        url = f"http://127.0.0.1:{port}"
-        logger.info("打开桌面窗口: %s", url)
-        _open_window(url)
-
-        # 窗口关闭后, 进程退出 (daemon 线程会被回收)
-        logger.info("窗口已关闭, 桌面版退出")
-        return 0
-    except KeyboardInterrupt:
-        return 0
-    except Exception:
-        # 顶层兜底: console=False 下未捕获异常会「一闪退出」且无任何反馈。
-        # 写完整 traceback 到 data/desktop.log, 并弹原生 MessageBox 让用户截图反馈。
-        # 必须排在 KeyboardInterrupt 之后 —— Exception 是基类, 在前会遮蔽它。
-        logger.exception("桌面客户端启动失败")
-        _show_crash("TSP 启动失败", traceback.format_exc())
-        return 1
-    finally:
-        if instance_acquired:
-            _release_single_instance()
+    return _run_desktop_app()
 
 
 if __name__ == "__main__":

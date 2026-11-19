@@ -22,16 +22,18 @@ from app.api.kline import _batch_frames_json, _gzip_raw, _json_safe
 def _minute_frame(sym: str) -> pl.DataFrame:
     """真实分时列集合; 含典型价格浮点、inf/NaN/None 三种非有限与缺失形态。"""
     start = datetime(2026, 10, 23, 9, 31)
-    return pl.DataFrame({
-        "symbol": [sym] * 5,
-        "datetime": [start + timedelta(minutes=i) for i in range(5)],
-        "open": [10.5, 3.33, 0.01, 9999.99, 1.5],
-        "high": [10.6, 3.34, 0.02, 10000.0, float("inf")],
-        "low": [10.4, 3.32, 0.005, 9990.0, float("nan")],
-        "close": [10.55, 3.335, 0.015, 9995.55, 2.5],
-        "volume": [123456, 0, 999999999, 1, 42],
-        "amount": [1.5e8, 0.0, 2.5e6, 9999.5, None],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": [sym] * 5,
+            "datetime": [start + timedelta(minutes=i) for i in range(5)],
+            "open": [10.5, 3.33, 0.01, 9999.99, 1.5],
+            "high": [10.6, 3.34, 0.02, 10000.0, float("inf")],
+            "low": [10.4, 3.32, 0.005, 9990.0, float("nan")],
+            "close": [10.55, 3.335, 0.015, 9995.55, 2.5],
+            "volume": [123456, 0, 999999999, 1, 42],
+            "amount": [1.5e8, 0.0, 2.5e6, 9999.5, None],
+        }
+    )
 
 
 def test_frames_json_byte_identical_to_dict_path():
@@ -47,7 +49,10 @@ def test_frames_json_byte_identical_to_dict_path():
 
     old = json.dumps(
         _json_safe({"data": {s: sub.to_dicts() for s, sub in parts.items()}}),
-        ensure_ascii=False, separators=(",", ":"), allow_nan=False, default=_iso,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+        default=_iso,
     ).encode()
     assert new == old
 
@@ -56,7 +61,8 @@ def test_frames_json_extra_keys_spliced_into_root():
     """extra 键并入根对象 (而非拼成兄弟对象), 键序与旧 dict 路径一致。"""
     raw = _batch_frames_json(
         {"600000.SH": _minute_frame("600000.SH")},
-        "datetime", "%Y-%m-%dT%H:%M:%S",
+        "datetime",
+        "%Y-%m-%dT%H:%M:%S",
         {"full_minute_local": True, "incremental": True, "truncated": ["600000.SH"]},
     )
     payload = json.loads(raw)
@@ -68,12 +74,17 @@ def test_frames_json_extra_keys_spliced_into_root():
 
 def test_frames_json_daily_date_format():
     """日K的 date 列输出 ISO 日期串, 与 date.isoformat 语义一致。"""
-    df = pl.DataFrame({
-        "symbol": ["000001.SZ"] * 2,
-        "date": [date(2026, 10, 22), date(2026, 10, 23)],
-        "open": [1.0, 2.0], "high": [1.1, 2.1], "low": [0.9, 1.9],
-        "close": [1.05, 2.05], "volume": [100, 200],
-    })
+    df = pl.DataFrame(
+        {
+            "symbol": ["000001.SZ"] * 2,
+            "date": [date(2026, 10, 22), date(2026, 10, 23)],
+            "open": [1.0, 2.0],
+            "high": [1.1, 2.1],
+            "low": [0.9, 1.9],
+            "close": [1.05, 2.05],
+            "volume": [100, 200],
+        }
+    )
     payload = json.loads(_batch_frames_json({"000001.SZ": df}, "date", "%Y-%m-%d"))
     assert [r["date"] for r in payload["data"]["000001.SZ"]] == ["2026-10-22", "2026-10-23"]
 

@@ -1,12 +1,9 @@
-"""A股市场时间工具 — 固定北京时间 (UTC+8, 无夏令时)。
+"""A股市场时间工具 — 固定北京时间 (UTC+8), 交易判断不依赖服务器时区。"""
 
-服务器/容器本地时区不可靠 (python:slim 镜像默认 UTC), 交易时段判断、
-实时行情落盘日期等必须显式使用北京时间, 否则 Docker 部署时轮询窗口
-与真实交易时段完全错开 (北京 9:15-15:05 = UTC 1:15-7:05)。
-"""
 from __future__ import annotations
 
-from datetime import date, datetime, time as dt_time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as dt_time
 
 CN_TZ = timezone(timedelta(hours=8))
 
@@ -70,15 +67,7 @@ def trading_minutes_elapsed() -> float:
 def trading_minutes_elapsed_from_ts(ts_ms: int | float | None) -> float:
     """从行情时间戳(毫秒)计算当日已交易分钟数。
 
-    优先使用此函数: 行情 timestamp 是真实成交时间, 比服务端时间更准
-    (服务端时间含网络/限流延迟)。
-
-    Args:
-        ts_ms: 毫秒级 Unix 时间戳 (TickFlow SDK quote.timestamp / kline.timestamp)
-
-    Returns:
-        已交易分钟数 (0~240)。timestamp 为 None/无效时返回 240 (视作全天,
-        避免量比被折算成 0)。
+    行情 timestamp 是真实成交时间, 比服务端时间更准；无效时返回 240 避免量比归零。
     """
     if not ts_ms:
         return float(_TRADING_TOTAL_MINUTES)
@@ -87,4 +76,3 @@ def trading_minutes_elapsed_from_ts(ts_ms: int | float | None) -> float:
     except (ValueError, TypeError, OSError):
         return float(_TRADING_TOTAL_MINUTES)
     return trading_minutes_elapsed_from_dt(dt)
-

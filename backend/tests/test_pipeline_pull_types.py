@@ -5,6 +5,7 @@
 
 纯逻辑, 不触网, 不依赖真实数据源。
 """
+
 from __future__ import annotations
 
 import pytest

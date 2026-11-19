@@ -111,18 +111,19 @@ def _tier_base(tier: str) -> str:
 
 def _declared_sources() -> list[dict]:
     """插件 + 自定义源 → 统一能力声明视图。未注册 (hidden/加载失败) 的源不会出现。"""
-    rows: list[dict] = []
-    for plugin in custom_sources.list_plugins():
-        rows.append({
+    rows: list[dict] = [
+        {
             "name": plugin["name"],
             "display": plugin.get("display_name") or plugin["name"],
             "datasets": set(plugin.get("datasets") or []),
             "available": bool(plugin.get("available")),
             "status": str(plugin.get("status") or ""),
             "kind": "plugin",
-        })
-    for source in custom_sources.list_sources():
-        rows.append({
+        }
+        for plugin in custom_sources.list_plugins()
+    ]
+    rows.extend(
+        {
             "name": source["name"],
             "display": source.get("display_name") or source["name"],
             "datasets": set(source.get("datasets") or []),
@@ -130,7 +131,9 @@ def _declared_sources() -> list[dict]:
             "available": True,
             "status": "ok",
             "kind": "custom",
-        })
+        }
+        for source in custom_sources.list_sources()
+    )
     return rows
 
 
@@ -181,28 +184,31 @@ def build_capability_matrix(current: dict[str, str], tickflow_tier: str = "none"
             }
             (candidates if s["available"] else pending).append(entry)
         usable = any(c["name"] == effective for c in candidates)
-        capabilities.append({
-            "id": cap["id"],
-            "label": cap["label"],
-            "desc": cap["desc"],
-            "field": cap["field"],
-            "default": cap["default"],
-            "tf_tier": cap["tf_tier"],
-            "tf_available": tf_available,
-            "usable": usable,
-            "current": effective,
-            "current_display": _display_of(sources, effective),
-            "effective": effective,
-            "effective_display": _display_of(sources, effective),
-            "candidates": candidates,
-            "pending": pending,
-        })
+        capabilities.append(
+            {
+                "id": cap["id"],
+                "label": cap["label"],
+                "desc": cap["desc"],
+                "field": cap["field"],
+                "default": cap["default"],
+                "tf_tier": cap["tf_tier"],
+                "tf_available": tf_available,
+                "usable": usable,
+                "current": effective,
+                "current_display": _display_of(sources, effective),
+                "effective": effective,
+                "effective_display": _display_of(sources, effective),
+                "candidates": candidates,
+                "pending": pending,
+            }
+        )
     return {"tickflow_tier": tier_base, "capabilities": capabilities}
 
 
 # ---------------------------------------------------------------------------
 # 门禁视角 (面向各服务的启动/调度判断与日志)
 # ---------------------------------------------------------------------------
+
 
 def _cap_specs_by_id() -> dict[str, dict]:
     return {c["id"]: c for c in CAPABILITY_REGISTRY}
@@ -250,18 +256,19 @@ def resolve_capability_sources(tickflow_tier: str = "none") -> list[dict]:
         tf_available = tier_rank >= _TIER_RANK[cap["tf_tier"]]
         provider_names = {"tickflow"} if tf_available else set()
         provider_names |= {
-            s["name"] for s in sources
-            if cap["id"] in s["datasets"] and s["available"]
+            s["name"] for s in sources if cap["id"] in s["datasets"] and s["available"]
         }
-        rows.append({
-            "id": cap["id"],
-            "label": cap["label"],
-            "field": field,
-            "source": effective,
-            "source_display": _display_of(sources, effective),
-            "usable": effective in provider_names,
-            "tf_available": tf_available,
-        })
+        rows.append(
+            {
+                "id": cap["id"],
+                "label": cap["label"],
+                "field": field,
+                "source": effective,
+                "source_display": _display_of(sources, effective),
+                "usable": effective in provider_names,
+                "tf_available": tf_available,
+            }
+        )
     return rows
 
 
@@ -276,6 +283,7 @@ def capability_gate(cap_id: str, tickflow_tier: str | None = None) -> tuple[bool
     """
     if tickflow_tier is None:
         from app.tickflow import policy
+
         tickflow_tier = policy.base_tier_name()
 
     for row in resolve_capability_sources(tickflow_tier):

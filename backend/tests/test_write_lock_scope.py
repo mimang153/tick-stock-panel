@@ -6,6 +6,7 @@
 - 并发 upsert 不丢行 (乐观重试的正确性);
 - 合并计算期间 _write_lock 可被其他线程获取 (重活确实不在锁内)。
 """
+
 from __future__ import annotations
 
 import threading
@@ -19,11 +20,13 @@ from app.tickflow.repository import DataStore, KlineRepository
 
 def _frame(symbols: list[str], dt: date = date(2026, 9, 7)) -> pl.DataFrame:
     n = len(symbols)
-    return pl.DataFrame({
-        "symbol": symbols,
-        "date": [dt] * n,
-        "close": [10.0 + i for i in range(n)],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": symbols,
+            "date": [dt] * n,
+            "close": [10.0 + i for i in range(n)],
+        }
+    )
 
 
 def test_concurrent_upserts_do_not_lose_rows(tmp_path: Path) -> None:
@@ -36,7 +39,7 @@ def test_concurrent_upserts_do_not_lose_rows(tmp_path: Path) -> None:
         try:
             for _ in range(3):  # 每线程多轮写, 提高乐观重试路径命中
                 repo.merge_live_daily_asset("stock", _frame(symbols))
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - 测试需收集工作线程任意失败以断言
             errors.append(exc)
 
     threads = [threading.Thread(target=worker, args=(g,), daemon=True) for g in groups]

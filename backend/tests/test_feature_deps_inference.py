@@ -4,6 +4,7 @@
 - 可证明形态 (col/cols 常量引用) → 引擎加载时自动推导精确依赖;
 - 不可证明形态 (动态列名/pl.all/cs.*) → 保持空依赖, 回测继续全量兜底 (fail-closed)。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -16,12 +17,10 @@ from app.strategy.feature_deps import infer_filter_history_features
 
 # ── 单元: 推导函数 ───────────────────────────────────────
 
+
 def test_infer_basic_column_refs():
     def filter_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
-        return df.filter(
-            (pl.col("close") > pl.col("ma20"))
-            & (pl.col("kdj_k") < 25)
-        )
+        return df.filter((pl.col("close") > pl.col("ma20")) & (pl.col("kdj_k") < 25))
 
     assert infer_filter_history_features(filter_history) == frozenset({"close", "ma20", "kdj_k"})
 
@@ -76,7 +75,7 @@ def test_infer_unknown_names_filtered_out():
 
 # ── 集成: 引擎加载路径 ──────────────────────────────────
 
-_INFERABLE = '''\
+_INFERABLE = """\
 META = {"id": "custom_inf_ok", "name": "ok", "description": "", "tags": []}
 
 import polars as pl
@@ -84,9 +83,9 @@ import polars as pl
 
 def filter_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
     return df.filter((pl.col("close") > pl.col("ma20")) & (pl.col("kdj_k") < 25))
-'''
+"""
 
-_DYNAMIC = '''\
+_DYNAMIC = """\
 META = {"id": "custom_inf_dyn", "name": "dyn", "description": "", "tags": []}
 
 import polars as pl
@@ -95,7 +94,7 @@ import polars as pl
 def filter_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
     col_name = str(params.get("col", "close"))
     return df.filter(pl.col(col_name) > 1)
-'''
+"""
 
 
 def _engine_with(tmp_path: Path, source: str):
@@ -141,7 +140,7 @@ def test_engine_explicit_declaration_wins(tmp_path):
 # 回归: 只解析 filter_history 函数体会漏掉这些位置硬编码的列 → 回测帧缺列
 # ColumnNotFoundError。范围放宽只会多载列, 不会漏。
 
-_HELPER = '''\
+_HELPER = """\
 META = {"id": "custom_inf_helper", "name": "helper", "description": "", "tags": []}
 
 import polars as pl
@@ -153,9 +152,9 @@ def _trend_ok(df: pl.DataFrame) -> pl.Expr:
 
 def filter_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
     return df.filter(_trend_ok(df) & (pl.col("close") > 1))
-'''
+"""
 
-_DEP_IMPORTER = '''\
+_DEP_IMPORTER = """\
 META = {"id": "custom_inf_dep", "name": "dep", "description": "", "tags": []}
 
 import polars as pl
@@ -165,28 +164,28 @@ import _dep
 
 def filter_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
     return df.filter(_dep.momentum_ok("rsi_6") & (pl.col("close") > 1))
-'''
+"""
 
-_DEP_FILE = '''\
+_DEP_FILE = """\
 import polars as pl
 
 
 def momentum_ok(col_name: str) -> pl.Expr:
     # 实现固定引用 rsi_6 (col_name 参数仅供调用方语义, 不参与列选择)
     return pl.col("rsi_6") < 30
-'''
+"""
 
-_DEP_FILE_DYNAMIC = '''\
+_DEP_FILE_DYNAMIC = """\
 import polars as pl
 
 
 def momentum_ok(col_name: str) -> pl.Expr:
     # 列名经参数传递; 是否可证明取决于调用点实参 (常量流)
     return pl.col(col_name) < 30
-'''
+"""
 
 
-_DEP_IMPORTER_DYNAMIC = '''\
+_DEP_IMPORTER_DYNAMIC = """\
 META = {"id": "custom_inf_dep_dyn", "name": "depd", "description": "", "tags": []}
 
 import polars as pl
@@ -197,7 +196,7 @@ import _dep
 def filter_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
     col = str(params.get("col", "rsi_6"))
     return df.filter(_dep.momentum_ok(col) & (pl.col("close") > 1))
-'''
+"""
 
 
 def test_engine_infers_module_level_helper_columns(tmp_path):
@@ -252,7 +251,7 @@ def test_engine_family_fail_closed_on_dynamic_dependency(tmp_path):
 # 回归: custom_v1_kanban_strict 的 _ema_expr(col, alpha) 形态 — pl.col(col)
 # 参数级动态, 但全部调用点传常量; 此前整体回退全量兜底。
 
-_HELPER_PARAM = '''\
+_HELPER_PARAM = """\
 META = {"id": "custom_cf_ok", "name": "ok", "description": "", "tags": []}
 
 import polars as pl
@@ -265,9 +264,9 @@ def _ema(col, alpha):
 def filter_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
     d = df.with_columns(_ema("close", 0.5).over("symbol").alias("_e"))
     return d.filter((pl.col("close") * pl.col("float_shares")) > 1e10)
-'''
+"""
 
-_HELPER_PARAM_DYNAMIC_CALL = '''\
+_HELPER_PARAM_DYNAMIC_CALL = """\
 META = {"id": "custom_cf_dyn", "name": "d", "description": "", "tags": []}
 
 import polars as pl
@@ -280,7 +279,7 @@ def _ema(col, alpha):
 def filter_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
     col = str(params.get("col", "close"))
     return df.filter(_ema(col, 0.5) > 1)
-'''
+"""
 
 
 def test_engine_infers_constant_flow_helper_params(tmp_path):

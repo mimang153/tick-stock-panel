@@ -8,11 +8,19 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any, cast
 
 import polars as pl
 import pytest
 
 from app.services import kline_sync
+
+
+def _record(result, log, *items):
+    """记录本次调用参数后返回既定结果(替代 append(x) or result 惯用法)。"""
+    log.extend(items)
+    return result
+
 
 _MINUTE_DF_SCHEMA = {
     "symbol": pl.String,
@@ -79,7 +87,7 @@ def test_persist_path_empty_symbols_no_calls(monkeypatch):
     monkeypatch.setattr(
         kline_sync,
         "_try_custom_minute",
-        lambda symbols, **kw: calls.append(list(symbols)) or (_minute_df(symbols), False),
+        lambda symbols, **kw: _record((_minute_df(symbols), False), calls, list(symbols)),
     )
     out = kline_sync.sync_minute_batch([], on_segment=lambda df: None)
     assert calls == []
@@ -108,6 +116,7 @@ def test_persist_path_falls_through_to_tickflow_on_provider_failure(monkeypatch)
     # TickFlow 分段路径会构造时间段并逐块调用; 这里只验证"落到了 TickFlow
     # 路径"(自定义源不再被继续调用), SDK 层抛错被 sync_minute_batch 捕获计数。
     from app.data_providers.base import ProviderRequestError
+
     with pytest.raises(ProviderRequestError, match="未完成"):
         kline_sync.sync_minute_batch(
             [f"{i:06d}.SZ" for i in range(60)],
@@ -143,16 +152,23 @@ def test_explicit_provider_failure_is_not_reported_as_successful_empty_sync(monk
     from app.data_providers.base import ProviderRequestError
 
     calls = []
+
     def fail(*args, **kwargs):
         calls.append(args[0])
         raise ProviderRequestError("数据源凭据或额度不可用")
 
     monkeypatch.setattr(kline_sync, "_selected_minute_provider_name", lambda: "example")
-    monkeypatch.setattr(kline_sync, "_resolve_minute_provider", lambda name: (SimpleNamespace(get_minute=fail), False, None))
+    monkeypatch.setattr(
+        kline_sync,
+        "_resolve_minute_provider",
+        lambda name: (SimpleNamespace(get_minute=fail), False, None),
+    )
     monkeypatch.setattr(kline_sync, "get_client", lambda: pytest.fail("不得跨源请求 TickFlow"))
-    persisted = []
+    persisted: list = []
     with pytest.raises(ProviderRequestError, match="凭据或额度"):
-        kline_sync.sync_minute_batch(["600519.SH", "000001.SZ"], on_segment=persisted.append if streaming else None)
+        kline_sync.sync_minute_batch(
+            ["600519.SH", "000001.SZ"], on_segment=persisted.append if streaming else None
+        )
     assert len(calls) == 1
     assert persisted == []
 
@@ -174,21 +190,29 @@ def test_background_minute_sync_marks_provider_denial_as_failed(monkeypatch, tmp
     monkeypatch.setattr(kline_api, "_minute_allowed", lambda capset: True)
     monkeypatch.setattr("app.tickflow.pools.get_pool", lambda name: ["600519.SH"])
     monkeypatch.setattr("app.api.data.invalidate_storage_cache", lambda: None)
+
     def denied(*args, **kwargs):
         raise ProviderRequestError("TdxQuant 凭据、接口权限或额度不可用")
+
     monkeypatch.setattr(kline_sync, "sync_and_persist_minute", denied)
-    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path), get_index_symbol_set=lambda: set())
+    repo = SimpleNamespace(
+        store=SimpleNamespace(data_dir=tmp_path), get_index_symbol_set=lambda: set()
+    )
+
     async def run():
         tasks = []
         create_task = asyncio.create_task
+
         def capture(coro):
             task = create_task(coro)
             tasks.append(task)
             return task
+
         monkeypatch.setattr(asyncio, "create_task", capture)
         result = await kline_api.trigger_minute_sync(repo, object(), override_days=days)
         await tasks[0]
         return store.get(result["job_id"])
+
     result = asyncio.run(run())
     assert result["status"] == "failed"
     assert "凭据、接口权限或额度" in result["error"]
@@ -203,10 +227,12 @@ def test_provider_request_error_has_readable_http_response():
     from app.main import provider_request_error_handler
 
     app = FastAPI()
-    app.add_exception_handler(ProviderRequestError, provider_request_error_handler)
+    app.add_exception_handler(ProviderRequestError, cast(Any, provider_request_error_handler))
+
     @app.get("/minute")
     def minute():
         raise ProviderRequestError("数据源凭据或额度不可用")
+
     response = TestClient(app).get("/minute")
     assert response.status_code == 502
     assert response.json() == {"detail": "数据源凭据或额度不可用", "code": "provider_request"}

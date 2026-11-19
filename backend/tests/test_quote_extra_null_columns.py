@@ -19,8 +19,8 @@ def test_all_null_columns_are_dropped():
             "prev_close": 10.0,
             "change_pct": 0.05,
             "change_amount": 0.5,
-            "amplitude": None,       # fuyao: 快照未提供
-            "turnover_rate": None,   # fuyao: 需股本口径, 交给 enriched 管道
+            "amplitude": None,  # fuyao: 快照未提供
+            "turnover_rate": None,  # fuyao: 需股本口径, 交给 enriched 管道
         },
         {
             "symbol": "000820.SZ",

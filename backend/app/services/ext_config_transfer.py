@@ -1,4 +1,10 @@
-"""单表配置分享：沿用配置备份 ZIP，凭据剥离，导入只创建新表。"""
+"""单表配置分享：沿用配置备份 ZIP，凭据剥离，导入只创建新表。
+
+导出把扩展表配置连同拉取配置打包, 递归清除明文凭据(含 URL 查询参数与请求体)
+并追加脱敏提示; 导入重新校验连接, 仅创建新表, 绝不覆盖或删除本地已有配置。
+凭据值只存 secrets_store, 导出包内一律不携带。
+"""
+
 from __future__ import annotations
 
 import copy
@@ -20,25 +26,61 @@ from app.services.package_archive import read_code_archive
 MAX_UPLOAD = 4 * 1024 * 1024
 MAX_JSON = 1024 * 1024
 _ID = re.compile(r"^[a-zA-Z0-9_]{1,64}$")
-_RESERVED_IDS = {"CON", "PRN", "AUX", "NUL", *[f"COM{i}" for i in range(1, 10)], *[f"LPT{i}" for i in range(1, 10)]}
+_RESERVED_IDS = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *[f"COM{i}" for i in range(1, 10)],
+    *[f"LPT{i}" for i in range(1, 10)],
+}
 _STATE = {"last_run", "last_status", "last_message", "last_rows", "next_run"}
 _CREDENTIAL_NAMES = {
-    "key", "apikey", "token", "accesstoken", "refreshtoken", "secret", "clientsecret",
-    "password", "passwd", "authorization", "proxyauthorization", "cookie", "setcookie",
-    "signature", "sig", "credential", "credentials", "session", "sessionid",
+    "key",
+    "apikey",
+    "token",
+    "accesstoken",
+    "refreshtoken",
+    "secret",
+    "clientsecret",
+    "password",
+    "passwd",
+    "authorization",
+    "proxyauthorization",
+    "cookie",
+    "setcookie",
+    "signature",
+    "sig",
+    "credential",
+    "credentials",
+    "session",
+    "sessionid",
 }
 
 
 def _credential_name(name: str) -> bool:
+    """按字段名判断是否为凭据(含常见 key/token/secret 后缀), 用于导出脱敏。"""
     name = re.sub(r"[^a-z0-9]", "", name.lower())
-    return name in _CREDENTIAL_NAMES or name.endswith((
-        "apikey", "token", "secret", "password", "accesskey", "secretkey", "credential", "signature",
-    ))
+    return name in _CREDENTIAL_NAMES or name.endswith(
+        (
+            "apikey",
+            "token",
+            "secret",
+            "password",
+            "accesskey",
+            "secretkey",
+            "credential",
+            "signature",
+        )
+    )
 
 
 def _known_secrets(config: dict) -> set[str]:
-    values = {v for k, v in secrets_store.load().items()
-              if _credential_name(k) and isinstance(v, str) and v}
+    values = {
+        v
+        for k, v in secrets_store.load().items()
+        if _credential_name(k) and isinstance(v, str) and v
+    }
     key = ext_data.get_ext_api_key(config["id"])
     if key:
         values.add(key)
@@ -82,7 +124,9 @@ def _clean_url(url: str, auth: dict, warnings: list[str]) -> str:
             query.append((name, value))
     if parsed.username is not None or parsed.password is not None:
         warnings.append("已移除 URL 中的用户名和密码，请重新配置接口鉴权。")
-    return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, urlencode(query), ""))
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, urlencode(query), "")
+    )
 
 
 def _clean_body(value, warnings: list[str]):
@@ -100,7 +144,49 @@ def _clean_body(value, warnings: list[str]):
     return value
 
 
+def _portable_pull(raw_pull: dict, warnings: list[str]) -> dict:
+    """清理拉取配置: 去运行时状态/凭据, 归一 URL 与 body 后校验。"""
+    pull = dict(raw_pull)
+    for key in _STATE:
+        pull.pop(key, None)
+    auth = {k: v for k, v in (pull.get("auth") or {}).items() if k in {"type", "header", "param"}}
+    if (pull.get("auth") or {}).get("key_ref"):
+        warnings.append("原设备凭据引用已移除，请填写本表自己的 API Key。")
+    pull["url"] = _clean_url(pull.get("url", ""), auth, warnings)
+    headers = {}
+    for name, value in (pull.get("headers") or {}).items():
+        if _credential_name(name) or (
+            auth.get("type") in {"header", "bearer"}
+            and name.lower() == str(auth.get("header", "Authorization")).lower()
+        ):
+            warnings.append("已移除请求头中的凭据，请填写本表自己的 API Key。")
+            if auth.get("type", "none") == "none" and name.lower() != "cookie":
+                auth.update(
+                    type="bearer" if str(value).lower().startswith("bearer ") else "header",
+                    header=name,
+                )
+        else:
+            headers[name] = value
+    pull["headers"] = headers
+    body = pull.get("body")
+    if body:
+        try:
+            pull["body"] = json.dumps(_clean_body(json.loads(body), warnings), ensure_ascii=False)
+        except json.JSONDecodeError:
+            pairs = parse_qsl(body, keep_blank_values=True)
+            if pairs and "=" in body:
+                pull["body"] = urlencode(_clean_body(dict(pairs), warnings))
+    if pull.get("fanout"):
+        fanout = dict(pull["fanout"])
+        fanout["url"] = _clean_url(fanout.get("url", ""), auth, warnings)
+        pull["fanout"] = _clean_body(fanout, warnings)
+    pull["auth"] = auth or None
+    pull["enabled"] = False
+    return PullConfigReq.model_validate(pull).model_dump()
+
+
 def _portable_config(raw: dict, *, secrets: set[str] | None = None) -> tuple[dict, list[str]]:
+    """校验并归一化导出配置: 去凭据、关拉取开关, 返回可分享配置与警告列表。"""
     warnings: list[str] = []
     raw = copy.deepcopy(raw)
     try:
@@ -108,40 +194,7 @@ def _portable_config(raw: dict, *, secrets: set[str] | None = None) -> tuple[dic
         if len({field["name"] for field in base["fields"]}) != len(base["fields"]):
             raise ValueError("扩展数据字段名不能重复")
         if raw.get("pull"):
-            pull = dict(raw["pull"])
-            for key in _STATE:
-                pull.pop(key, None)
-            auth = {k: v for k, v in (pull.get("auth") or {}).items() if k in {"type", "header", "param"}}
-            if (pull.get("auth") or {}).get("key_ref"):
-                warnings.append("原设备凭据引用已移除，请填写本表自己的 API Key。")
-            pull["url"] = _clean_url(pull.get("url", ""), auth, warnings)
-            headers = {}
-            for name, value in (pull.get("headers") or {}).items():
-                if (_credential_name(name)
-                        or (auth.get("type") in {"header", "bearer"}
-                            and name.lower() == str(auth.get("header", "Authorization")).lower())):
-                    warnings.append("已移除请求头中的凭据，请填写本表自己的 API Key。")
-                    if auth.get("type", "none") == "none" and name.lower() != "cookie":
-                        auth.update(type="bearer" if str(value).lower().startswith("bearer ") else "header", header=name)
-                else:
-                    headers[name] = value
-            pull["headers"] = headers
-            body = pull.get("body")
-            if body:
-                try:
-                    pull["body"] = json.dumps(_clean_body(json.loads(body), warnings), ensure_ascii=False)
-                except json.JSONDecodeError:
-                    pairs = parse_qsl(body, keep_blank_values=True)
-                    if pairs and "=" in body:
-                        pull["body"] = urlencode(_clean_body(dict(pairs), warnings))
-            if pull.get("fanout"):
-                fanout = dict(pull["fanout"])
-                fanout["url"] = _clean_url(fanout.get("url", ""), auth, warnings)
-                pull["fanout"] = _clean_body(fanout, warnings)
-            pull["auth"] = auth or None
-            pull["enabled"] = False
-            validated = PullConfigReq.model_validate(pull).model_dump()
-            base["pull"] = validated
+            base["pull"] = _portable_pull(raw["pull"], warnings)
         base = _strip_literals(base, secrets or set(), warnings)
         json.dumps(base, allow_nan=False)
     except (ValidationError, TypeError, KeyError) as exc:
@@ -164,8 +217,11 @@ def export_config(data_dir: Path, config_id: str) -> tuple[bytes, str]:
     if any(secret.encode() in content for secret in secrets):
         raise ValueError("配置中仍含凭据，已停止导出；请将凭据移到 API Key 设置后重试")
     manifest = {
-        "format": config_backup.BACKUP_FORMAT, "version": config_backup.BACKUP_VERSION,
-        "package_type": "ext-data-config", "app_version": __version__, "include_secrets": False,
+        "format": config_backup.BACKUP_FORMAT,
+        "version": config_backup.BACKUP_VERSION,
+        "package_type": "ext-data-config",
+        "app_version": __version__,
+        "include_secrets": False,
         "categories": [{"key": "ext_data", "label": "扩展数据集配置", "count": 1}],
         "warnings": warnings,
     }
@@ -182,14 +238,21 @@ def _read_config(data: bytes) -> tuple[dict, list[str]]:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             infos = archive.infolist()
-            if len(infos) > 16 or any(i.file_size > MAX_JSON for i in infos) or sum(i.file_size for i in infos) > 2 * MAX_JSON:
+            if (
+                len(infos) > 16
+                or any(i.file_size > MAX_JSON for i in infos)
+                or sum(i.file_size for i in infos) > 2 * MAX_JSON
+            ):
                 raise ValueError("扩展配置包条目或解压大小超过上限")
         files = read_code_archive(data)
         if len(files) != 2 or "manifest.json" not in files:
             raise ValueError("扩展配置包只允许清单和一张表的 config.json，不接收密钥或数据文件")
         manifest = json.loads(files.pop("manifest.json"))
-        if (not isinstance(manifest, dict) or manifest.get("format") != config_backup.BACKUP_FORMAT
-                or manifest.get("version") != config_backup.BACKUP_VERSION):
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("format") != config_backup.BACKUP_FORMAT
+            or manifest.get("version") != config_backup.BACKUP_VERSION
+        ):
             raise ValueError("不支持的扩展配置包格式或版本")
         path, payload = next(iter(files.items()))
         match = re.fullmatch(r"ext_data/([a-zA-Z0-9_]{1,64})/config\.json", path)
@@ -211,11 +274,16 @@ def inspect_config(data_dir: Path, data: bytes) -> dict:
     config, warnings = _read_config(data)
     pull = config.get("pull") or {}
     return {
-        "id": config["id"], "label": config["label"], "mode": config["mode"],
-        "fields": config["fields"], "field_count": len(config["fields"]),
+        "id": config["id"],
+        "label": config["label"],
+        "mode": config["mode"],
+        "fields": config["fields"],
+        "field_count": len(config["fields"]),
         "conflict": (data_dir / "ext_data" / config["id"]).exists(),
         "requires_key": (pull.get("auth") or {}).get("type", "none") != "none",
-        "has_pull": bool(pull), "pull_url": pull.get("url"), "pull_method": pull.get("method"),
+        "has_pull": bool(pull),
+        "pull_url": pull.get("url"),
+        "pull_method": pull.get("method"),
         "warnings": warnings,
     }
 

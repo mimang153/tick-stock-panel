@@ -5,6 +5,7 @@ ID 同步进 meta (惰性登记加入时间), 让「按加入时间排序」立�
 池是界面状态, 写操作不做策略引擎存在性校验 (前端按策略列表 prune 失效
 ID, 与 v1 行为一致)。
 """
+
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
@@ -47,9 +48,13 @@ class PoolIn(BaseModel):
 @router.put("/entries")
 def put_entries(req: PoolIn) -> dict:
     try:
-        return _snapshot(strategy_pool.set_pool(
-            req.pool, only_if_empty=req.only_if_empty, expected_revision=req.expected_revision,
-        ))
+        return _snapshot(
+            strategy_pool.set_pool(
+                req.pool,
+                only_if_empty=req.only_if_empty,
+                expected_revision=req.expected_revision,
+            )
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 

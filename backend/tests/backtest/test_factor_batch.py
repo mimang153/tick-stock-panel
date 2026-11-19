@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import Any, cast
 
 import numpy as np
 import polars as pl
@@ -20,17 +21,19 @@ def _panel() -> pl.DataFrame:
     start = date(2026, 1, 1)
     for day in range(8):
         for index, symbol in enumerate(("000001.SZ", "000002.SZ", "600000.SH")):
-            rows.append({
-                "symbol": symbol,
-                "date": start + timedelta(days=day),
-                "open": 10.0 + index + day * 0.1,
-                "high": 10.5 + index + day * 0.1,
-                "low": 9.5 + index + day * 0.1,
-                "close": 10.0 + index + day * (index + 1) * 0.1,
-                "volume": 1000.0 + index * 100 + day,
-                "change_pct": 0.01 * (index + 1) + day * 0.001,
-                "turnover_rate": 0.02 * (3 - index) + day * 0.001,
-            })
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "date": start + timedelta(days=day),
+                    "open": 10.0 + index + day * 0.1,
+                    "high": 10.5 + index + day * 0.1,
+                    "low": 9.5 + index + day * 0.1,
+                    "close": 10.0 + index + day * (index + 1) * 0.1,
+                    "volume": 1000.0 + index * 100 + day,
+                    "change_pct": 0.01 * (index + 1) + day * 0.001,
+                    "turnover_rate": 0.02 * (3 - index) + day * 0.001,
+                }
+            )
     return pl.DataFrame(rows)
 
 
@@ -40,13 +43,15 @@ class _Engine:
         self.calls: list[dict] = []
 
     def load_panel(self, symbols, start, end, columns, asset_type):
-        self.calls.append({
-            "symbols": symbols,
-            "start": start,
-            "end": end,
-            "columns": columns,
-            "asset_type": asset_type,
-        })
+        self.calls.append(
+            {
+                "symbols": symbols,
+                "start": start,
+                "end": end,
+                "columns": columns,
+                "asset_type": asset_type,
+            }
+        )
         selected = [column for column in columns if column in self.panel.columns]
         return self.panel.select(selected)
 
@@ -64,7 +69,7 @@ def _batch_config(factor_names: list[str]) -> FactorBatchConfig:
 
 def test_batch_loads_panel_once_and_deduplicates_factors():
     engine = _Engine(_panel())
-    result = FactorBacktestService(engine).run_batch(
+    result = FactorBacktestService(cast(Any, engine)).run_batch(
         _batch_config(["change_pct", "turnover_rate", "change_pct"]),
     )
 
@@ -76,7 +81,7 @@ def test_batch_loads_panel_once_and_deduplicates_factors():
 
 def test_batch_isolates_a_single_factor_failure(monkeypatch):
     engine = _Engine(_panel())
-    service = FactorBacktestService(engine)
+    service = FactorBacktestService(cast(Any, engine))
     original = service._evaluate_panel
 
     def evaluate(panel, config, run_id, started_at, **kwargs):
@@ -93,7 +98,7 @@ def test_batch_isolates_a_single_factor_failure(monkeypatch):
 
 def test_batch_empty_panel_returns_batch_error():
     engine = _Engine(pl.DataFrame())
-    result = FactorBacktestService(engine).run_batch(_batch_config(["change_pct"]))
+    result = FactorBacktestService(cast(Any, engine)).run_batch(_batch_config(["change_pct"]))
 
     assert len(engine.calls) == 1
     assert result.results == []
@@ -102,14 +107,16 @@ def test_batch_empty_panel_returns_batch_error():
 
 def test_single_factor_contract_remains_compatible():
     engine = _Engine(_panel())
-    result = FactorBacktestService(engine).run(FactorConfig(
-        factor_name="change_pct",
-        symbols=None,
-        start=date(2026, 1, 1),
-        end=date(2026, 1, 8),
-        n_groups=3,
-        rebalance="daily",
-    ))
+    result = FactorBacktestService(cast(Any, engine)).run(
+        FactorConfig(
+            factor_name="change_pct",
+            symbols=None,
+            start=date(2026, 1, 1),
+            end=date(2026, 1, 8),
+            n_groups=3,
+            rebalance="daily",
+        )
+    )
 
     assert result.error is None
     assert result.config["factor_name"] == "change_pct"
@@ -158,19 +165,21 @@ def test_derived_factors_are_computed_from_shared_base_panel():
     rows = []
     for day in range(70):
         close = 10.0 + day
-        rows.append({
-            "symbol": "000001.SZ",
-            "date": start + timedelta(days=day),
-            "open": close * 0.99,
-            "high": close * 1.01,
-            "low": close * 0.98,
-            "close": close,
-            "volume": 1000.0 + day,
-            "amount": (1000.0 + day) * close,
-            "turnover_rate": 2.0 + day * 0.01,
-        })
+        rows.append(
+            {
+                "symbol": "000001.SZ",
+                "date": start + timedelta(days=day),
+                "open": close * 0.99,
+                "high": close * 1.01,
+                "low": close * 0.98,
+                "close": close,
+                "volume": 1000.0 + day,
+                "amount": (1000.0 + day) * close,
+                "turnover_rate": 2.0 + day * 0.01,
+            }
+        )
     engine = _Engine(pl.DataFrame(rows))
-    service = FactorBacktestService(engine)
+    service = FactorBacktestService(cast(Any, engine))
     factor_names = [
         "ma20_bias",
         "atr_pct",

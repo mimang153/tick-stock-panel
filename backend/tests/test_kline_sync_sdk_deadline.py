@@ -5,6 +5,7 @@ TickFlow SDK 自带 timeout=30s×3 重试, 但只保护其覆盖的请求阶段;
 重任务全部无限排队。deadline 包装在超时后放弃等待, 调用方按分块失败路径
 继续, 心跳与协作取消在分块边界照常生效。纯逻辑, 不触网。
 """
+
 from __future__ import annotations
 
 import functools
@@ -18,6 +19,7 @@ from app.services import kline_sync
 from app.services.kline_sync import SDKCallTimeoutError, _sdk_call_with_deadline
 
 # ── 包装器单元行为 ──────────────────────────────────────────────────────
+
 
 def test_result_passthrough():
     assert _sdk_call_with_deadline(lambda: 42) == 42
@@ -40,6 +42,7 @@ def test_deadline_exceeded_abandons_wait():
 
 # ── 分块循环集成: 超时走失败路径且心跳不断 ─────────────────────────────
 
+
 class _HangingKlines:
     @staticmethod
     def batch(*args, **kwargs):
@@ -54,7 +57,8 @@ def _fast_deadline(monkeypatch):
     """循环内 deadline 默认 600s, 换成 0.1s 版本方便测试。"""
     real = kline_sync._sdk_call_with_deadline
     monkeypatch.setattr(
-        kline_sync, "_sdk_call_with_deadline",
+        kline_sync,
+        "_sdk_call_with_deadline",
         functools.partial(real, timeout_s=0.1),
     )
 
@@ -70,8 +74,10 @@ def test_minute_loop_timeout_keeps_heartbeat(monkeypatch):
     with pytest.raises(ProviderRequestError, match="未完成"):
         kline_sync.sync_minute_batch(
             ["600000.SH", "000001.SZ"],
-            start_time=datetime(2026, 8, 3), end_time=datetime(2026, 8, 7),
-            batch_size=1, rpm=None,
+            start_time=datetime(2026, 8, 3),
+            end_time=datetime(2026, 8, 7),
+            batch_size=1,
+            rpm=None,
             on_chunk_done=lambda cur, total, seg: beats.append((cur, total, seg)),
         )
     assert [b[0] for b in beats] == [1, 2]  # 每个超时分块都推进心跳
@@ -86,7 +92,10 @@ def test_daily_loop_timeout_marks_failed(monkeypatch):
     beats: list[tuple[int, int]] = []
     failed: list[str] = []
     df = kline_sync.sync_daily_batch(
-        ["600000.SH", "000001.SZ"], count=250, batch_size=1, rpm=None,
+        ["600000.SH", "000001.SZ"],
+        count=250,
+        batch_size=1,
+        rpm=None,
         on_chunk_done=lambda cur, total: beats.append((cur, total)),
         failed_out=failed,
     )

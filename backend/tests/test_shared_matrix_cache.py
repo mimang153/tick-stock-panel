@@ -4,6 +4,7 @@
 (全市场矩阵构建数秒)。指纹含 enriched generation + 窗口范围, 数据/窗口变化
 自动失效; generation 未知 (分钟/ETF/测试数据) 时 fail-closed 不缓存。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -51,13 +52,22 @@ def _matrix_def(sid: str, fields: set[str]) -> StrategyDef:
 def _history(days: int = 6) -> pl.DataFrame:
     syms = ["600000.SH", "000001.SZ"]
     rows = []
-    for d in range(days):
-        for s in syms:
-            rows.append({
-                "symbol": s, "name": s, "date": date(2026, 3, 2 + d),
-                "open": 10.0, "high": 11.0, "low": 9.0,
-                "close": 10.0 + d, "volume": 1000.0 + d,
-            })
+    rows.extend(
+        [
+            {
+                "symbol": s,
+                "name": s,
+                "date": date(2026, 3, 2 + d),
+                "open": 10.0,
+                "high": 11.0,
+                "low": 9.0,
+                "close": 10.0 + d,
+                "volume": 1000.0 + d,
+            }
+            for d in range(days)
+            for s in syms
+        ]
+    )
     return pl.DataFrame(rows)
 
 
@@ -69,8 +79,12 @@ def _engine_with(sid: str, fields: set[str]) -> StrategyEngine:
 
 def _ctx(history: pl.DataFrame, generation: str | None) -> StrategyDataContext:
     return StrategyDataContext(
-        asset_type="stock", timeframe="1d", as_of=date(2026, 3, 7),
-        current=None, history=history, data_generation=generation,
+        asset_type="stock",
+        timeframe="1d",
+        as_of=date(2026, 3, 7),
+        current=None,
+        history=history,
+        data_generation=generation,
     )
 
 
@@ -103,9 +117,7 @@ def test_field_union_change_rebuilds():
     engine = _engine_with("m1", {"close"})
     engine._strategies["m2"] = _matrix_def("m2", {"momentum_20d"})
     hist = _history()
-    small = engine.build_shared_matrix(
-        _ctx(hist, "g1"), [("m1", engine.get("m1"))]
-    )
+    small = engine.build_shared_matrix(_ctx(hist, "g1"), [("m1", engine.get("m1"))])
     union = engine.build_shared_matrix(
         _ctx(hist, "g1"),
         [("m1", engine.get("m1")), ("m2", engine.get("m2"))],

@@ -3,6 +3,7 @@
 契约: upsert 幂等 (同 id 更新不新增)、容量上限、孤儿 running 回收、
 API 生命周期 (PUT/GET/DELETE) 与非法输入拒绝。存取均为小文件原子写。
 """
+
 from __future__ import annotations
 
 import time
@@ -26,11 +27,15 @@ def client(tmp_path: Path) -> TestClient:
 
 
 def test_upsert_idempotent_and_list_sorted(tmp_path: Path) -> None:
-    task_registry.upsert(tmp_path, "backtest:abc", kind="backtest", status="running", payload={"qs": "x=1"})
+    task_registry.upsert(
+        tmp_path, "backtest:abc", kind="backtest", status="running", payload={"qs": "x=1"}
+    )
     task_registry.upsert(
         tmp_path, "backtest:abc", kind="backtest", status="done", payload={"qs": "x=1"}
     )
-    task_registry.upsert(tmp_path, "mining:m1", kind="mining", status="running", payload={"run_id": "r1"})
+    task_registry.upsert(
+        tmp_path, "mining:m1", kind="mining", status="running", payload={"run_id": "r1"}
+    )
 
     items = task_registry.list_items(tmp_path)
     assert [it["id"] for it in items] == ["mining:m1", "backtest:abc"]  # updated_at 倒序
@@ -43,9 +48,7 @@ def test_upsert_idempotent_and_list_sorted(tmp_path: Path) -> None:
 
 def test_capacity_trim_keeps_newest(tmp_path: Path) -> None:
     for i in range(task_registry.MAX_ITEMS + 5):
-        task_registry.upsert(
-            tmp_path, f"backtest:t{i}", kind="backtest", status="done"
-        )
+        task_registry.upsert(tmp_path, f"backtest:t{i}", kind="backtest", status="done")
         time.sleep(0.001)  # 保证 updated_at 严格递增
     items = task_registry.list_items(tmp_path)
     assert len(items) == task_registry.MAX_ITEMS
@@ -94,13 +97,22 @@ def test_api_lifecycle(client: TestClient) -> None:
 
 
 def test_api_rejects_bad_input(client: TestClient) -> None:
-    assert client.put(
-        "/api/task-registry/bad id!", json={"kind": "backtest", "status": "running"}
-    ).status_code == 400  # id 含非法字符
-    assert client.put(
-        "/api/task-registry/backtest:x", json={"kind": "nope", "status": "running"}
-    ).status_code == 400  # 未知 kind
-    assert client.put(
-        "/api/task-registry/backtest:x", json={"kind": "backtest", "status": "weird"}
-    ).status_code == 400  # 未知 status
+    assert (
+        client.put(
+            "/api/task-registry/bad id!", json={"kind": "backtest", "status": "running"}
+        ).status_code
+        == 400
+    )  # id 含非法字符
+    assert (
+        client.put(
+            "/api/task-registry/backtest:x", json={"kind": "nope", "status": "running"}
+        ).status_code
+        == 400
+    )  # 未知 kind
+    assert (
+        client.put(
+            "/api/task-registry/backtest:x", json={"kind": "backtest", "status": "weird"}
+        ).status_code
+        == 400
+    )  # 未知 status
     assert client.get("/api/task-registry", params={"kind": "nope"}).status_code == 400

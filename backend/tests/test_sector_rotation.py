@@ -301,8 +301,10 @@ def test_flow_missing_degrades_to_pure_pct(repo):
     assert sectors["A题材"]["score"] == pytest.approx(0.0)
 
 
-def test_no_minute_partition_gives_no_data(repo, tmp_path):
+def test_no_minute_partition_gives_no_data(repo, tmp_path, ck_runtime):
     (repo.store.data_dir / "kline_minute" / f"date={DAY}" / "part.parquet").unlink()
+    # CK-only 下分钟数据的权威在 CK：清空 CK 表才是真正的"无分钟数据"。
+    ck_runtime._client.execute(f"TRUNCATE TABLE {ck_runtime._table('kline_minute')}")
     result = sector_rotation.build_sector_rotation(repo, kind="concept")
     assert result["status"] == "no_data"
     assert result["reason"] == "minute_missing"

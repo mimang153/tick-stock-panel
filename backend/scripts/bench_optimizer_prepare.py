@@ -9,6 +9,7 @@ P2a (prepare-once 面板复用) 前后各跑一次同一脚本对比, 验收标�
   默认策略 custom_v1_kanban_strict (动态 filter_history, 默认执行后端)。
   --json PATH 另存结果。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -64,11 +65,19 @@ def main() -> None:
     args = parser.parse_args()
 
     optimizer = _build()
-    combos = [{"box_days": d, "box_amplitude": a} for d in PARAM_GRID["box_days"] for a in PARAM_GRID["box_amplitude"]]
+    combos = [
+        {"box_days": d, "box_amplitude": a}
+        for d in PARAM_GRID["box_days"]
+        for a in PARAM_GRID["box_amplitude"]
+    ]
     cfgs = [
         StrategyBacktestConfig(
-            strategy_id=args.strategy, symbols=None, start=START, end=END,
-            params=combo, mode="fast",
+            strategy_id=args.strategy,
+            symbols=None,
+            start=START,
+            end=END,
+            params=combo,
+            mode="fast",
         )
         for combo in combos
     ]
@@ -87,7 +96,9 @@ def main() -> None:
         order = ("plain", "shared") if i % 2 == 0 else ("shared", "plain")
         for arm in order:
             t = time.perf_counter()
-            res = optimizer.service.run(cfg, prepared_panel=prepared_panel if arm == "shared" else None)
+            res = optimizer.service.run(
+                cfg, prepared_panel=prepared_panel if arm == "shared" else None
+            )
             elapsed = time.perf_counter() - t
             assert res.error is None, f"combo {i} {arm}: {res.error}"
             (plain_times if arm == "plain" else shared_times).append(elapsed)
@@ -105,7 +116,9 @@ def main() -> None:
         "plain_plus_prepare_s": round(plain_total, 2),
         "shared_plus_prepare_s": round(prepare_s + shared_total, 2),
         "trials_speedup": round(plain_total / shared_total, 2) if shared_total else None,
-        "incl_prepare_speedup": round(plain_total / (prepare_s + shared_total), 2) if shared_total else None,
+        "incl_prepare_speedup": round(plain_total / (prepare_s + shared_total), 2)
+        if shared_total
+        else None,
         "stats_identical": (
             [{k: v for k, v in st.items() if k != "timing_ms"} for st in plain_stats]
             == [{k: v for k, v in st.items() if k != "timing_ms"} for st in shared_stats]
@@ -115,7 +128,9 @@ def main() -> None:
     }
     print(json.dumps(row, ensure_ascii=False, indent=2))
     if args.json_path:
-        Path(args.json_path).write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
+        Path(args.json_path).write_text(
+            json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
 
 if __name__ == "__main__":

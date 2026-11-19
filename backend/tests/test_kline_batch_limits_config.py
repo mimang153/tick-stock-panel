@@ -4,6 +4,7 @@
 日K分块 300、分时块 300), 改任一处不一致就全站 400。现在上限是用户偏好,
 后端校验与前端分块读同一个值。
 """
+
 from __future__ import annotations
 
 import json
@@ -28,6 +29,7 @@ def _write(path, data):
 
 
 # ── 偏好读写 ─────────────────────────────────────────────
+
 
 def test_defaults_when_unset():
     assert preferences.get_daily_batch_symbols() == 400
@@ -84,6 +86,7 @@ def test_setter_keeps_other_preferences(_isolated):
 
 
 # ── 端点校验 (与偏好联动) ─────────────────────────────────
+
 
 def _fake_req(repo=None):
     from types import SimpleNamespace

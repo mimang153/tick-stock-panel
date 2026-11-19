@@ -20,9 +20,13 @@ from app.extensions.registry import BackendExtensionRegistry
 
 def bundle(version="1.0.0", *, broken=False, extra=None, **changes):
     doc = {
-        "format": "tick-extension-package", "format_version": 1,
-        "id": "demo.research", "display_name": "研究服务", "version": version,
-        "extension_api_version": 1, "backend": "backend.extension",
+        "format": "tick-extension-package",
+        "format_version": 1,
+        "id": "demo.research",
+        "display_name": "研究服务",
+        "version": version,
+        "extension_api_version": 1,
+        "backend": "backend.extension",
         "frontend": "frontend/extension.mjs",
     }
     doc.update(changes)
@@ -88,6 +92,7 @@ def test_update_is_staged_and_failed_start_preserves_front_and_back(tmp_path):
     install(store, bundle("2.0.0", broken=True))
     assert client.get("/api/extensions/demo.research/status").json()["version"] == "1.0.0"
     before = store.runtime_bundle("package:demo.research", first.state.managed_extension_versions)
+    assert before is not None
     assert b"1.0.0" in before.read_bytes()
     failed, client = boot(tmp_path)
     assert client.get("/api/extensions/demo.research/status").json()["version"] == "1.0.0"
@@ -98,11 +103,18 @@ def test_update_is_staged_and_failed_start_preserves_front_and_back(tmp_path):
     assert "private-credential" not in str(item)
     restarted, client = boot(tmp_path)
     assert client.get("/api/extensions/demo.research/status").json()["version"] == "1.0.0"
-    assert store.list_installed(restarted.state.managed_extension_versions)[0]["error"] == item["error"]
+    assert (
+        store.list_installed(restarted.state.managed_extension_versions)[0]["error"]
+        == item["error"]
+    )
     install(store, bundle("3.0.0"))
     current, client = boot(tmp_path)
     assert client.get("/api/extensions/demo.research/status").json()["version"] == "3.0.0"
-    assert b"3.0.0" in store.runtime_bundle("package:demo.research", current.state.managed_extension_versions).read_bytes()
+    current_bundle = store.runtime_bundle(
+        "package:demo.research", current.state.managed_extension_versions
+    )
+    assert current_bundle is not None
+    assert b"3.0.0" in current_bundle.read_bytes()
 
 
 def test_disable_rollback_remove_are_applied_only_at_restart(tmp_path):
@@ -152,7 +164,18 @@ def test_digest_revision_version_and_compatibility_guards(tmp_path):
         store.install(future, preview["digest"], preview["revision"])
 
 
-@pytest.mark.parametrize("name", ["../escape.py", "/tmp/evil.py", "a\\evil.py", "a/../x.py", "CON.py", "x.dll", "backend/extension.py/child.py"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "../escape.py",
+        "/tmp/evil.py",
+        "a\\evil.py",
+        "a/../x.py",
+        "CON.py",
+        "x.dll",
+        "backend/extension.py/child.py",
+    ],
+)
 def test_invalid_archive_paths_and_payloads_are_rejected(tmp_path, name):
     with pytest.raises(ValueError):
         ExtensionPackageStore(tmp_path).inspect(bundle(extra={name: "pass"}))
@@ -184,8 +207,11 @@ def test_symlink_and_corrupt_state_cannot_escape_or_block_other_packages(tmp_pat
 
 def test_route_namespace_conflict_and_startup_failures_never_partially_register(tmp_path):
     store = ExtensionPackageStore(tmp_path)
-    install(store, bundle(extra={
-        "backend/extension.py": '''
+    install(
+        store,
+        bundle(
+            extra={
+                "backend/extension.py": """
 from fastapi import APIRouter
 EXTENSION_ID = "demo.research"
 EXTENSION_API_VERSION = 1
@@ -195,7 +221,10 @@ def setup(registrar):
     def unsafe():
         return {"hijacked": True}
     registrar.include_router(router)
-'''}))
+"""
+            }
+        ),
+    )
     app, client = boot(tmp_path)
     assert client.get("/api/settings").status_code == 404
     assert not app.state.extension_registry.extension_ids()
@@ -213,12 +242,16 @@ def test_preview_identifies_the_pending_version_that_will_be_replaced(tmp_path):
     assert preview["manifest"]["version"] == "3.0.0"
 
 
-def test_modified_package_and_failed_state_write_do_not_publish_a_new_version(tmp_path, monkeypatch):
+def test_modified_package_and_failed_state_write_do_not_publish_a_new_version(
+    tmp_path, monkeypatch
+):
     store = ExtensionPackageStore(tmp_path)
     install(store, bundle())
     boot(tmp_path)
     before = store._state("demo.research")
-    monkeypatch.setattr(store, "_write", lambda *_: (_ for _ in ()).throw(PermissionError("无写入权限")))
+    monkeypatch.setattr(
+        store, "_write", lambda *_: (_ for _ in ()).throw(PermissionError("无写入权限"))
+    )
     with pytest.raises(PermissionError):
         install(store, bundle("2.0.0"))
     assert store._state("demo.research") == before
@@ -245,13 +278,19 @@ def test_startup_cannot_overwrite_a_concurrent_management_change(tmp_path, monke
 
     monkeypatch.setattr(packages, "_prepare", prepare)
     app, client = boot(tmp_path)
-    assert store._state("demo.research")["pending"] == "3.0.0"
-    assert store._state("demo.research")["active"] == "1.0.0"
+    state = store._state("demo.research")
+    assert state is not None
+    assert state["pending"] == "3.0.0"
+    state = store._state("demo.research")
+    assert state is not None
+    assert state["active"] == "1.0.0"
     assert client.get("/api/extensions/demo.research/status").status_code == 404
     assert not app.state.managed_extension_versions
 
 
-def test_runtime_frontend_uses_existing_page_distribution_and_management_auth(tmp_path, monkeypatch):
+def test_runtime_frontend_uses_existing_page_distribution_and_management_auth(
+    tmp_path, monkeypatch
+):
     from app.api.ext_pages import router as pages_router
     from app.api.import_center import router
     from app.services import auth
@@ -267,13 +306,35 @@ def test_runtime_frontend_uses_existing_page_distribution_and_management_auth(tm
     pages = client.get("/api/ext-pages").json()
     assert pages[0]["managed_by"] == "demo.research"
     assert client.get("/api/ext-pages/package:demo.research/bundle.js").status_code == 200
-    assert client.put("/api/ext-pages/package:demo.research/enabled", json={"enabled": False}).status_code == 400
-    assert client.post("/api/extension-packages/demo.research/manage", json={"action": "disable"}, headers={"Origin": "https://evil.example"}).status_code == 403
-    assert client.post("/api/extension-packages/demo.research/manage", json={"action": "disable"}, headers={"Authorization": "Bearer token"}).status_code == 403
+    assert (
+        client.put(
+            "/api/ext-pages/package:demo.research/enabled", json={"enabled": False}
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            "/api/extension-packages/demo.research/manage",
+            json={"action": "disable"},
+            headers={"Origin": "https://evil.example"},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            "/api/extension-packages/demo.research/manage",
+            json={"action": "disable"},
+            headers={"Authorization": "Bearer token"},
+        ).status_code
+        == 403
+    )
     data = bundle("2.0.0")
     preview = store.inspect(data)
-    result = client.post("/api/extension-packages/install", files={"file": ("bundle.zip", data)},
-                         data={"digest": preview["digest"], "revision": preview["revision"], "trusted": "false"})
+    result = client.post(
+        "/api/extension-packages/install",
+        files={"file": ("bundle.zip", data)},
+        data={"digest": preview["digest"], "revision": preview["revision"], "trusted": "false"},
+    )
     assert result.status_code == 403
 
 
@@ -297,7 +358,17 @@ with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 12345)) a
     assert "frontend shell" in client.get("/").text
     assert client.get("/api/extensions/demo.research/status").json() == {"version": "1.0.0"}
 """
-    env = {**os.environ, "DATA_DIR": str(tmp_path), "STATIC_DIR": str(static_dir), "TICKFLOW_API_KEY": "", "AI_API_KEY": "",
-           "AUTH_PASSWORD": "", "WATCHDOG_ENABLED": "false", "BACKTEST_MATRIX_CACHE_PREWARM": "false"}
-    result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=30)
+    env = {
+        **os.environ,
+        "DATA_DIR": str(tmp_path),
+        "STATIC_DIR": str(static_dir),
+        "TICKFLOW_API_KEY": "",
+        "AI_API_KEY": "",
+        "AUTH_PASSWORD": "",
+        "WATCHDOG_ENABLED": "false",
+        "BACKTEST_MATRIX_CACHE_PREWARM": "false",
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=30
+    )
     assert result.returncode == 0, result.stderr[-3000:]

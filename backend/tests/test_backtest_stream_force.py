@@ -4,10 +4,12 @@ SSE 回测按全参数 md5 作 job_key, 已完成任务保留 5 分钟内同 key
 结果 (缓存)。force=1 掺入 job_key 使其不命中缓存必然重算; cancel 从 qs 重算
 同一 key, 必须同步解析 force, 否则强制重跑的任务取消不到。
 """
+
 from __future__ import annotations
 
 import threading
 import time
+from typing import Any, cast
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -23,8 +25,23 @@ def _client() -> TestClient:
 
 
 def test_force_changes_job_key_and_is_stable():
-    args = ("ma_cross", None, "2024-01-01", "2024-12-31", "open_t+1", None, None,
-            0.0002, 5.0, 10, 1.0, 1_000_000.0, "equal", None, None)
+    args = (
+        "ma_cross",
+        None,
+        "2024-01-01",
+        "2024-12-31",
+        "open_t+1",
+        None,
+        None,
+        0.0002,
+        5.0,
+        10,
+        1.0,
+        1_000_000.0,
+        "equal",
+        None,
+        None,
+    )
     cached = bt._make_job_key(*args)
     forced = bt._make_job_key(*args, force=True)
     assert cached != forced
@@ -41,8 +58,23 @@ def test_cancel_resolves_force_key_from_qs(monkeypatch):
     手工往任务表塞一个未完成 job (key 按 force 计算), 走真实 cancel 端点的
     qs→key 解析路径, 不启动任何回测线程。
     """
-    args = ("ma_cross", None, None, None, "open_t+1", None, None,
-            0.0002, 5.0, 10, 1.0, 1_000_000.0, "equal", None, None)
+    args = (
+        "ma_cross",
+        None,
+        None,
+        None,
+        "open_t+1",
+        None,
+        None,
+        0.0002,
+        5.0,
+        10,
+        1.0,
+        1_000_000.0,
+        "equal",
+        None,
+        None,
+    )
     forced_key = bt._make_job_key(*args, force=True)
     job = bt._BacktestJob(forced_key)
     job.cancel_event = threading.Event()
@@ -70,14 +102,31 @@ def test_cancel_resolves_force_true_alias_from_qs(monkeypatch):
 
     曾为预存 bug: stream 侧 FastAPI 解析 bool 接受 1/true, cancel 侧只认 "1"。
     """
-    args = ("ma_cross", None, None, None, "open_t+1", None, None,
-            0.0002, 5.0, 10, 1.0, 1_000_000.0, "equal", None, None)
+    args = (
+        "ma_cross",
+        None,
+        None,
+        None,
+        "open_t+1",
+        None,
+        None,
+        0.0002,
+        5.0,
+        10,
+        1.0,
+        1_000_000.0,
+        "equal",
+        None,
+        None,
+    )
     forced_key = bt._make_job_key(*args, force=True)
     job = bt._BacktestJob(forced_key)
     job.cancel_event = threading.Event()
     monkeypatch.setitem(bt._running_jobs, forced_key, job)
 
-    resp = _client().post("/api/backtest/strategy/cancel", json={"qs": "strategy_id=ma_cross&force=true"})
+    resp = _client().post(
+        "/api/backtest/strategy/cancel", json={"qs": "strategy_id=ma_cross&force=true"}
+    )
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
     assert job.cancel_event.is_set()
@@ -85,13 +134,28 @@ def test_cancel_resolves_force_true_alias_from_qs(monkeypatch):
 
 def test_force_evicts_done_job_within_ttl(monkeypatch):
     """force 连接遇同 key 已完成任务: 丢弃重建 (真正重算), 不回放旧结果。"""
-    args = ("ma_cross", None, None, None, "open_t+1", None, None,
-            0.0002, 5.0, 10, 1.0, 1_000_000.0, "equal", None, None)
+    args = (
+        "ma_cross",
+        None,
+        None,
+        None,
+        "open_t+1",
+        None,
+        None,
+        0.0002,
+        5.0,
+        10,
+        1.0,
+        1_000_000.0,
+        "equal",
+        None,
+        None,
+    )
     forced_key = bt._make_job_key(*args, force=True)
     old_job = bt._BacktestJob(forced_key)
     old_job.done = True
     old_job.finish_ts = time.time()  # TTL 内 (刚完成)
-    old_job.result = {"stats": {"stale": True}}
+    cast(Any, old_job).result = {"stats": {"stale": True}}
     monkeypatch.setitem(bt._running_jobs, forced_key, old_job)
 
     new_job, is_new = bt._acquire_or_evict_job(forced_key, force=True)
@@ -124,8 +188,23 @@ def test_cancel_resolves_minute_fill_and_regime_filter(monkeypatch):
     """
     from urllib.parse import quote
 
-    args = ("ma_cross", None, None, None, "open_t+1", None, None,
-            0.0002, 5.0, 10, 1.0, 1_000_000.0, "equal", None, None)
+    args = (
+        "ma_cross",
+        None,
+        None,
+        None,
+        "open_t+1",
+        None,
+        None,
+        0.0002,
+        5.0,
+        10,
+        1.0,
+        1_000_000.0,
+        "equal",
+        None,
+        None,
+    )
     regime_json = '{"states":["bull","shake"]}'
     key = bt._make_job_key(*args, minute_fill=True, regime_filter=regime_json)
     job = bt._BacktestJob(key)
@@ -150,8 +229,23 @@ def test_cancel_resolves_minute_fill_and_regime_filter(monkeypatch):
 
 def test_cancel_resolves_all_py_bool_aliases(monkeypatch):
     """force=on/yes 等别名与 force=1 必须算出同一 key (对齐 pydantic v2)。"""
-    args = ("ma_cross", None, None, None, "open_t+1", None, None,
-            0.0002, 5.0, 10, 1.0, 1_000_000.0, "equal", None, None)
+    args = (
+        "ma_cross",
+        None,
+        None,
+        None,
+        "open_t+1",
+        None,
+        None,
+        0.0002,
+        5.0,
+        10,
+        1.0,
+        1_000_000.0,
+        "equal",
+        None,
+        None,
+    )
     forced_key = bt._make_job_key(*args, force=True)
     for alias in ("force=on", "force=yes", "force=ON"):
         job = bt._BacktestJob(forced_key)

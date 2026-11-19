@@ -22,9 +22,7 @@ def test_dev_version_matches_package_json():
 
 def test_frozen_reads_mepass_package_json(monkeypatch, tmp_path):
     """frozen 模式: 从 _MEIPASS/package.json 读版本 (tsp.spec 收集的那份)。"""
-    (tmp_path / "package.json").write_text(
-        json.dumps({"version": "9.9.9"}), encoding="utf-8"
-    )
+    (tmp_path / "package.json").write_text(json.dumps({"version": "9.9.9"}), encoding="utf-8")
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
     assert app_pkg._load_version() == "9.9.9"

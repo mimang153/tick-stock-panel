@@ -13,8 +13,10 @@ TDX_AI_DATA_LIB 指向), 结论通过临时 JSON 文件回传。
     格式 + 连通性; 服务端明确拒绝凭据/额度时拒绝保存。
     通过连接探测仍不代表所有数据接口的权限均可用。
 """
+
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -38,6 +40,91 @@ _PROBE_ENV_WORKER = "TDX_PROBE_WORKER"
 _SCRIPT = "from app.plugins.tdxquant.probe import run_worker; run_worker()"
 
 
+class _ProbeReporter:
+    def __init__(self, key: str, tmp: Path) -> None:
+        self.key = key
+        self.tmp = tmp
+        self.progress = tmp / "progress.json" if str(tmp) else None
+
+    def stage(self, name: str, **extra) -> None:
+        if self.progress is None:
+            return
+        with contextlib.suppress(Exception):
+            self.progress.write_text(json.dumps({"stage": name, **extra}), encoding="utf-8")
+
+    def report(self, payload: dict) -> None:
+        if self.key and payload.get("reason"):
+            payload["reason"] = str(payload["reason"]).replace(self.key, "[redacted]")
+        encoded = json.dumps(payload)
+        # Windows console=False 下 stdout 被 _guard_streams 替换为空流,
+        # 即使父进程 capture_output 也收不到输出, 必须用文件回传结论。
+        # 普通进程仍同时写 stdout, 供父进程与测试读取同一份协议结果。
+        try:
+            (self.tmp / "result.json").write_text(encoded, encoding="utf-8")
+        except OSError:
+            logger.warning("TdxQuant 探测结果文件写入失败")
+        sys.stdout.write(f"{encoded}\n")
+
+
+def _probe_load_native(key: str, tmp: Path, reporter: _ProbeReporter):
+    from app.plugins.tdxquant import client as tc
+
+    reporter.stage("materialize")
+    dll = tc.materialize_lib(key, tmp)
+    os.environ[tc.LIB_ENV] = str(dll)
+
+    reporter.stage("load_dll")
+    from tdxaidata.tdxaidata import _NativeTdxAiData
+
+    return _NativeTdxAiData.get_instance()
+
+
+def _probe_reachable(native, key: str, reporter: _ProbeReporter) -> bool:
+    from app.plugins.tdxquant import client as tc
+
+    # 连通性判定: 快照端点不依赖 token 鉴权, 拿到数据即证明
+    # 服务器可达 + DLL 正常。轮询容忍 DLL 冷启动的未就绪窗口。
+    reporter.stage("start")
+    for _ in range(3):
+        try:
+            raw = native.get_market_snapshot_batch("600519.SH", "Now")
+            tc._raise_response_error(raw, key)
+            from tdxaidata import tqs
+
+            if tqs._clean(raw):
+                return True
+        except tc.TdxQuantAuthError as exc:
+            reporter.stage("done", ok=False)
+            reporter.report({"ok": False, "reason": str(exc)})
+            return False
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(1.2)
+    reporter.stage("done", ok=False)
+    reporter.report({"ok": False, "reason": "行情服务器连接失败(网络不可达)"})
+    return False
+
+
+def _probe_auth_aux(native, key: str, reporter: _ProbeReporter) -> str | None:
+    from app.plugins.tdxquant import client as tc
+
+    # 日K成功仅作辅助信号(会话按 IP 复用时错误 Key 也能通过), 明确拒绝则保留原因。
+    reporter.stage("auth")
+    try:
+        raw = native.get_his_dats("600519.SH", "", "2026-01-01 00:00:00", "1d", "none", 3)
+        from tdxaidata import tqs
+
+        tc._raise_response_error(raw, key)
+        v = tqs._clean(raw)
+        return "his_ok" if isinstance(v, dict) and v.get("Date") else "his_empty"
+    except tc.TdxQuantAuthError as exc:
+        reporter.stage("done", ok=False)
+        reporter.report({"ok": False, "reason": str(exc)})
+        return None
+    except Exception:  # noqa: BLE001
+        return "his_exc"
+
+
 def run_worker() -> int:
     """探测 worker — 必须在独立子进程内执行 (见 run 的拉起方式)。
 
@@ -48,90 +135,21 @@ def run_worker() -> int:
     key = os.environ.pop(_PROBE_ENV_KEY, "")
     tmp = Path(os.environ.pop(_PROBE_ENV_TMP, ""))
     os.environ.pop(_PROBE_ENV_WORKER, None)
-    progress = tmp / "progress.json" if str(tmp) else None
-
-    def stage(name: str, **extra) -> None:
-        if progress is None:
-            return
-        try:
-            progress.write_text(json.dumps({"stage": name, **extra}), encoding="utf-8")
-        except Exception:  # noqa: BLE001
-            pass
-
-    def report(payload: dict) -> None:
-        if key and payload.get("reason"):
-            payload["reason"] = str(payload["reason"]).replace(key, "[redacted]")
-        encoded = json.dumps(payload)
-        # Windows console=False 下 stdout 被 _guard_streams 替换为空流,
-        # 即使父进程 capture_output 也收不到 print, 必须用文件回传结论。
-        try:
-            (tmp / "result.json").write_text(encoded, encoding="utf-8")
-        except OSError:
-            logger.warning("TdxQuant 探测结果文件写入失败")
-        print(encoded)
+    reporter = _ProbeReporter(key, tmp)
 
     try:
-        stage("imports")
-        from app.plugins.tdxquant import client as tc
-
-        stage("materialize")
-        dll = tc.materialize_lib(key, tmp)
-        os.environ[tc.LIB_ENV] = str(dll)
-
-        stage("load_dll")
-        from tdxaidata.tdxaidata import _NativeTdxAiData
-
-        native = _NativeTdxAiData.get_instance()
-
-        # 连通性判定: 快照端点不依赖 token 鉴权, 拿到数据即证明
-        # 服务器可达 + DLL 正常。轮询容忍 DLL 冷启动的未就绪窗口。
-        stage("start")
-        reachable = False
-        for _ in range(3):
-            try:
-                raw = native.get_market_snapshot_batch("600519.SH", "Now")
-                tc._raise_response_error(raw, key)
-                from tdxaidata import tqs
-
-                if tqs._clean(raw):
-                    reachable = True
-                    break
-            except tc.TdxQuantAuthError as exc:
-                stage("done", ok=False)
-                report({"ok": False, "reason": str(exc)})
-                return 0
-            except Exception:  # noqa: BLE001
-                pass
-            time.sleep(1.2)
-        if not reachable:
-            stage("done", ok=False)
-            report({"ok": False, "reason": "行情服务器连接失败(网络不可达)"})
+        reporter.stage("imports")
+        native = _probe_load_native(key, tmp, reporter)
+        if not _probe_reachable(native, key, reporter):
             return 0
-
-        # 日K成功仅作辅助信号(会话按 IP 复用时错误 Key 也能通过), 明确拒绝则保留原因。
-        stage("auth")
-        aux = ""
-        try:
-            raw = native.get_his_dats(
-                "600519.SH", "", "2026-01-01 00:00:00", "1d", "none", 3
-            )
-            from tdxaidata import tqs
-
-            tc._raise_response_error(raw, key)
-            v = tqs._clean(raw)
-            aux = "his_ok" if isinstance(v, dict) and v.get("Date") else "his_empty"
-        except tc.TdxQuantAuthError as exc:
-            stage("done", ok=False)
-            report({"ok": False, "reason": str(exc)})
+        aux = _probe_auth_aux(native, key, reporter)
+        if aux is None:
             return 0
-        except Exception:  # noqa: BLE001
-            aux = "his_exc"
-
-        stage("done", ok=True)
-        report({"ok": True, "reason": "", "aux": aux})
+        reporter.stage("done", ok=True)
+        reporter.report({"ok": True, "reason": "", "aux": aux})
     except Exception as exc:  # noqa: BLE001
-        stage("exception", reason=str(exc)[:300])
-        report({"ok": False, "reason": str(exc)[:300]})
+        reporter.stage("exception", reason=str(exc)[:300])
+        reporter.report({"ok": False, "reason": str(exc)[:300]})
     return 0
 
 
@@ -184,7 +202,10 @@ def run(api_key: str, timeout_s: float = 60.0) -> tuple[bool, str]:
             )
         except subprocess.TimeoutExpired:
             stage = _read_stage(tmp_dir)
-            return False, f"探测超时({timeout_s:.0f}s, 停在阶段[{stage}]) — 原生握手约需 30s, 请检查网络后重试"
+            return (
+                False,
+                f"探测超时({timeout_s:.0f}s, 停在阶段[{stage}]) — 原生握手约需 30s, 请检查网络后重试",
+            )
         except OSError:
             return False, "探测进程启动失败，请检查客户端安装与运行权限"
         if proc.returncode == 0:

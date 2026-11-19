@@ -11,9 +11,11 @@
   - _resolve_minute_fill 接收 float64 2D 数组, 按整数列索引访问。
 .cast(Float64) 保证 to_numpy 不退化, 整数索引避免列名依赖。
 """
+
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from typing import Any, cast
 
 import numpy as np
 import polars as pl
@@ -32,17 +34,20 @@ def _sample_minute_df(symbol: str = "000001.SZ") -> pl.DataFrame:
     volume/amount 按数据契约: volume 单位手, amount 单位元 = 价 x 手 x 100。
     """
     base = datetime(2024, 1, 2, 9, 31)
-    return pl.DataFrame({
-        "symbol": [symbol] * 4,
-        "datetime": [base.replace(hour=h, minute=m) for h, m in
-                     [(9, 31), (10, 0), (14, 0), (14, 57)]],
-        "open": [10.0, 10.5, 10.8, 10.6],
-        "high": [10.6, 10.7, 10.9, 10.7],
-        "low": [9.9, 10.4, 10.7, 10.5],
-        "close": [10.2, 10.6, 10.85, 10.65],
-        "volume": [100, 200, 150, 120],
-        "amount": [10.2 * 100 * 100, 10.6 * 200 * 100, 10.85 * 150 * 100, 10.65 * 120 * 100],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": [symbol] * 4,
+            "datetime": [
+                base.replace(hour=h, minute=m) for h, m in [(9, 31), (10, 0), (14, 0), (14, 57)]
+            ],
+            "open": [10.0, 10.5, 10.8, 10.6],
+            "high": [10.6, 10.7, 10.9, 10.7],
+            "low": [9.9, 10.4, 10.7, 10.5],
+            "close": [10.2, 10.6, 10.85, 10.65],
+            "volume": [100, 200, 150, 120],
+            "amount": [10.2 * 100 * 100, 10.6 * 200 * 100, 10.85 * 150 * 100, 10.65 * 120 * 100],
+        }
+    )
 
 
 def _to_compact_arr(mdf: pl.DataFrame) -> np.ndarray:
@@ -88,7 +93,7 @@ def test_resolve_minute_fill_vwap():
     arr = _to_compact_arr(_sample_minute_df())
     total_amt = 10.2 * 100 * 100 + 10.6 * 200 * 100 + 10.85 * 150 * 100 + 10.65 * 120 * 100
     total_vol = (100 + 200 + 150 + 120) * 100  # 手 → 股
-    vwap = BacktestEngine._resolve_minute_fill(arr, None, "buy")
+    vwap: Any = BacktestEngine._resolve_minute_fill(arr, None, "buy")
     assert vwap == pytest.approx(total_amt / total_vol)
     assert 10.0 < vwap < 11.0  # 量级护栏: 真实均价量级, 拦截缺 x100 的 100 倍错误
 
@@ -96,24 +101,30 @@ def test_resolve_minute_fill_vwap():
 def test_resolve_minute_fill_empty_returns_none():
     """空数组 → None (降级到日K口径)。"""
     assert BacktestEngine._resolve_minute_fill(np.array([]).reshape(0, 6), None, "buy") is None
-    assert BacktestEngine._resolve_minute_fill(None, None, "buy") is None
+    assert BacktestEngine._resolve_minute_fill(cast(Any, None), None, "buy") is None
 
 
 def test_resolve_minute_exit_trigger_uses_next_minute_open():
-    arr = np.array([
-        [10.2, 10.3, 10.1, 10.2, 100, 1020],
-        [10.1, 10.2, 9.8, 9.9, 100, 990],
-        [9.7, 9.8, 9.6, 9.7, 100, 970],
-    ], dtype=np.float64)
+    arr = np.array(
+        [
+            [10.2, 10.3, 10.1, 10.2, 100, 1020],
+            [10.1, 10.2, 9.8, 9.9, 100, 990],
+            [9.7, 9.8, 9.6, 9.7, 100, 970],
+        ],
+        dtype=np.float64,
+    )
 
     assert BacktestEngine._resolve_minute_exit_trigger(arr, 10.0) == 9.7
 
 
 def test_resolve_minute_exit_trigger_without_next_bar_returns_none():
-    arr = np.array([
-        [10.2, 10.3, 10.1, 10.2, 100, 1020],
-        [10.1, 10.2, 9.8, 9.9, 100, 990],
-    ], dtype=np.float64)
+    arr = np.array(
+        [
+            [10.2, 10.3, 10.1, 10.2, 100, 1020],
+            [10.1, 10.2, 9.8, 9.9, 100, 990],
+        ],
+        dtype=np.float64,
+    )
 
     assert BacktestEngine._resolve_minute_exit_trigger(arr, 10.0) is None
 
@@ -158,16 +169,19 @@ def test_minute_fill_price_independent_of_current_close():
     盘中下单那一刻不可能知道当日收盘; 若成交价随收盘漂移, 即为前视。
     """
     base = [10.0, 10.0, 10.0, 10.0]
-    fills = {}
+    fills: dict[float, Any] = {}
     for c5 in (10.6, 9.6):
         close = np.array([*base, c5], dtype=np.float64).reshape(-1, 1)
         ref = float(build_minute_entry_reference(close)[4, 0])
         # 同一盘中路径: 开盘 9.5 / 最高 10.6 / 最低 9.4, 只改最后一根分钟K收盘
-        minute = np.array([
-            [9.5, 10.6, 9.4, 9.5, 100, 9.5 * 100 * 100],
-            [9.5, 10.6, 9.4, 9.5, 100, 9.5 * 100 * 100],
-            [9.5, 10.6, 9.4, c5, 100, c5 * 100 * 100],
-        ], dtype=np.float64)
+        minute = np.array(
+            [
+                [9.5, 10.6, 9.4, 9.5, 100, 9.5 * 100 * 100],
+                [9.5, 10.6, 9.4, 9.5, 100, 9.5 * 100 * 100],
+                [9.5, 10.6, 9.4, c5, 100, c5 * 100 * 100],
+            ],
+            dtype=np.float64,
+        )
         fills[c5] = BacktestEngine._resolve_minute_fill(minute, ref, "buy")
     assert fills[10.6] == pytest.approx(fills[9.6])
     assert 9.5 < fills[10.6] <= 10.6  # 成交价在当日已知的盘中范围内
@@ -179,7 +193,7 @@ class _FakeRepo:
     def __init__(self, df: pl.DataFrame) -> None:
         self._df = df
 
-    def get_minute_by_dates(self, symbols, dates, asset_type="stock"):  # noqa: ANN001
+    def get_minute_by_dates(self, symbols, dates, asset_type="stock"):
         return self._df
 
 
@@ -193,7 +207,10 @@ def test_load_minute_for_fills_returns_compact_arrays():
     df = _sample_minute_df()
     repo = _FakeRepo(df)
     result = BacktestEngine._load_minute_for_fills(
-        repo, ["000001.SZ"], {"2024-01-02"}, "stock",
+        repo,
+        ["000001.SZ"],
+        {"2024-01-02"},
+        "stock",
     )
     assert ("000001.SZ", "2024-01-02") in result
     arr = result[("000001.SZ", "2024-01-02")]
@@ -211,7 +228,10 @@ def test_load_minute_for_fills_handles_missing_dates():
     """缺失的日期分区不报错, 直接跳过。"""
     repo = _FakeRepo(pl.DataFrame())  # 空返回
     result = BacktestEngine._load_minute_for_fills(
-        repo, ["000001.SZ"], {"2024-01-02", "2024-01-03"}, "stock",
+        repo,
+        ["000001.SZ"],
+        {"2024-01-02", "2024-01-03"},
+        "stock",
     )
     assert result == {}
 
@@ -225,21 +245,24 @@ def _ma5_panel(fill_close: float) -> pl.DataFrame:
     closes = [10.0, 10.0, 10.0, 10.0, fill_close, 10.0]
     rows = []
     for i, close in enumerate(closes):
-        window = closes[max(0, i - 4): i + 1]
+        window = closes[max(0, i - 4) : i + 1]
         ma5 = float("nan") if i < 4 else sum(window) / 5.0
-        rows.append({
-            "symbol": "A", "name": "A",
-            "date": date(2024, 1, 1) + timedelta(days=i),
-            "open": 9.5 if i == 4 else close,
-            "high": 10.6 if i == 4 else close,
-            "low": 9.4 if i == 4 else close,
-            "close": close,
-            "volume": 1000.0,
-            "score": 1.0,
-            "ma5": ma5,
-            "signal_limit_up": False,
-            "signal_limit_down": False,
-        })
+        rows.append(
+            {
+                "symbol": "A",
+                "name": "A",
+                "date": date(2024, 1, 1) + timedelta(days=i),
+                "open": 9.5 if i == 4 else close,
+                "high": 10.6 if i == 4 else close,
+                "low": 9.4 if i == 4 else close,
+                "close": close,
+                "volume": 1000.0,
+                "score": 1.0,
+                "ma5": ma5,
+                "signal_limit_up": False,
+                "signal_limit_down": False,
+            }
+        )
     return pl.DataFrame(rows)
 
 
@@ -267,25 +290,27 @@ def test_polars_panel_minute_fill_independent_of_current_close():
     建仓口径次日开盘 + 分钟成交。成交日盘中 open=9.5 / high=10.6,
     参考线若含收盘则会随 c5 漂移, 成交价跟着变。
     """
-    fills = {}
-    minute = pl.DataFrame({
-        "symbol": ["A", "A"],
-        "datetime": [
-            datetime(2024, 1, 5, 9, 31),
-            datetime(2024, 1, 5, 10, 0),
-        ],
-        "open": [9.5, 9.5],
-        "high": [10.6, 10.6],
-        "low": [9.4, 9.4],
-        "close": [9.5, 9.5],
-        "volume": [100.0, 100.0],
-        "amount": [9.5 * 100.0 * 100, 9.5 * 100.0 * 100],
-    })
+    fills: dict[float, Any] = {}
+    minute = pl.DataFrame(
+        {
+            "symbol": ["A", "A"],
+            "datetime": [
+                datetime(2024, 1, 5, 9, 31),
+                datetime(2024, 1, 5, 10, 0),
+            ],
+            "open": [9.5, 9.5],
+            "high": [10.6, 10.6],
+            "low": [9.4, 9.4],
+            "close": [9.5, 9.5],
+            "volume": [100.0, 100.0],
+            "amount": [9.5 * 100.0 * 100, 9.5 * 100.0 * 100],
+        }
+    )
     for c5 in (10.6, 9.6):
         panel = _ma5_panel(c5)
         entries = pl.Series([False, False, False, True, False, False])
         exits = pl.Series([False] * 6)
-        result = BacktestEngine(repo=_FakeRepo(minute)).simulate_portfolio(
+        result = BacktestEngine(repo=cast(Any, _FakeRepo(minute))).simulate_portfolio(
             panel,
             entries,
             exits,

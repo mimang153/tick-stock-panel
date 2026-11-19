@@ -10,9 +10,11 @@ GenericHTTPProvider.get_intraday_batch, 后者用 datetime.now() (服务器本�
 fetch_intraday_custom_batch 对未实现 get_intraday_batch 的源回退 get_minute 时,
 窗口已经用 cn_now() 构造, 这里对齐同一口径。
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Any, cast
 
 import pytest
 
@@ -38,25 +40,31 @@ def _host_clock(instant: datetime, host_utc_offset_hours: int) -> type[datetime]
     return _Clock
 
 
-def _capture_window(monkeypatch: pytest.MonkeyPatch, instant: datetime, host_offset: int) -> tuple[str, str]:
+def _capture_window(
+    monkeypatch: pytest.MonkeyPatch, instant: datetime, host_offset: int
+) -> tuple[str | None, str | None]:
     clock = _host_clock(instant, host_offset)
     monkeypatch.setattr(provider_module, "datetime", clock)
     monkeypatch.setattr(market_time, "datetime", clock)
-    provider = provider_module.GenericHTTPProvider(CustomSourceConfig(
-        name="test_source",
-        display_name="Test Source",
-        datasets={"full_minute": DatasetConfig(
-            url="https://example.test/full_minute",
-            field_map={name: name for name in _MINUTE_FIELDS},
-        )},
-    ))
+    provider = provider_module.GenericHTTPProvider(
+        CustomSourceConfig(
+            name="test_source",
+            display_name="Test Source",
+            datasets={
+                "full_minute": DatasetConfig(
+                    url="https://example.test/full_minute",
+                    field_map={name: name for name in _MINUTE_FIELDS},
+                )
+            },
+        )
+    )
     captured: dict = {}
 
     def request_rows(cfg, **kwargs):
         captured.update(kwargs)
         return []
 
-    provider._request_rows = request_rows
+    cast(Any, provider)._request_rows = request_rows
     try:
         provider.get_intraday_batch(["600000.SH"])
     finally:
@@ -70,11 +78,19 @@ BEIJING = timezone(timedelta(hours=8))
 @pytest.mark.parametrize(
     ("beijing_now", "expected"),
     [
-        (datetime(2026, 9, 16, 9, 45, tzinfo=BEIJING), ("2026-09-16T00:00:00", "2026-09-16T09:45:00")),
-        (datetime(2026, 9, 16, 14, 30, tzinfo=BEIJING), ("2026-09-16T00:00:00", "2026-09-16T14:30:00")),
+        (
+            datetime(2026, 9, 16, 9, 45, tzinfo=BEIJING),
+            ("2026-09-16T00:00:00", "2026-09-16T09:45:00"),
+        ),
+        (
+            datetime(2026, 9, 16, 14, 30, tzinfo=BEIJING),
+            ("2026-09-16T00:00:00", "2026-09-16T14:30:00"),
+        ),
     ],
 )
-def test_intraday_batch_window_is_beijing_wallclock_on_utc_host(monkeypatch, beijing_now, expected) -> None:
+def test_intraday_batch_window_is_beijing_wallclock_on_utc_host(
+    monkeypatch, beijing_now, expected
+) -> None:
     assert _capture_window(monkeypatch, beijing_now, host_offset=0) == expected
 
 
@@ -82,5 +98,6 @@ def test_intraday_batch_window_unchanged_on_beijing_host(monkeypatch) -> None:
     """北京时区主机 (如国内桌面端) 上窗口与修改前逐字一致。"""
     beijing_now = datetime(2026, 9, 16, 9, 45, tzinfo=BEIJING)
     assert _capture_window(monkeypatch, beijing_now, host_offset=8) == (
-        "2026-09-16T00:00:00", "2026-09-16T09:45:00",
+        "2026-09-16T00:00:00",
+        "2026-09-16T09:45:00",
     )

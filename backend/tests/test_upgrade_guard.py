@@ -3,6 +3,7 @@
 模拟完整生命周期: v1 基线 → 用户改动 (v1 扫描备份) → 模拟升级到 v2
 (改写磁盘与清单) → v2 扫描生成对比报告 → 按类恢复。
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -16,7 +17,8 @@ from app.services import upgrade_guard
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SPEC = importlib.util.spec_from_file_location(
-    "generate_manifest", _REPO_ROOT / "scripts" / "generate_manifest.py",
+    "generate_manifest",
+    _REPO_ROOT / "scripts" / "generate_manifest.py",
 )
 assert _SPEC is not None and _SPEC.loader is not None
 _generate_manifest = importlib.util.module_from_spec(_SPEC)
@@ -57,12 +59,12 @@ def test_disabled_without_manifest(tmp_path: Path) -> None:
 def test_scan_classifies_and_backs_up(prog: Path, tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(upgrade_guard, "__version__", "v1.0.0")
     data = tmp_path / "data"
-    (prog / "app" / "a.py").write_text("A_USER\n", encoding="utf-8")          # 修改
+    (prog / "app" / "a.py").write_text("A_USER\n", encoding="utf-8")  # 修改
     (prog / "app" / "custom" / "ext.py").write_text("EXT\n", encoding="utf-8")  # 新增
     (prog / "app" / "__pycache__").mkdir()
-    (prog / "app" / "__pycache__" / "a.pyc").write_bytes(b"\x00")              # 排除项
+    (prog / "app" / "__pycache__" / "a.pyc").write_bytes(b"\x00")  # 排除项
     (prog / "data").mkdir(exist_ok=True)
-    (prog / "data" / "inside.txt").write_text("x", encoding="utf-8")          # data 排除
+    (prog / "data" / "inside.txt").write_text("x", encoding="utf-8")  # data 排除
 
     guard = upgrade_guard.UpgradeGuard(data, root=prog)
     status = guard.scan()
@@ -210,8 +212,10 @@ def test_report_failure_preserves_previous_backup_and_retries(prog, tmp_path, mo
     _write_manifest(prog, "v2.0.0")
     guard = upgrade_guard.UpgradeGuard(data, root=prog)
     with monkeypatch.context() as failure:
+
         def fail(*args):
             raise OSError("report write failed")
+
         failure.setattr(guard, "_build_report", fail)
         with pytest.raises(OSError, match="report write failed"):
             guard.scan()
@@ -315,8 +319,10 @@ def test_failed_upgrade_state_commit_preserves_previous_archive(prog, tmp_path, 
     monkeypatch.setattr(upgrade_guard, "__version__", "v3.0.0")
     _write_manifest(prog, "v3.0.0")
     guard = upgrade_guard.UpgradeGuard(data, root=prog)
+
     def fail(state):
         raise OSError("state commit failed")
+
     monkeypatch.setattr(guard, "_save_state", fail)
     with pytest.raises(OSError, match="state commit failed"):
         guard.scan()
@@ -326,14 +332,19 @@ def test_failed_upgrade_state_commit_preserves_previous_archive(prog, tmp_path, 
     assert (Path(old_report["dir"]) / "files" / "app" / "a.py").read_text() == "USER_1"
 
 
-def test_legacy_backup_and_historical_reports_migrate_without_touching_manual_exports(prog, tmp_path, monkeypatch):
+def test_legacy_backup_and_historical_reports_migrate_without_touching_manual_exports(
+    prog, tmp_path, monkeypatch
+):
     data = tmp_path / "data"
     base = data / "upgrade_guard"
     legacy = base / "live" / "app" / "a.py"
     legacy.parent.mkdir(parents=True)
     legacy.write_text("LEGACY_USER", encoding="utf-8")
     manifest = json.loads((prog / "app" / upgrade_guard.MANIFEST_NAME).read_text())
-    (base / "state.json").write_text(json.dumps({"last_version": "v1.0.0", "manifest_snapshot": manifest["files"]}), encoding="utf-8")
+    (base / "state.json").write_text(
+        json.dumps({"last_version": "v1.0.0", "manifest_snapshot": manifest["files"]}),
+        encoding="utf-8",
+    )
     old_report = base / "reports" / "v0.0.0_to_v1.0.0_20260101_000000"
     old_report.mkdir(parents=True)
     (old_report / "report.json").write_text('{"id": "old"}', encoding="utf-8")
@@ -383,7 +394,9 @@ def test_partial_report_is_discarded_without_changing_backup(prog, tmp_path, mon
         return write(path, text, **kwargs)
 
     monkeypatch.setattr(upgrade_guard.shutil, "copy2", fail_copy if stage == "copy" else copy)
-    monkeypatch.setattr(upgrade_guard, "atomic_write_text", fail_write if stage == "report_write" else write)
+    monkeypatch.setattr(
+        upgrade_guard, "atomic_write_text", fail_write if stage == "report_write" else write
+    )
     with pytest.raises(PermissionError):
         guard.scan()
     assert guard._state_path.read_bytes() == state
@@ -462,7 +475,12 @@ def test_api_scan_failure_returns_retryable_error_and_keeps_status(prog, tmp_pat
     with guard._operation():
         assert client.post("/api/upgrade-guard/scan").status_code == 409
         assert client.post("/api/upgrade-guard/dismiss-report").status_code == 409
-        assert client.post("/api/upgrade-guard/restore", json={"report_id": "any", "relpath": "app/a.py"}).status_code == 409
+        assert (
+            client.post(
+                "/api/upgrade-guard/restore", json={"report_id": "any", "relpath": "app/a.py"}
+            ).status_code
+            == 409
+        )
 
     def fail(files):
         raise PermissionError("private diagnostic")
@@ -489,7 +507,9 @@ def test_api_disabled_status(prog, tmp_path):
     app.include_router(router)
     app.state.upgrade_guard = upgrade_guard.UpgradeGuard(tmp_path / "data", root=prog)
     assert TestClient(app).get("/api/upgrade-guard/status").json() == {
-        "enabled": False, "reason": "manifest_missing", "scanning": False,
+        "enabled": False,
+        "reason": "manifest_missing",
+        "scanning": False,
     }
 
 
@@ -586,10 +606,30 @@ def test_api_upgrade_restore_and_dismiss_refresh_current_backup(prog, tmp_path, 
     app.state.upgrade_guard = guard = upgrade_guard.UpgradeGuard(data, root=prog)
     report = client.post("/api/upgrade-guard/scan").json()["pending_report"]
     assert report["counts"]["restorable"] == 1
-    assert client.post("/api/upgrade-guard/restore", json={"report_id": "../outside", "relpath": "app/a.py"}).status_code == 400
-    assert client.post("/api/upgrade-guard/restore", json={"report_id": "missing", "relpath": "app/a.py"}).status_code == 404
-    assert client.post("/api/upgrade-guard/restore", json={"report_id": report["id"], "relpath": "../outside"}).status_code == 400
-    assert client.post("/api/upgrade-guard/restore", json={"report_id": report["id"], "relpath": "app/a.py"}).status_code == 200
+    assert (
+        client.post(
+            "/api/upgrade-guard/restore", json={"report_id": "../outside", "relpath": "app/a.py"}
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            "/api/upgrade-guard/restore", json={"report_id": "missing", "relpath": "app/a.py"}
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/api/upgrade-guard/restore", json={"report_id": report["id"], "relpath": "../outside"}
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            "/api/upgrade-guard/restore", json={"report_id": report["id"], "relpath": "app/a.py"}
+        ).status_code
+        == 200
+    )
     status = client.get("/api/upgrade-guard/status").json()
     assert status["modified"] == ["app/a.py"]
     assert (Path(status["backup_dir"]) / "app" / "a.py").read_text() == "USER"
@@ -610,6 +650,10 @@ def test_custom_data_directory_is_never_backed_up_into_itself(prog, monkeypatch)
         status = guard.scan()
         assert status["modified"] == ["app/a.py"]
         assert status["added"] == []
-        assert sorted(path.relative_to(guard.live_dir).as_posix() for path in guard.live_dir.rglob("*") if path.is_file()) == ["app/a.py"]
+        assert sorted(
+            path.relative_to(guard.live_dir).as_posix()
+            for path in guard.live_dir.rglob("*")
+            if path.is_file()
+        ) == ["app/a.py"]
         assert list((guard.state_dir / "snapshots").iterdir()) == [guard.live_dir]
     assert (data / "manual.zip").read_bytes() == b"manual export"

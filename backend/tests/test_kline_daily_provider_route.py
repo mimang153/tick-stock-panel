@@ -1,6 +1,8 @@
 """详情缺数补拉必须遵循日K/复权数据源及查询窗口。"""
+
 from datetime import date
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import polars as pl
@@ -18,12 +20,21 @@ DAY = date(2026, 11, 4)
 
 @pytest.mark.parametrize("asset_type", ["stock", "etf", "index"])
 @pytest.mark.parametrize("has_rows", [False, True])
-def test_daily_metadata_carries_asset_type_without_rounding_prices(monkeypatch, asset_type, has_rows):
+def test_daily_metadata_carries_asset_type_without_rounding_prices(
+    monkeypatch, asset_type, has_rows
+):
     from app.services import daily_bootstrap
 
-    frame = pl.DataFrame({"date": [DAY], "open": [0.751], "high": [0.828], "low": [0.747], "close": [0.827]})
-    repo = SimpleNamespace(resolve_asset_type=lambda symbol: asset_type, get_daily_asset=lambda *args: frame if has_rows else pl.DataFrame())
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo)), headers={})
+    frame = pl.DataFrame(
+        {"date": [DAY], "open": [0.751], "high": [0.828], "low": [0.747], "close": [0.827]}
+    )
+    repo = SimpleNamespace(
+        resolve_asset_type=lambda symbol: asset_type,
+        get_daily_asset=lambda *args: frame if has_rows else pl.DataFrame(),
+    )
+    request: Any = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(repo=repo)), headers={}
+    )
     monkeypatch.setattr(api, "_get_stock_info", lambda *args: {})
     monkeypatch.setattr(api, "_get_asset_info", lambda *args: {})
     monkeypatch.setattr(api, "_compress_on", lambda *args: False)
@@ -38,14 +49,25 @@ def test_daily_metadata_carries_asset_type_without_rounding_prices(monkeypatch, 
 
 @pytest.fixture
 def route(monkeypatch, tmp_path):
-    frame = pl.DataFrame({
-        "symbol": [ETF], "date": [DAY], "open": [1.0], "high": [1.0], "low": [1.0],
-        "close": [1.0], "volume": [100.0], "amount": [100.0],
-    })
+    frame = pl.DataFrame(
+        {
+            "symbol": [ETF],
+            "date": [DAY],
+            "open": [1.0],
+            "high": [1.0],
+            "low": [1.0],
+            "close": [1.0],
+            "volume": [100.0],
+            "amount": [100.0],
+        }
+    )
     repo = KlineRepository(DataStore(tmp_path))
     repo.save_etf_instruments(pl.DataFrame({"symbol": [ETF], "name": ["test"]}))
     monkeypatch.setattr(repo, "get_daily_asset", lambda *a: pl.DataFrame())
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo, capabilities=CapabilitySet())), headers={})
+    request: Any = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(repo=repo, capabilities=CapabilitySet())),
+        headers={},
+    )
     calls = []
 
     class Provider:
@@ -94,9 +116,13 @@ def test_detail_adjustment_uses_selected_source_without_tickflow_permission(monk
     get_factors = Mock(return_value=factors)
     monkeypatch.setattr(kline_sync.preferences, "get_adj_factor_provider", lambda: "test")
     monkeypatch.setattr(custom, "provider_has_dataset", lambda *a: True)
-    monkeypatch.setattr(custom, "get_provider", lambda _: SimpleNamespace(get_adj_factors=get_factors))
+    monkeypatch.setattr(
+        custom, "get_provider", lambda _: SimpleNamespace(get_adj_factors=get_factors)
+    )
     monkeypatch.setattr(kline_sync, "get_client", Mock(side_effect=AssertionError("wrong source")))
-    assert kline_sync.fetch_adj_factor_single(ETF, asset_type="etf", capset=CapabilitySet()).equals(factors)
+    assert kline_sync.fetch_adj_factor_single(ETF, asset_type="etf", capset=CapabilitySet()).equals(
+        factors
+    )
     assert get_factors.call_args.kwargs["asset_type"] == "etf"
 
 
@@ -104,8 +130,12 @@ def test_adjustment_failure_cannot_be_published_as_unadjusted_history(monkeypatc
     capset = CapabilitySet()
     capset.grant(Cap.ADJ_FACTOR)
     monkeypatch.setattr(kline_sync.preferences, "get_adj_factor_provider", lambda: "tickflow")
-    monkeypatch.setattr(kline_sync, "get_client", lambda: SimpleNamespace(
-        klines=SimpleNamespace(ex_factors=Mock(side_effect=RuntimeError("source failed"))),
-    ))
+    monkeypatch.setattr(
+        kline_sync,
+        "get_client",
+        lambda: SimpleNamespace(
+            klines=SimpleNamespace(ex_factors=Mock(side_effect=RuntimeError("source failed"))),
+        ),
+    )
     with pytest.raises(kline_sync.ProviderRequestError, match="复权因子"):
         kline_sync.fetch_adj_factor_single(ETF, capset=capset, strict=True)

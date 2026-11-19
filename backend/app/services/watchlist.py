@@ -8,6 +8,7 @@
 旧 schema (单值 ``group_id`` 列) 读取时自动迁移为 ``[group_id]``, 首次写回
 新 schema 前留一份 ``watchlist.parquet.bak`` 备份。
 """
+
 from __future__ import annotations
 
 import json
@@ -39,22 +40,26 @@ _REVISION = 0
 def revision() -> int:
     """自选/分组数据版本号, 每次写操作递增。"""
     return _REVISION
+
+
 _MAX_GROUP_NAME_LENGTH = 24
 DEFAULT_GROUP_COLOR = "sky"
-GROUP_COLORS = frozenset({
-    "sky",
-    "blue",
-    "indigo",
-    "violet",
-    "fuchsia",
-    "rose",
-    "orange",
-    "amber",
-    "lime",
-    "emerald",
-    "teal",
-    "cyan",
-})
+GROUP_COLORS = frozenset(
+    {
+        "sky",
+        "blue",
+        "indigo",
+        "violet",
+        "fuchsia",
+        "rose",
+        "orange",
+        "amber",
+        "lime",
+        "emerald",
+        "teal",
+        "cyan",
+    }
+)
 _ENTRY_SCHEMA = {
     "symbol": pl.Utf8,
     "added_at": pl.Utf8,
@@ -130,11 +135,13 @@ def _read_groups() -> list[dict]:
         if not isinstance(item, dict) or not item.get("id") or not item.get("name"):
             continue
         color = str(item.get("color", DEFAULT_GROUP_COLOR))
-        groups.append({
-            "id": str(item["id"]),
-            "name": str(item["name"]),
-            "color": color if color in GROUP_COLORS else DEFAULT_GROUP_COLOR,
-        })
+        groups.append(
+            {
+                "id": str(item["id"]),
+                "name": str(item["name"]),
+                "color": color if color in GROUP_COLORS else DEFAULT_GROUP_COLOR,
+            }
+        )
     return groups
 
 
@@ -211,12 +218,15 @@ def add_batch(
             for gid in apply_ids:
                 if gid not in gids:
                     gids.append(gid)
-            rows.insert(0, {
-                "symbol": symbol,
-                "added_at": datetime.utcnow().isoformat(timespec="seconds"),
-                "note": note,
-                "group_ids": gids,
-            })
+            rows.insert(
+                0,
+                {
+                    "symbol": symbol,
+                    "added_at": datetime.utcnow().isoformat(timespec="seconds"),
+                    "note": note,
+                    "group_ids": gids,
+                },
+            )
         out = pl.DataFrame(rows, schema=_ENTRY_SCHEMA) if rows else _empty_entries()
         _write_entries(out)
         return out.to_dicts(), added
@@ -357,7 +367,10 @@ def add_to_group(symbol: str, group_id: str) -> list[dict]:
 
 
 def transfer_members(
-    source_group_id: str, target_group_id: str, symbols: list[str], action: str,
+    source_group_id: str,
+    target_group_id: str,
+    symbols: list[str],
+    action: str,
 ) -> tuple[list[dict], int]:
     """一次保存整批成员关系；过期的来源或选择不产生部分写入。"""
     wanted = set(symbols)

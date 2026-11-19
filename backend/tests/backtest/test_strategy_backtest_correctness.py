@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from types import SimpleNamespace
+from typing import Any, cast
 
 import numpy as np
 import polars as pl
@@ -15,7 +16,7 @@ from app.strategy.engine import StrategyDef
 
 
 def _strategy(**kwargs) -> StrategyDef:
-    defaults = dict(
+    defaults: dict[str, Any] = dict(
         meta={"id": "test", "name": "test", "scoring": {}, "params": [], "limit": 100},
         basic_filter={"enabled": True, "amount_min": 100.0},
         entry_signals=[],
@@ -55,20 +56,26 @@ class _EngineStub:
     def __init__(self, panel: pl.DataFrame, data_dir=None) -> None:
         self.panel = panel
         self.repo = _RepoStub(data_dir)
-        self.load_args = None
+        self.load_args: tuple | None = None
         self.load_count = 0
         self.sim_panel: pl.DataFrame | None = None
         self.sim_matrix = None
         self.sim_entries: pl.Series | None = None
 
-    def load_panel(self, symbols, start: date, end: date, columns=None, asset_type: str = "stock") -> pl.DataFrame:
+    def load_panel(
+        self, symbols, start: date, end: date, columns=None, asset_type: str = "stock"
+    ) -> pl.DataFrame:
         self.load_count += 1
         self.load_args = (symbols, start, end)
         self.load_asset_type = asset_type
         return self.panel
 
-    def load_panel_for_backtest(self, symbols, start, end, feature_plan, asset_type="stock") -> pl.DataFrame:
-        return self.load_panel(symbols, start, end, columns=sorted(feature_plan.base_columns), asset_type=asset_type)
+    def load_panel_for_backtest(
+        self, symbols, start, end, feature_plan, asset_type="stock"
+    ) -> pl.DataFrame:
+        return self.load_panel(
+            symbols, start, end, columns=sorted(feature_plan.base_columns), asset_type=asset_type
+        )
 
     def load_market_data_matrix_for_backtest(
         self,
@@ -93,7 +100,17 @@ class _EngineStub:
         )
         return build_market_data_matrix(panel, field_columns=field_columns)
 
-    def simulate_portfolio(self, panel, entries, exits, config, progress_cb=None, cancel_event=None, entry_signal_ids=None, exit_signal_ids=None) -> SimResult:
+    def simulate_portfolio(
+        self,
+        panel,
+        entries,
+        exits,
+        config,
+        progress_cb=None,
+        cancel_event=None,
+        entry_signal_ids=None,
+        exit_signal_ids=None,
+    ) -> SimResult:
         self.sim_panel = panel
         self.sim_entries = entries
         return SimResult(
@@ -126,6 +143,7 @@ class _EngineStub:
 def _migrated_signal_definitions(monkeypatch):
     """注入迁移自内置的信号定义 (信号列定义驱动, 不依赖运行目录)。"""
     from tests.signal_seeds import install_pipeline_caches
+
     install_pipeline_caches(monkeypatch)
 
 
@@ -133,31 +151,37 @@ def test_basic_filter_only_limits_entries_not_panel_rows():
     start = date(2024, 1, 1)
     rows = []
     for i, amount in enumerate([1000.0, 0.0, 1000.0]):
-        rows.append({
-            "symbol": "A",
-            "name": "A",
-            "date": start + timedelta(days=i),
-            "open": 10.0 + i,
-            "high": 10.0 + i,
-            "low": 10.0 + i,
-            "close": 10.0 + i,
-            "volume": 100_000,
-            "amount": amount,
-            "signal_limit_up": False,
-            "signal_limit_down": False,
-        })
+        rows.append(
+            {
+                "symbol": "A",
+                "name": "A",
+                "date": start + timedelta(days=i),
+                "open": 10.0 + i,
+                "high": 10.0 + i,
+                "low": 10.0 + i,
+                "close": 10.0 + i,
+                "volume": 100_000,
+                "amount": amount,
+                "signal_limit_up": False,
+                "signal_limit_down": False,
+            }
+        )
     panel = pl.DataFrame(rows).sort(["symbol", "date"])
     engine = _EngineStub(panel)
-    service = StrategyBacktestService(engine=engine, strategy_engine=_StrategyEngineStub(_strategy()))
+    service = StrategyBacktestService(
+        engine=cast(Any, engine), strategy_engine=cast(Any, _StrategyEngineStub(_strategy()))
+    )
 
-    result = service.run(StrategyBacktestConfig(
-        strategy_id="test",
-        symbols=None,
-        start=start,
-        end=start + timedelta(days=2),
-        matching="close_t",
-        mode="position",
-    ))
+    result = service.run(
+        StrategyBacktestConfig(
+            strategy_id="test",
+            symbols=None,
+            start=start,
+            end=start + timedelta(days=2),
+            matching="close_t",
+            mode="position",
+        )
+    )
 
     assert result.error is None
     assert engine.sim_matrix is not None
@@ -175,45 +199,56 @@ def test_basic_filter_only_limits_entries_not_panel_rows():
 
 def test_non_matrix_strategy_applies_regime_filter_and_reports_config(tmp_path):
     start = date(2024, 1, 1)
-    panel = pl.DataFrame([
-        {
-            "symbol": "A",
-            "name": "A",
-            "date": start + timedelta(days=offset),
-            "open": 10.0,
-            "high": 10.0,
-            "low": 10.0,
-            "close": 10.0,
-            "volume": 1000.0,
-            "amount": 1000.0,
-            "signal_limit_up": False,
-            "signal_limit_down": False,
-        }
-        for offset in range(-1, 3)
-    ]).sort(["symbol", "date"])
-    regime_builder.upsert_regime_history(tmp_path, pl.DataFrame({
-        "date": [
-            start - timedelta(days=1),
-            start,
-            start + timedelta(days=1),
-            start + timedelta(days=2),
-        ],
-        "state": ["weak", "weak", "strong", "strong"],
-        "score": [10, 10, 85, 85],
-    }))
+    panel = pl.DataFrame(
+        [
+            {
+                "symbol": "A",
+                "name": "A",
+                "date": start + timedelta(days=offset),
+                "open": 10.0,
+                "high": 10.0,
+                "low": 10.0,
+                "close": 10.0,
+                "volume": 1000.0,
+                "amount": 1000.0,
+                "signal_limit_up": False,
+                "signal_limit_down": False,
+            }
+            for offset in range(-1, 3)
+        ]
+    ).sort(["symbol", "date"])
+    regime_builder.upsert_regime_history(
+        tmp_path,
+        pl.DataFrame(
+            {
+                "date": [
+                    start - timedelta(days=1),
+                    start,
+                    start + timedelta(days=1),
+                    start + timedelta(days=2),
+                ],
+                "state": ["weak", "weak", "strong", "strong"],
+                "score": [10, 10, 85, 85],
+            }
+        ),
+    )
     engine = _EngineStub(panel, data_dir=tmp_path)
-    service = StrategyBacktestService(engine=engine, strategy_engine=_StrategyEngineStub(_strategy()))
+    service = StrategyBacktestService(
+        engine=cast(Any, engine), strategy_engine=cast(Any, _StrategyEngineStub(_strategy()))
+    )
     regime_filter = {"states": ["strong"]}
 
-    result = service.run(StrategyBacktestConfig(
-        strategy_id="test",
-        symbols=None,
-        start=start,
-        end=start + timedelta(days=2),
-        matching="close_t",
-        mode="position",
-        regime_filter=regime_filter,
-    ))
+    result = service.run(
+        StrategyBacktestConfig(
+            strategy_id="test",
+            symbols=None,
+            start=start,
+            end=start + timedelta(days=2),
+            matching="close_t",
+            mode="position",
+            regime_filter=regime_filter,
+        )
+    )
 
     assert result.error is None
     assert engine.sim_matrix is not None
@@ -229,48 +264,57 @@ def test_non_matrix_strategy_applies_regime_filter_and_reports_config(tmp_path):
 
 def test_regime_filter_matches_raw_five_level_states(tmp_path):
     start = date(2024, 1, 1)
-    panel = pl.DataFrame([
-        {
-            "symbol": "A",
-            "name": "A",
-            "date": start + timedelta(days=offset),
-            "open": 10.0,
-            "high": 10.0,
-            "low": 10.0,
-            "close": 10.0,
-            "volume": 1000.0,
-            "amount": 1000.0,
-            "signal_limit_up": False,
-            "signal_limit_down": False,
-        }
-        for offset in range(-1, 3)
-    ]).sort(["symbol", "date"])
-    regime_builder.upsert_regime_history(tmp_path, pl.DataFrame({
-        "date": [
-            start - timedelta(days=1),
-            start,
-            start + timedelta(days=1),
-            start + timedelta(days=2),
-        ],
-        "state": ["weak", "lean_strong", "strong", "strong"],
-        "score": [10, 60, 85, 85],
-    }))
+    panel = pl.DataFrame(
+        [
+            {
+                "symbol": "A",
+                "name": "A",
+                "date": start + timedelta(days=offset),
+                "open": 10.0,
+                "high": 10.0,
+                "low": 10.0,
+                "close": 10.0,
+                "volume": 1000.0,
+                "amount": 1000.0,
+                "signal_limit_up": False,
+                "signal_limit_down": False,
+            }
+            for offset in range(-1, 3)
+        ]
+    ).sort(["symbol", "date"])
+    regime_builder.upsert_regime_history(
+        tmp_path,
+        pl.DataFrame(
+            {
+                "date": [
+                    start - timedelta(days=1),
+                    start,
+                    start + timedelta(days=1),
+                    start + timedelta(days=2),
+                ],
+                "state": ["weak", "lean_strong", "strong", "strong"],
+                "score": [10, 60, 85, 85],
+            }
+        ),
+    )
 
     def run_with(states: list[str]):
         engine = _EngineStub(panel, data_dir=tmp_path)
         service = StrategyBacktestService(
-            engine=engine,
-            strategy_engine=_StrategyEngineStub(_strategy()),
+            engine=cast(Any, engine),
+            strategy_engine=cast(Any, _StrategyEngineStub(_strategy())),
         )
-        result = service.run(StrategyBacktestConfig(
-            strategy_id="test",
-            symbols=None,
-            start=start,
-            end=start + timedelta(days=2),
-            matching="close_t",
-            mode="position",
-            regime_filter={"states": states},
-        ))
+        result = service.run(
+            StrategyBacktestConfig(
+                strategy_id="test",
+                symbols=None,
+                start=start,
+                end=start + timedelta(days=2),
+                matching="close_t",
+                mode="position",
+                regime_filter={"states": states},
+            )
+        )
         assert result.error is None
         assert engine.sim_matrix is not None
         return engine.sim_matrix.entry[:, 0].tolist()
@@ -283,38 +327,45 @@ def test_regime_filter_matches_raw_five_level_states(tmp_path):
 
 def test_selection_stats_explain_entry_trigger_filtering():
     start = date(2024, 1, 1)
-    panel = pl.DataFrame([
-        {
-            "symbol": symbol,
-            "name": symbol,
-            "date": start,
-            "open": 10.0,
-            "high": 10.0,
-            "low": 10.0,
-            "close": 10.0,
-            "volume": 1000.0,
-            "amount": 1000.0,
-            "signal_limit_up": symbol == "A",
-            "signal_limit_down": False,
-        }
-        for symbol in ("A", "B")
-    ]).sort(["symbol", "date"])
+    panel = pl.DataFrame(
+        [
+            {
+                "symbol": symbol,
+                "name": symbol,
+                "date": start,
+                "open": 10.0,
+                "high": 10.0,
+                "low": 10.0,
+                "close": 10.0,
+                "volume": 1000.0,
+                "amount": 1000.0,
+                "signal_limit_up": symbol == "A",
+                "signal_limit_down": False,
+            }
+            for symbol in ("A", "B")
+        ]
+    ).sort(["symbol", "date"])
     engine = _EngineStub(panel)
     service = StrategyBacktestService(
-        engine=engine,
-        strategy_engine=_StrategyEngineStub(
-            _strategy(entry_signals=["signal_limit_up"]),
+        engine=cast(Any, engine),
+        strategy_engine=cast(
+            Any,
+            _StrategyEngineStub(
+                _strategy(entry_signals=["signal_limit_up"]),
+            ),
         ),
     )
 
-    result = service.run(StrategyBacktestConfig(
-        strategy_id="test",
-        symbols=None,
-        start=start,
-        end=start,
-        matching="close_t",
-        mode="position",
-    ))
+    result = service.run(
+        StrategyBacktestConfig(
+            strategy_id="test",
+            symbols=None,
+            start=start,
+            end=start,
+            matching="close_t",
+            mode="position",
+        )
+    )
 
     assert result.error is None
     assert result.stats["selection"] == {
@@ -326,16 +377,22 @@ def test_selection_stats_explain_entry_trigger_filtering():
 
 
 def test_score_normalizes_inside_strategy_candidate_universe():
-    panel = pl.DataFrame({
-        "symbol": ["A", "B", "C"],
-        "date": [date(2024, 1, 1)] * 3,
-        "factor": [10.0, 20.0, 1000.0],
-    })
+    panel = pl.DataFrame(
+        {
+            "symbol": ["A", "B", "C"],
+            "date": [date(2024, 1, 1)] * 3,
+            "factor": [10.0, 20.0, 1000.0],
+        }
+    )
     universe = pl.Series([True, True, False], dtype=pl.Boolean)
-    strategy = SimpleNamespace(meta={"scoring": {"factor": 1.0}, "order_by": "score", "descending": True})
+    strategy = SimpleNamespace(
+        meta={"scoring": {"factor": 1.0}, "order_by": "score", "descending": True}
+    )
 
-    scored = StrategyBacktestService._apply_score(panel, strategy, None, universe_mask=universe)
-    scores = dict(zip(scored["symbol"].to_list(), scored["score"].to_list()))
+    scored = StrategyBacktestService._apply_score(
+        panel, cast(Any, strategy), None, universe_mask=universe
+    )
+    scores = dict(zip(scored["symbol"].to_list(), scored["score"].to_list(), strict=False))
 
     assert scores["A"] == 0.0
     assert scores["B"] == 100.0
@@ -344,31 +401,52 @@ def test_score_normalizes_inside_strategy_candidate_universe():
 
 def test_full_mode_executes_every_candidate_with_strategy_rules():
     start = date(2024, 1, 1)
-    panel = pl.DataFrame([
-        {"symbol": "A", "name": "A", "date": start, "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0, "volume": 1, "amount": 1000.0, "signal_limit_up": False, "signal_limit_down": False},
-        {"symbol": "A", "name": "A", "date": start + timedelta(days=1), "open": 11.0, "high": 11.0, "low": 11.0, "close": 11.0, "volume": 1, "amount": 0.0, "signal_limit_up": False, "signal_limit_down": False},
-        {"symbol": "A", "name": "A", "date": start + timedelta(days=2), "open": 20.0, "high": 20.0, "low": 20.0, "close": 20.0, "volume": 1, "amount": 1000.0, "signal_limit_up": False, "signal_limit_down": False},
-    ]).sort(["symbol", "date"])
+    panel = pl.DataFrame(
+        [
+            {
+                "symbol": "A",
+                "name": "A",
+                "date": start + timedelta(days=offset),
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "volume": 1,
+                "amount": amount,
+                "signal_limit_up": False,
+                "signal_limit_down": False,
+            }
+            for offset, close, amount in ((0, 10.0, 1000.0), (1, 11.0, 0.0), (2, 20.0, 1000.0))
+        ]
+    ).sort(["symbol", "date"])
 
     engine = BacktestEngine(repo=None)  # type: ignore[arg-type]
-    engine.load_panel_for_backtest = lambda symbols, s, e, plan, asset_type="stock": panel  # type: ignore[method-assign]
+
+    def _load_panel(symbols, s, e, plan, asset_type="stock"):
+        return panel
+
+    object.__setattr__(engine, "load_panel_for_backtest", _load_panel)
     strategy = _strategy(
         filter_fn=lambda df, params: pl.col("date") == start,
         max_hold_days=1,
     )
-    service = StrategyBacktestService(engine=engine, strategy_engine=_StrategyEngineStub(strategy))
+    service = StrategyBacktestService(
+        engine=cast(Any, engine), strategy_engine=cast(Any, _StrategyEngineStub(strategy))
+    )
 
-    result = service.run(StrategyBacktestConfig(
-        strategy_id="test",
-        symbols=None,
-        start=start,
-        end=start,
-        mode="full",
-        matching="open_t+1",
-        fees_pct=0,
-        slippage_bps=0,
-        holding_days=1,
-    ))
+    result = service.run(
+        StrategyBacktestConfig(
+            strategy_id="test",
+            symbols=None,
+            start=start,
+            end=start,
+            mode="full",
+            matching="open_t+1",
+            fees_pct=0,
+            slippage_bps=0,
+            holding_days=1,
+        )
+    )
 
     assert result.error is None
     assert result.stats["full_kind"] == "candidate_execution"
@@ -379,12 +457,46 @@ def test_full_mode_executes_every_candidate_with_strategy_rules():
     assert result.stats["avg_return"] == round(20 / 11 - 1, 4)
 
 
+def _matrix_native_two_day_panel(start: date) -> pl.DataFrame:
+    return pl.DataFrame(
+        [
+            {
+                "symbol": "A",
+                "name": "A",
+                "date": start,
+                "open": 10.0,
+                "high": 10.0,
+                "low": 10.0,
+                "close": 10.0,
+                "volume": 1.0,
+                "amount": 1000.0,
+                "raw_close": 10.0,
+                "raw_high": 10.0,
+                "signal_limit_up": False,
+                "signal_limit_down": False,
+            },
+            {
+                "symbol": "A",
+                "name": "A",
+                "date": start + timedelta(days=1),
+                "open": 11.0,
+                "high": 11.0,
+                "low": 11.0,
+                "close": 11.0,
+                "volume": 1.0,
+                "amount": 1000.0,
+                "raw_close": 11.0,
+                "raw_high": 11.0,
+                "signal_limit_up": False,
+                "signal_limit_down": False,
+            },
+        ]
+    )
+
+
 def test_matrix_native_strategy_uses_shared_orchestrator_path():
     start = date(2024, 1, 1)
-    panel = pl.DataFrame([
-        {"symbol": "A", "name": "A", "date": start, "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0, "volume": 1.0, "amount": 1000.0, "raw_close": 10.0, "raw_high": 10.0, "signal_limit_up": False, "signal_limit_down": False},
-        {"symbol": "A", "name": "A", "date": start + timedelta(days=1), "open": 11.0, "high": 11.0, "low": 11.0, "close": 11.0, "volume": 1.0, "amount": 1000.0, "raw_close": 11.0, "raw_high": 11.0, "signal_limit_up": False, "signal_limit_down": False},
-    ])
+    panel = _matrix_native_two_day_panel(start)
 
     class NativeStrategy:
         def required_fields(self):
@@ -408,16 +520,20 @@ def test_matrix_native_strategy_uses_shared_orchestrator_path():
         matrix_strategy=NativeStrategy(),
         required_features=frozenset({"amount"}),
     )
-    service = StrategyBacktestService(engine=engine, strategy_engine=_StrategyEngineStub(strategy))
+    service = StrategyBacktestService(
+        engine=cast(Any, engine), strategy_engine=cast(Any, _StrategyEngineStub(strategy))
+    )
 
-    result = service.run(StrategyBacktestConfig(
-        strategy_id="native",
-        symbols=None,
-        start=start,
-        end=start + timedelta(days=1),
-        matching="close_t",
-        mode="position",
-    ))
+    result = service.run(
+        StrategyBacktestConfig(
+            strategy_id="native",
+            symbols=None,
+            start=start,
+            end=start + timedelta(days=1),
+            matching="close_t",
+            mode="position",
+        )
+    )
 
     assert result.error is None
     assert engine.sim_matrix is not None
@@ -433,10 +549,7 @@ def test_matrix_native_strategy_uses_shared_orchestrator_path():
 
 def test_matrix_native_accepts_legacy_default_signal_overrides_but_rejects_replacements():
     start = date(2024, 1, 1)
-    panel = pl.DataFrame([
-        {"symbol": "A", "name": "A", "date": start, "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0, "volume": 1.0, "amount": 1000.0, "raw_close": 10.0, "raw_high": 10.0, "signal_limit_up": False, "signal_limit_down": False},
-        {"symbol": "A", "name": "A", "date": start + timedelta(days=1), "open": 11.0, "high": 11.0, "low": 11.0, "close": 11.0, "volume": 1.0, "amount": 1000.0, "raw_close": 11.0, "raw_high": 11.0, "signal_limit_up": False, "signal_limit_down": False},
-    ])
+    panel = _matrix_native_two_day_panel(start)
 
     class NativeStrategy:
         def required_fields(self):
@@ -458,38 +571,41 @@ def test_matrix_native_accepts_legacy_default_signal_overrides_but_rejects_repla
         exit_signals=["signal_custom_exit"],
         required_features=frozenset(),
     )
-    service = StrategyBacktestService(engine=engine, strategy_engine=_StrategyEngineStub(strategy))
+    service = StrategyBacktestService(
+        engine=cast(Any, engine), strategy_engine=cast(Any, _StrategyEngineStub(strategy))
+    )
 
-    accepted = service.run(StrategyBacktestConfig(
-        strategy_id="native_defaults",
-        symbols=None,
-        start=start,
-        end=start + timedelta(days=1),
-        matching="close_t",
-        overrides={
-            "entry_signals": ["signal_custom_entry"],
-            "exit_signals": ["signal_custom_exit"],
-        },
-    ))
+    accepted = service.run(
+        StrategyBacktestConfig(
+            strategy_id="native_defaults",
+            symbols=None,
+            start=start,
+            end=start + timedelta(days=1),
+            matching="close_t",
+            overrides={
+                "entry_signals": ["signal_custom_entry"],
+                "exit_signals": ["signal_custom_exit"],
+            },
+        )
+    )
     assert accepted.error is None
 
-    rejected = service.run(StrategyBacktestConfig(
-        strategy_id="native_defaults",
-        symbols=None,
-        start=start,
-        end=start + timedelta(days=1),
-        matching="close_t",
-        overrides={"entry_signals": ["signal_other"]},
-    ))
+    rejected = service.run(
+        StrategyBacktestConfig(
+            strategy_id="native_defaults",
+            symbols=None,
+            start=start,
+            end=start + timedelta(days=1),
+            matching="close_t",
+            overrides={"entry_signals": ["signal_other"]},
+        )
+    )
     assert rejected.error == "matrix_native 策略的进出场信号由策略协议生成，不支持列信号覆盖"
 
 
 def test_matrix_optimizer_preparation_loads_and_builds_base_data_once():
     start = date(2024, 1, 1)
-    panel = pl.DataFrame([
-        {"symbol": "A", "name": "A", "date": start, "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0, "volume": 1.0, "amount": 1000.0, "raw_close": 10.0, "raw_high": 10.0, "signal_limit_up": False, "signal_limit_down": False},
-        {"symbol": "A", "name": "A", "date": start + timedelta(days=1), "open": 11.0, "high": 11.0, "low": 11.0, "close": 11.0, "volume": 1.0, "amount": 1000.0, "raw_close": 11.0, "raw_high": 11.0, "signal_limit_up": False, "signal_limit_down": False},
-    ])
+    panel = _matrix_native_two_day_panel(start)
 
     class NativeStrategy:
         def required_fields(self):
@@ -519,7 +635,9 @@ def test_matrix_optimizer_preparation_loads_and_builds_base_data_once():
         matrix_strategy=NativeStrategy(),
         required_features=frozenset({"amount"}),
     )
-    service = StrategyBacktestService(engine=engine, strategy_engine=_StrategyEngineStub(strategy))
+    service = StrategyBacktestService(
+        engine=cast(Any, engine), strategy_engine=cast(Any, _StrategyEngineStub(strategy))
+    )
     configs = [
         StrategyBacktestConfig(
             strategy_id="native",
@@ -539,11 +657,14 @@ def test_matrix_optimizer_preparation_loads_and_builds_base_data_once():
     assert prepared.market_data.nbytes > 0
     assert all(result.error is None for result in results)
     assert all(result.stats["shared_market_data"] is True for result in results)
-    assert all(result.stats["shared_market_data_bytes"] == prepared.market_data.nbytes for result in results)
+    assert all(
+        result.stats["shared_market_data_bytes"] == prepared.market_data.nbytes
+        for result in results
+    )
 
 
 def test_matrix_prepare_signature_includes_regime_filter():
-    base = dict(
+    base: dict[str, Any] = dict(
         strategy_id="native",
         symbols=None,
         start=date(2024, 1, 1),
@@ -557,26 +678,32 @@ def test_matrix_prepare_signature_includes_regime_filter():
     )
 
 
+def _matrix_rolling_panel(start: date) -> pl.DataFrame:
+    return pl.DataFrame(
+        [
+            {
+                "symbol": "A",
+                "name": "A",
+                "date": start + timedelta(days=offset),
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "volume": 1000.0,
+                "amount": close * 1000.0,
+                "raw_close": close,
+                "raw_high": close,
+                "signal_limit_up": False,
+                "signal_limit_down": False,
+            }
+            for offset, close in enumerate((10.0, 11.0, 12.0, 11.0, 13.0, 12.0))
+        ]
+    )
+
+
 def test_matrix_cache_preserves_trades_daily_equity_and_core_stats():
     start = date(2024, 1, 1)
-    panel = pl.DataFrame([
-        {
-            "symbol": "A",
-            "name": "A",
-            "date": start + timedelta(days=offset),
-            "open": close,
-            "high": close,
-            "low": close,
-            "close": close,
-            "volume": 1000.0,
-            "amount": close * 1000.0,
-            "raw_close": close,
-            "raw_high": close,
-            "signal_limit_up": False,
-            "signal_limit_down": False,
-        }
-        for offset, close in enumerate((10.0, 11.0, 12.0, 11.0, 13.0, 12.0))
-    ])
+    panel = _matrix_rolling_panel(start)
 
     class RollingEntry:
         def required_fields(self):
@@ -594,9 +721,7 @@ def test_matrix_cache_preserves_trades_daily_equity_and_core_stats():
         lambda symbols, s, e, plan, asset_type="stock", **kwargs: build_market_data_matrix(
             panel,
             field_columns=(
-                set(plan.base_columns)
-                | set(plan.instrument_columns)
-                | set(plan.matrix_columns)
+                set(plan.base_columns) | set(plan.instrument_columns) | set(plan.matrix_columns)
             ),
         )
     )
@@ -609,7 +734,9 @@ def test_matrix_cache_preserves_trades_daily_equity_and_core_stats():
         required_features=frozenset({"amount"}),
         max_hold_days=1,
     )
-    service = StrategyBacktestService(engine=engine, strategy_engine=_StrategyEngineStub(strategy))
+    service = StrategyBacktestService(
+        engine=cast(Any, engine), strategy_engine=cast(Any, _StrategyEngineStub(strategy))
+    )
     config = StrategyBacktestConfig(
         strategy_id="rolling",
         symbols=None,
@@ -647,16 +774,22 @@ def test_matrix_cache_preserves_trades_daily_equity_and_core_stats():
 
 
 def test_apply_score_captures_factor_snapshot_for_candidates():
-    panel = pl.DataFrame({
-        "symbol": ["A", "B", "C"],
-        "date": [date(2024, 1, 1)] * 3,
-        "factor": [10.0, 20.0, 1000.0],
-    })
+    panel = pl.DataFrame(
+        {
+            "symbol": ["A", "B", "C"],
+            "date": [date(2024, 1, 1)] * 3,
+            "factor": [10.0, 20.0, 1000.0],
+        }
+    )
     universe = pl.Series([True, True, False], dtype=pl.Boolean)
-    strategy = SimpleNamespace(meta={"scoring": {"factor": 1.0}, "order_by": "score", "descending": True})
+    strategy = SimpleNamespace(
+        meta={"scoring": {"factor": 1.0}, "order_by": "score", "descending": True}
+    )
 
     snapshot: dict = {}
-    StrategyBacktestService._apply_score(panel, strategy, None, universe_mask=universe, factor_snapshot=snapshot)
+    StrategyBacktestService._apply_score(
+        panel, cast(Any, strategy), None, universe_mask=universe, factor_snapshot=snapshot
+    )
     frame = snapshot["frame"]
     assert frame.columns == ["symbol", "date", "factor"]
     assert frame["symbol"].to_list() == ["A", "B"]  # 非候选行不入快照
@@ -664,32 +797,54 @@ def test_apply_score_captures_factor_snapshot_for_candidates():
 
 def test_full_mode_reports_factor_attribution():
     start = date(2024, 1, 1)
-    panel = pl.DataFrame([
-        {"symbol": "A", "name": "A", "date": start, "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0, "volume": 1, "amount": 1000.0, "signal_limit_up": False, "signal_limit_down": False, "factor": 5.0},
-        {"symbol": "A", "name": "A", "date": start + timedelta(days=1), "open": 11.0, "high": 11.0, "low": 11.0, "close": 11.0, "volume": 1, "amount": 0.0, "signal_limit_up": False, "signal_limit_down": False, "factor": 5.0},
-        {"symbol": "A", "name": "A", "date": start + timedelta(days=2), "open": 20.0, "high": 20.0, "low": 20.0, "close": 20.0, "volume": 1, "amount": 1000.0, "signal_limit_up": False, "signal_limit_down": False, "factor": 5.0},
-    ]).sort(["symbol", "date"])
+    panel = pl.DataFrame(
+        [
+            {
+                "symbol": "A",
+                "name": "A",
+                "date": start + timedelta(days=offset),
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "volume": 1,
+                "amount": amount,
+                "signal_limit_up": False,
+                "signal_limit_down": False,
+                "factor": 5.0,
+            }
+            for offset, close, amount in ((0, 10.0, 1000.0), (1, 11.0, 0.0), (2, 20.0, 1000.0))
+        ]
+    ).sort(["symbol", "date"])
 
     engine = BacktestEngine(repo=None)  # type: ignore[arg-type]
-    engine.load_panel_for_backtest = lambda symbols, s, e, plan, asset_type="stock": panel  # type: ignore[method-assign]
+
+    def _load_panel(symbols, s, e, plan, asset_type="stock"):
+        return panel
+
+    object.__setattr__(engine, "load_panel_for_backtest", _load_panel)
     strategy = _strategy(
         filter_fn=lambda df, params: pl.col("date") == start,
         max_hold_days=1,
     )
     strategy.meta["scoring"] = {"factor": 1.0}
-    service = StrategyBacktestService(engine=engine, strategy_engine=_StrategyEngineStub(strategy))
+    service = StrategyBacktestService(
+        engine=cast(Any, engine), strategy_engine=cast(Any, _StrategyEngineStub(strategy))
+    )
 
-    result = service.run(StrategyBacktestConfig(
-        strategy_id="test",
-        symbols=None,
-        start=start,
-        end=start,
-        mode="full",
-        matching="open_t+1",
-        fees_pct=0,
-        slippage_bps=0,
-        holding_days=1,
-    ))
+    result = service.run(
+        StrategyBacktestConfig(
+            strategy_id="test",
+            symbols=None,
+            start=start,
+            end=start,
+            mode="full",
+            matching="open_t+1",
+            fees_pct=0,
+            slippage_bps=0,
+            holding_days=1,
+        )
+    )
 
     assert result.error is None
     assert result.stats["n_trades"] == 1

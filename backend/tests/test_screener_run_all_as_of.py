@@ -4,6 +4,7 @@
 非法日期在入口被拦下; run_all 收的是无类型 dict, 同样的入参会漏进业务层。
 本文件锁住三条: 非法字符串被拦、非日期类型被拦、合法日期照常放行。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -33,7 +34,9 @@ class _FakeEngine:
     def get(self, sid: str):
         return SimpleNamespace(meta={})
 
-    def run_all(self, context, params_map=None, overrides_map=None, *, strategy_ids=None, parallel=True):
+    def run_all(
+        self, context, params_map=None, overrides_map=None, *, strategy_ids=None, parallel=True
+    ):
         return {sid: _FakeResult() for sid in (strategy_ids or [])}
 
 

@@ -12,6 +12,12 @@ from app.strategy import monitor_rules
 from app.strategy.engine import StrategyEngine
 
 
+def _record(result, log, *items):
+    """记录本次调用参数后返回既定结果(替代 append(x) or result 惯用法)。"""
+    log.extend(items)
+    return result
+
+
 def _strategy_code(strategy_id: str) -> str:
     return f'''import polars as pl
 META = {{
@@ -63,14 +69,16 @@ def test_delete_strategy_is_not_blocked_by_another_broken_file(monkeypatch, tmp_
     cache_path = tmp_path / "user_data" / "strategy_cache.json"
     cache_path.write_text("{}", encoding="utf-8")
 
-    rule = monitor_rules.normalize({
-        "id": "mr_target",
-        "name": "策略监控 · target",
-        "type": "strategy",
-        "strategy_id": "target",
-        "scope": "all",
-        "conditions": [],
-    })
+    rule = monitor_rules.normalize(
+        {
+            "id": "mr_target",
+            "name": "策略监控 · target",
+            "type": "strategy",
+            "strategy_id": "target",
+            "scope": "all",
+            "conditions": [],
+        }
+    )
     monitor_rules.save_one(tmp_path, rule)
 
     preference_updates: list[dict] = []
@@ -78,7 +86,7 @@ def test_delete_strategy_is_not_blocked_by_another_broken_file(monkeypatch, tmp_
     monkeypatch.setattr(
         preferences,
         "set_realtime_monitor_config",
-        lambda config: preference_updates.append(config) or config,
+        lambda config: _record(config, preference_updates, config),
     )
     monitor = _MonitorEngine()
 

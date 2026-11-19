@@ -8,6 +8,7 @@ PUT  /api/custom/assistant/sessions   会话历史整体保存(前端防抖写�
 POST /api/custom/assistant/actions/{call_id}/decision
                                      动作工具确认/拒绝(确认卡按钮回调)
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -74,17 +75,19 @@ def build_router() -> APIRouter:
         context = req.context.model_dump() if req.context else None
 
         async def gen():
-            async for line in with_heartbeat(chat_stream(
-                history=[m.model_dump(exclude_none=True) for m in req.messages],
-                context=context,
-                engine=engine,
-                data_dir=data_dir,
-                repo=repo,
-                quote_service=getattr(request.app.state, "quote_service", None),
-                depth_service=getattr(request.app.state, "depth_service", None),
-                capabilities=getattr(request.app.state, "capabilities", None),
-                financial_scheduler=getattr(request.app.state, "financial_scheduler", None),
-            )):
+            async for line in with_heartbeat(
+                chat_stream(
+                    history=[m.model_dump(exclude_none=True) for m in req.messages],
+                    context=context,
+                    engine=engine,
+                    data_dir=data_dir,
+                    repo=repo,
+                    quote_service=getattr(request.app.state, "quote_service", None),
+                    depth_service=getattr(request.app.state, "depth_service", None),
+                    capabilities=getattr(request.app.state, "capabilities", None),
+                    financial_scheduler=getattr(request.app.state, "financial_scheduler", None),
+                )
+            ):
                 yield line + "\n"
 
         return StreamingResponse(

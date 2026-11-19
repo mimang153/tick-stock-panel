@@ -1,4 +1,26 @@
-"""Versioned backend/page packages, activated only during application startup."""
+"""版本化后端/页面扩展包 — 仅在应用启动时激活。
+
+生命周期:
+  - inspect: 只解析不落盘, 供设置页预览包内容;
+  - install: 校验 manifest/语法后写入版本目录;
+  - manage: 处理启用/停用/卸载/回滚意图, 写 state.json;
+  - start_managed_extensions: 暂存注册后原子发布路由与策略。
+
+安全约束:
+  - 拒绝符号链接与超大包, 限制单包文件数与总大小;
+  - 扩展 ID 必须匹配白名单正则, 禁用主程序保留命名空间;
+  - manifest 契约版本必须与后端 API 版本一致;
+  - 状态变更以内容摘要检测并发冲突, 失败回滚且不影响其它扩展。
+
+并发与发布:
+  - 所有写操作经 mutation() 上下文串行化;
+  - 路由与通知格式化器先暂存, 成功后一次性发布;
+  - 运行期只读取已冻结的注册表快照, 避免半启用状态。
+
+失败策略:
+  - 单个扩展的记录损坏或启动失败均被隔离, 不阻断主程序。
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -14,6 +36,7 @@ import time
 import types
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
+from typing import cast
 
 import yaml
 from fastapi import FastAPI
@@ -43,21 +66,39 @@ def _contents_hash(files: dict[str, bytes]) -> str:
     return _hash(json.dumps(sorted((name, _hash(data)) for name, data in files.items())).encode())
 
 
+def _validate_text_fields(doc: dict) -> None:
+    """校验展示类文本字段的类型与长度上限。"""
+    for field in ("display_name", "author", "description"):
+        if field in doc and (not isinstance(doc[field], str) or len(doc[field]) > 4000):
+            raise ValueError(f"{field} 必须是文本且不超过 4000 字符")
+
+
 def _validate_manifest(doc: dict, files: dict[str, bytes]) -> None:
-    if not isinstance(doc, dict) or doc.get("format") != "tick-extension-package" or type(doc.get("format_version")) is not int or doc["format_version"] != 1:
+    if (
+        not isinstance(doc, dict)
+        or doc.get("format") != "tick-extension-package"
+        or type(doc.get("format_version")) is not int
+        or doc["format_version"] != 1
+    ):
         raise ValueError("extension.yaml 需要 tick-extension-package 格式 v1")
     extension_id = doc.get("id", "")
-    if not isinstance(extension_id, str) or len(extension_id) > 80 or not _ID.fullmatch(extension_id) or extension_id.startswith(("official.", "core.")):
+    if (
+        not isinstance(extension_id, str)
+        or len(extension_id) > 80
+        or not _ID.fullmatch(extension_id)
+        or extension_id.startswith(("official.", "core."))
+    ):
         raise ValueError("扩展 id 非法或使用了主程序保留命名空间")
     version = doc.get("version", "")
     if not isinstance(version, str) or len(version) > 64 or not _VERSION.fullmatch(version):
         raise ValueError("version 必须是有效版本，例如 1.0.0")
     Version(version)
-    if type(doc.get("extension_api_version")) is not int or doc["extension_api_version"] != BACKEND_EXTENSION_API_VERSION:
+    if (
+        type(doc.get("extension_api_version")) is not int
+        or doc["extension_api_version"] != BACKEND_EXTENSION_API_VERSION
+    ):
         raise ValueError("不支持的后端扩展契约版本")
-    for field in ("display_name", "author", "description"):
-        if field in doc and (not isinstance(doc[field], str) or len(doc[field]) > 4000):
-            raise ValueError(f"{field} 必须是文本且不超过 4000 字符")
+    _validate_text_fields(doc)
     module = doc.get("backend")
     if not isinstance(module, str) or not _MODULE.fullmatch(module):
         raise ValueError("backend 必须指定包内模块，例如 backend.extension")
@@ -65,7 +106,11 @@ def _validate_manifest(doc: dict, files: dict[str, bytes]) -> None:
     if f"{path}.py" not in files and f"{path}/__init__.py" not in files:
         raise ValueError("backend 指定的模块不存在")
     frontend = doc.get("frontend")
-    if frontend is not None and (not isinstance(frontend, str) or frontend not in files or PurePosixPath(frontend).suffix not in (".js", ".mjs")):
+    if frontend is not None and (
+        not isinstance(frontend, str)
+        or frontend not in files
+        or PurePosixPath(frontend).suffix not in (".js", ".mjs")
+    ):
         raise ValueError("frontend 必须指向包内自包含的 .js/.mjs 页面产物")
     for name, payload in files.items():
         if name.endswith(".py"):
@@ -80,7 +125,11 @@ class ExtensionPackageStore:
         self.root = Path(data_dir) / "extensions"
 
     def _directory(self, extension_id: str) -> Path:
-        if not isinstance(extension_id, str) or len(extension_id) > 80 or not _ID.fullmatch(extension_id):
+        if (
+            not isinstance(extension_id, str)
+            or len(extension_id) > 80
+            or not _ID.fullmatch(extension_id)
+        ):
             raise ValueError("扩展标识非法")
         path = self.root / extension_id
         if self.root.is_symlink() or path.is_symlink():
@@ -118,7 +167,12 @@ class ExtensionPackageStore:
         if not path.exists():
             return None
         state = json.loads(path.read_text("utf-8"))
-        if not isinstance(state, dict) or state.get("schema") != 1 or not isinstance(state.get("hashes"), dict) or not isinstance(state.get("contents"), dict):
+        if (
+            not isinstance(state, dict)
+            or state.get("schema") != 1
+            or not isinstance(state.get("hashes"), dict)
+            or not isinstance(state.get("contents"), dict)
+        ):
             raise ValueError("不支持的扩展安装记录")
         return state
 
@@ -141,11 +195,18 @@ class ExtensionPackageStore:
         _validate_manifest(doc, files)
         state = self._state(doc["id"])
         digest = _hash(data)
-        if state and doc["version"] in state["hashes"] and state["hashes"][doc["version"]] != digest:
+        if (
+            state
+            and doc["version"] in state["hashes"]
+            and state["hashes"][doc["version"]] != digest
+        ):
             raise ValueError("相同版本已有不同内容，请提升版本号")
         return {
-            "manifest": doc, "digest": digest, "revision": self._revision(state),
-            "errors": compatibility(doc), "files": sorted(files),
+            "manifest": doc,
+            "digest": digest,
+            "revision": self._revision(state),
+            "errors": compatibility(doc),
+            "files": sorted(files),
             "installed_version": state.get("active") if state else None,
             "pending_version": state.get("pending") if state else None,
         }
@@ -186,7 +247,13 @@ class ExtensionPackageStore:
                 finally:
                     if staging.exists():
                         shutil.rmtree(staging)
-            state = state or {"schema": 1, "active": None, "enabled": True, "hashes": {}, "contents": {}}
+            state = state or {
+                "schema": 1,
+                "active": None,
+                "enabled": True,
+                "hashes": {},
+                "contents": {},
+            }
             state["hashes"][version] = digest
             state["contents"][version] = content_hash
             state["pending"] = version
@@ -198,7 +265,7 @@ class ExtensionPackageStore:
 
     def _read_version_files(self, extension_id: str, version: str) -> dict[str, bytes]:
         path = self._version_dir(extension_id, version)
-        files = {}
+        files: dict[str, bytes] = {}
         total = 0
         for item in path.rglob("*"):
             if item.is_symlink():
@@ -211,7 +278,9 @@ class ExtensionPackageStore:
             files[item.relative_to(path).as_posix()] = item.read_bytes()
         return files
 
-    def _manifest(self, extension_id: str, version: str, state: dict) -> tuple[dict, dict[str, bytes]]:
+    def _manifest(
+        self, extension_id: str, version: str, state: dict
+    ) -> tuple[dict, dict[str, bytes]]:
         files = self._read_version_files(extension_id, version)
         if _contents_hash(files) != state.get("contents", {}).get(version):
             raise ValueError("扩展文件与安装记录不一致")
@@ -255,7 +324,11 @@ class ExtensionPackageStore:
             raise ValueError("扩展目录不能是符号链接")
         if not self.root.exists():
             return []
-        return sorted(p.name for p in self.root.iterdir() if p.is_dir() and not p.is_symlink() and _ID.fullmatch(p.name))
+        return sorted(
+            p.name
+            for p in self.root.iterdir()
+            if p.is_dir() and not p.is_symlink() and _ID.fullmatch(p.name)
+        )
 
     def list_installed(self, running: dict[str, str]) -> list[dict]:
         result = []
@@ -265,7 +338,7 @@ class ExtensionPackageStore:
                 if not state:
                     continue
                 version = state.get("active") or state.get("pending") or state.get("failed_version")
-                doc, _ = self._manifest(extension_id, version, state)
+                doc, _ = self._manifest(extension_id, cast(str, version), state)
                 status = "已启用" if extension_id in running else "已停用"
                 if state.get("pending"):
                     status = "待重启生效"
@@ -275,29 +348,55 @@ class ExtensionPackageStore:
                     status = "待重启" + ("启用" if state["pending_enabled"] else "停用")
                 if state.get("remove"):
                     status = "待重启卸载"
-                result.append({
-                    "id": extension_id, "name": doc.get("display_name") or extension_id,
-                    "version": state.get("active"), "pending_version": state.get("pending"),
-                    "previous_version": state.get("previous"), "enabled": state.get("pending_enabled", state.get("enabled", True)),
-                    "runtime_version": running.get(extension_id), "frontend": bool(doc.get("frontend")),
-                    "failed_version": state.get("failed_version"), "revision": self._revision(state),
-                    "status": status, "error": state.get("error", ""), "pending_remove": bool(state.get("remove")),
-                })
+                result.append(
+                    {
+                        "id": extension_id,
+                        "name": doc.get("display_name") or extension_id,
+                        "version": state.get("active"),
+                        "pending_version": state.get("pending"),
+                        "previous_version": state.get("previous"),
+                        "enabled": state.get("pending_enabled", state.get("enabled", True)),
+                        "runtime_version": running.get(extension_id),
+                        "frontend": bool(doc.get("frontend")),
+                        "failed_version": state.get("failed_version"),
+                        "revision": self._revision(state),
+                        "status": status,
+                        "error": state.get("error", ""),
+                        "pending_remove": bool(state.get("remove")),
+                    }
+                )
             except (ValueError, OSError, KeyError, TypeError, yaml.YAMLError):
-                result.append({"id": extension_id, "name": extension_id, "status": "安装记录损坏", "error": "扩展记录或文件损坏，未加载", "enabled": False})
+                result.append(
+                    {
+                        "id": extension_id,
+                        "name": extension_id,
+                        "status": "安装记录损坏",
+                        "error": "扩展记录或文件损坏，未加载",
+                        "enabled": False,
+                    }
+                )
         return result
 
     def runtime_pages(self, running: dict[str, str]) -> list[PagePackMeta]:
         pages = []
         for extension_id, version in running.items():
             try:
-                doc, files = self._manifest(extension_id, version, self._state(extension_id))
+                doc, files = self._manifest(
+                    extension_id, version, cast(dict, self._state(extension_id))
+                )
                 if doc.get("frontend"):
                     payload = files[doc["frontend"]]
-                    pages.append(PagePackMeta(
-                        id=f"package:{extension_id}", enabled=True, label=doc.get("display_name") or extension_id,
-                        size=len(payload), sha256=_hash(payload), managed_by=extension_id, version=version,
-                    ))
+                    pages.append(
+                        PagePackMeta(
+                            id=f"package:{extension_id}",
+                            enabled=True,
+                            label=doc.get("display_name") or extension_id,
+                            size=len(payload),
+                            sha256=_hash(payload),
+                            managed_by=extension_id,
+                            version=version,
+                        )
+                    )
             except (ValueError, OSError, KeyError, TypeError, yaml.YAMLError):
                 continue
         return pages
@@ -307,11 +406,22 @@ class ExtensionPackageStore:
         version = running.get(extension_id)
         if not pack_id.startswith("package:") or not version:
             return None
-        doc, _ = self._manifest(extension_id, version, self._state(extension_id))
-        return self._version_dir(extension_id, version) / doc["frontend"] if doc.get("frontend") else None
+        doc, _ = self._manifest(extension_id, version, cast(dict, self._state(extension_id)))
+        return (
+            self._version_dir(extension_id, version) / doc["frontend"]
+            if doc.get("frontend")
+            else None
+        )
 
 
-def _prepare(app: FastAPI, context: ExtensionContext, store: ExtensionPackageStore, extension_id: str, version: str, state: dict):
+def _prepare(
+    app: FastAPI,
+    context: ExtensionContext,
+    store: ExtensionPackageStore,
+    extension_id: str,
+    version: str,
+    state: dict,
+):
     doc, files = store._manifest(extension_id, version, state)
     issues = compatibility(doc)
     if issues:
@@ -319,14 +429,23 @@ def _prepare(app: FastAPI, context: ExtensionContext, store: ExtensionPackageSto
     registry = app.state.extension_registry.mutable_copy()
     if extension_id in registry.extension_ids():
         raise ValueError("扩展 ID 与主程序已有扩展冲突")
-    namespace = "_tsp_extension_" + _hash(str(store._version_dir(extension_id, version).resolve()).encode() + _contents_hash(files).encode())[:24]
+    namespace = (
+        "_tsp_extension_"
+        + _hash(
+            str(store._version_dir(extension_id, version).resolve()).encode()
+            + _contents_hash(files).encode()
+        )[:24]
+    )
     if namespace not in sys.modules:
         package = types.ModuleType(namespace)
         package.__path__ = [str(store._version_dir(extension_id, version))]
         package.__package__ = namespace
         sys.modules[namespace] = package
     module = importlib.import_module(f"{namespace}.{doc['backend']}")
-    if getattr(module, "EXTENSION_ID", None) != extension_id or getattr(module, "EXTENSION_API_VERSION", None) != BACKEND_EXTENSION_API_VERSION:
+    if (
+        getattr(module, "EXTENSION_ID", None) != extension_id
+        or getattr(module, "EXTENSION_API_VERSION", None) != BACKEND_EXTENSION_API_VERSION
+    ):
         raise ValueError("后端模块 ID/契约与清单不一致")
     setup = getattr(module, "setup", None)
     if not callable(setup) or inspect.iscoroutinefunction(setup):
@@ -339,6 +458,7 @@ def _prepare(app: FastAPI, context: ExtensionContext, store: ExtensionPackageSto
             if not isinstance(route, APIRoute) or not route.path.startswith(prefix):
                 raise ValueError(f"外部扩展接口必须位于 {prefix}")
     from app.extensions.loader import _validate_router_conflicts
+
     _validate_router_conflicts(app, registrar)
     registry.register(registrar)
     startup = getattr(module, "startup", None)
@@ -348,6 +468,97 @@ def _prepare(app: FastAPI, context: ExtensionContext, store: ExtensionPackageSto
         startup(context)
     registry.freeze()
     return registrar, registry
+
+
+def _handle_extension_state_intent(store, app, extension_id: str, state: dict) -> bool:
+    if not state:
+        return True
+    if state.get("remove"):
+        with store.mutation():
+            if store._revision(store._state(extension_id)) != store._revision(state):
+                return True
+            shutil.rmtree(store._directory(extension_id))
+        return True
+    enabled = state.get("pending_enabled", state.get("enabled", True))
+    if not enabled:
+        with store.mutation():
+            if store._revision(store._state(extension_id)) != store._revision(state):
+                return True
+            state["enabled"] = False
+            state.pop("pending_enabled", None)
+            store._write(extension_id, state)
+        return True
+    return False
+
+
+def _publish_extension_routes(app, routes_before: list, registrar) -> None:
+    for router in registrar.routers:
+        app.include_router(router)
+    # Lifespan runs after the production SPA catch-all is mounted.
+    # Publish API routes before that fallback so GETs reach Python.
+    fallback = next(
+        (
+            i
+            for i, route in enumerate(routes_before)
+            if getattr(route, "name", None) == "spa_fallback"
+            and getattr(route, "path", None) == "/{full_path:path}"
+        ),
+        len(routes_before),
+    )
+    added = app.router.routes[len(routes_before) :]
+    app.router.routes[:] = routes_before[:fallback] + added + routes_before[fallback:]
+
+
+def _commit_extension_start(
+    store,
+    app,
+    extension_id: str,
+    version: str,
+    state: dict,
+    revenue_failed: bool,
+    registry,
+    running: dict[str, str],
+) -> None:
+    with store.mutation():
+        if store._revision(store._state(extension_id)) != store._revision(state):
+            raise _StateChangedError("扩展状态在启动时发生变化")
+        next_state = dict(state)
+        if version != state.get("active"):
+            next_state["previous"] = state.get("active")
+        next_state.update(active=version, enabled=True)
+        next_state.pop("pending", None)
+        next_state.pop("pending_enabled", None)
+        if not revenue_failed and state.get("pending") == version:
+            next_state.pop("error", None)
+            next_state.pop("failed_version", None)
+        store._write(extension_id, next_state)
+    app.state.extension_registry = registry
+    running[extension_id] = version
+    app.openapi_schema = None
+
+
+def _rollback_extension_start(
+    store,
+    app,
+    extension_id: str,
+    version: str,
+    state: dict,
+    revision: str,
+    routes_before: list,
+    lifespan_before,
+) -> bool:
+    app.router.routes[:] = routes_before
+    app.router.lifespan_context = lifespan_before
+    state["error"] = (
+        "新版本启动失败，已保留原版本" if state.get("active") else "扩展启动失败，未启用"
+    )
+    state["failed_version"] = version
+    state.pop("pending", None)
+    with store.mutation():
+        if store._revision(store._state(extension_id)) != revision:
+            return True
+        store._write(extension_id, state)
+    return False
 
 
 def start_managed_extensions(app: FastAPI, context: ExtensionContext) -> None:
@@ -363,71 +574,43 @@ def start_managed_extensions(app: FastAPI, context: ExtensionContext) -> None:
         ids = []
     for extension_id in ids:
         try:
-            state = store._state(extension_id)
-            if not state:
+            state = cast(dict, store._state(extension_id))
+            if _handle_extension_state_intent(store, app, extension_id, state):
                 continue
-            if state.get("remove"):
-                with store.mutation():
-                    if store._revision(store._state(extension_id)) != store._revision(state):
-                        continue
-                    shutil.rmtree(store._directory(extension_id))
-                continue
-            enabled = state.get("pending_enabled", state.get("enabled", True))
-            if not enabled:
-                with store.mutation():
-                    if store._revision(store._state(extension_id)) != store._revision(state):
-                        continue
-                    state["enabled"] = False
-                    state.pop("pending_enabled", None)
-                    store._write(extension_id, state)
-                continue
-            candidates = list(dict.fromkeys(v for v in (state.get("pending"), state.get("active")) if v))
+            candidates = list(
+                dict.fromkeys(v for v in (state.get("pending"), state.get("active")) if v)
+            )
             failed = False
             for version in candidates:
                 routes_before = list(app.router.routes)
                 lifespan_before = app.router.lifespan_context
                 revision = store._revision(state)
                 try:
-                    registrar, registry = _prepare(app, context, store, extension_id, version, state)
-                    for router in registrar.routers:
-                        app.include_router(router)
-                    # Lifespan runs after the production SPA catch-all is mounted.
-                    # Publish API routes before that fallback so GETs reach Python.
-                    fallback = next((i for i, route in enumerate(routes_before)
-                                     if getattr(route, "name", None) == "spa_fallback"
-                                     and getattr(route, "path", None) == "/{full_path:path}"), len(routes_before))
-                    added = app.router.routes[len(routes_before):]
-                    app.router.routes[:] = routes_before[:fallback] + added + routes_before[fallback:]
-                    with store.mutation():
-                        if store._revision(store._state(extension_id)) != store._revision(state):
-                            raise _StateChangedError("扩展状态在启动时发生变化")
-                        next_state = dict(state)
-                        if version != state.get("active"):
-                            next_state["previous"] = state.get("active")
-                        next_state.update(active=version, enabled=True)
-                        next_state.pop("pending", None)
-                        next_state.pop("pending_enabled", None)
-                        if not failed and state.get("pending") == version:
-                            next_state.pop("error", None)
-                            next_state.pop("failed_version", None)
-                        store._write(extension_id, next_state)
-                    app.state.extension_registry = registry
-                    running[extension_id] = version
-                    app.openapi_schema = None
+                    registrar, registry = _prepare(
+                        app, context, store, extension_id, version, state
+                    )
+                    _publish_extension_routes(app, routes_before, registrar)
+                    _commit_extension_start(
+                        store, app, extension_id, version, state, failed, registry, running
+                    )
                     break
                 except Exception as exc:  # noqa: BLE001 — optional code cannot leave partial routes or policies
-                    app.router.routes[:] = routes_before
-                    app.router.lifespan_context = lifespan_before
                     if isinstance(exc, _StateChangedError):
+                        app.router.routes[:] = routes_before
+                        app.router.lifespan_context = lifespan_before
                         break
                     failed = True
-                    state["error"] = "新版本启动失败，已保留原版本" if state.get("active") else "扩展启动失败，未启用"
-                    state["failed_version"] = version
-                    state.pop("pending", None)
-                    with store.mutation():
-                        if store._revision(store._state(extension_id)) != revision:
-                            break
-                        store._write(extension_id, state)
+                    if _rollback_extension_start(
+                        store,
+                        app,
+                        extension_id,
+                        version,
+                        state,
+                        revision,
+                        routes_before,
+                        lifespan_before,
+                    ):
+                        break
         except Exception:  # noqa: BLE001 — corrupt records must not stop unrelated extensions
             continue
     app.state.managed_extensions_started = True

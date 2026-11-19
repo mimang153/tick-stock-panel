@@ -4,6 +4,7 @@
 统计块 —— financials 被计入 3 次、pools/backtest_results/screener_results/ai_cache
 各计入 2 次, total_size_mb 虚高。此测试用精确整 MB 文件锁定总和不变量。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -33,10 +34,13 @@ def test_total_equals_sum_of_parts(tmp_path):
     stats = _compute_storage(tmp_path)
 
     parts_mb = (
-        stats["daily_size_mb"]            # 1.0  (subdirs 表)
-        + stats["financials_size_mb"]     # 2.0  (专属统计块)
-        + 1.0 + 1.0 + 1.0 + 1.0           # pools/backtest/screener/ai_cache (单次循环)
-        + 0.5                             # 根目录散文件
+        stats["daily_size_mb"]  # 1.0  (subdirs 表)
+        + stats["financials_size_mb"]  # 2.0  (专属统计块)
+        + 1.0
+        + 1.0
+        + 1.0
+        + 1.0  # pools/backtest/screener/ai_cache (单次循环)
+        + 0.5  # 根目录散文件
     )
     assert stats["total_size_mb"] == parts_mb == 7.5
 

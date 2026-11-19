@@ -5,11 +5,12 @@
 
 只关注「起始日解析」这一关注点, 用替身 Service 捕获传入配置, 不做真实数据加载。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import ClassVar
+from typing import Any, ClassVar, cast
 
 import pytest
 
@@ -49,6 +50,7 @@ def patched(monkeypatch):
     # factor_run / factor_batch 内部 `from app.backtest.factor import FactorBacktestService`
     # 读取的是模块属性, patch 源模块即可命中。
     import app.backtest.factor as factor_mod
+
     monkeypatch.setattr(factor_mod, "FactorBacktestService", _CapturingService)
     # 隔离守卫, 单测「起始日解析」。
     monkeypatch.setattr(bt, "_guard_server_backtest_range", lambda start, end: None)
@@ -57,7 +59,9 @@ def patched(monkeypatch):
 
 def test_factor_run_omitted_start_uses_factor_default(patched):
     end = date(2026, 8, 24)
-    bt.factor_run(bt.FactorBacktestRequest(factor_name="momentum_5d", end=end), _Req())
+    bt.factor_run(
+        bt.FactorBacktestRequest(factor_name="momentum_5d", end=end, n_groups=2), cast(Any, _Req())
+    )
     cfg = patched.captured[-1]
     assert cfg.start == end - timedelta(days=bt.FACTOR_DEFAULT_DAYS)
     # 回归保护: 不得再退回策略默认的 3 年。
@@ -66,7 +70,9 @@ def test_factor_run_omitted_start_uses_factor_default(patched):
 
 def test_factor_batch_omitted_start_uses_factor_default(patched):
     end = date(2026, 8, 24)
-    bt.factor_batch(bt.FactorBatchRequest(factor_names=["momentum_5d"], end=end), _Req())
+    bt.factor_batch(
+        bt.FactorBatchRequest(factor_names=["momentum_5d"], end=end, n_groups=2), cast(Any, _Req())
+    )
     cfg = patched.captured[-1]
     assert cfg.start == end - timedelta(days=bt.FACTOR_DEFAULT_DAYS)
     assert cfg.start != end - timedelta(days=bt.STRATEGY_DEFAULT_DAYS)
@@ -75,7 +81,10 @@ def test_factor_batch_omitted_start_uses_factor_default(patched):
 def test_factor_run_explicit_null_start_means_all_history(patched):
     """显式传 start=null 语义不变: 代表全部历史。"""
     end = date(2026, 8, 24)
-    bt.factor_run(bt.FactorBacktestRequest(factor_name="momentum_5d", start=None, end=end), _Req())
+    bt.factor_run(
+        bt.FactorBacktestRequest(factor_name="momentum_5d", start=None, end=end, n_groups=2),
+        cast(Any, _Req()),
+    )
     assert patched.captured[-1].start == date(1900, 1, 1)
 
 
@@ -83,7 +92,9 @@ def test_factor_run_explicit_start_passthrough(patched):
     """显式日期原样透传。"""
     end = date(2026, 8, 24)
     bt.factor_run(
-        bt.FactorBacktestRequest(factor_name="momentum_5d", start=date(2026, 1, 1), end=end),
-        _Req(),
+        bt.FactorBacktestRequest(
+            factor_name="momentum_5d", start=date(2026, 1, 1), end=end, n_groups=2
+        ),
+        cast(Any, _Req()),
     )
     assert patched.captured[-1].start == date(2026, 1, 1)

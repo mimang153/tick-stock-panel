@@ -1,6 +1,6 @@
 """分钟数据完整性修复的回归锁定。
 
-四项: ① 全量分钟服务落盘持仓库写锁 + 原子写临时名唯一化; ② 服务暴露 raw 基准
+四项: ① 全量分钟服务写 CK + 原子写临时名唯一化; ② 服务暴露 raw 基准
 状态; ③ minute-batch 门控在全量分钟服务健康时放行本地读; ④ 补拉限速与盘后
 同步统一走 resolve_limit (×0.8 安全系数, 同 rpm 桶)。
 """
@@ -22,87 +22,63 @@ from app.services import kline_sync
 from app.services.minute_refresh import MinuteRefreshService
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
+
+def _record(result, log, *items):
+    """记录本次调用参数后返回既定结果(替代 append(x) or result 惯用法)。"""
+    log.extend(items)
+    return result
+
+
 _BJ = date(2026, 10, 23)
 _SYM = "600519.SH"
 
 
-# ─────────────────────────── ① 服务落盘持写锁 ───────────────────────────
-
-
-class _RecordingLock:
-    """记录获取次数的锁包装; spy 在写分区时检查它是否被持有。"""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-
-    def __enter__(self):
-        self._lock.acquire()
-        return self
-
-    def __exit__(self, *exc):
-        self._lock.release()
-        return None
-
-    def locked(self) -> bool:
-        return self._lock.locked()
-
-
 def _round_df() -> pl.DataFrame:
     start = datetime(_BJ.year, _BJ.month, _BJ.day, 10, 0)
-    return pl.DataFrame({
-        "symbol": [_SYM] * 3,
-        "datetime": [start + timedelta(minutes=i) for i in range(3)],
-        "close": [10.0, 10.1, 10.2],
-    })
+    return pl.DataFrame(
+        {
+            "symbol": [_SYM] * 3,
+            "datetime": [start + timedelta(minutes=i) for i in range(3)],
+            "close": [10.0, 10.1, 10.2],
+        }
+    )
 
 
-def test_service_write_holds_repo_write_lock(tmp_path, monkeypatch):
-    """服务增量轮落盘必须持 repo._write_lock (与端点补拉/盘后同步同一纪律)。"""
-    lock = _RecordingLock()
-    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path), _write_lock=lock)
+def test_service_write_uses_ck_store(tmp_path, monkeypatch):
+    """服务增量轮落盘必须写 CK 门面，不再落本地 Parquet。"""
+    writes: list = []
+    storage = SimpleNamespace(write_minute=lambda table, df: _record(df.height, writes, df))
+    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path), storage=storage)
     svc = MinuteRefreshService(repo)
     monkeypatch.setattr(svc, "_resolve_custom", lambda: (None, "tickflow"))
     monkeypatch.setattr(svc, "_select_mode", lambda: "increment")
 
     df = _round_df()
-    monkeypatch.setattr(
-        kline_sync, "fetch_intraday_universe_increment", lambda: (df, 1)
-    )
-
-    seen: dict[str, object] = {}
-
-    def spy_write(frame, minute_dir):
-        seen["locked"] = lock.locked()
-        return frame.height
-
-    monkeypatch.setattr(kline_sync, "_write_minute_partition", spy_write)
+    monkeypatch.setattr(kline_sync, "fetch_intraday_universe_increment", lambda: (df, 1))
 
     svc._run_round()
 
-    assert seen.get("locked") is True, "落盘时必须持有仓库写锁"
+    assert len(writes) == 1
 
 
 def test_service_records_minute_basis_state(tmp_path, monkeypatch):
     """② 每轮记录本地库 raw 基准状态; 未迁移 (无 .raw_basis) 时只警告一次。"""
-    lock = _RecordingLock()
-    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path), _write_lock=lock)
+    storage = SimpleNamespace(write_minute=lambda table, df: df.height)
+    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path), storage=storage)
     svc = MinuteRefreshService(repo)
     monkeypatch.setattr(svc, "_resolve_custom", lambda: (None, "tickflow"))
     monkeypatch.setattr(svc, "_select_mode", lambda: "increment")
-    monkeypatch.setattr(
-        kline_sync, "fetch_intraday_universe_increment", lambda: (_round_df(), 1)
-    )
-    monkeypatch.setattr(kline_sync, "_write_minute_partition", lambda f, d: f.height)
-
+    monkeypatch.setattr(kline_sync, "fetch_intraday_universe_increment", lambda: (_round_df(), 1))
     warnings: list[str] = []
     from app.services import minute_refresh as mr
+
     monkeypatch.setattr(mr.logger, "warning", lambda msg, *a: warnings.append(msg))
 
     svc._run_round()
     svc._run_round()
 
-    assert svc._state.minute_basis_raw is False   # tmp_path 无 .raw_basis 标记
-    assert len(warnings) == 1                     # 只警告一次
+    assert svc._state.minute_basis_raw is False  # tmp_path 无 .raw_basis 标记
+    assert len(warnings) == 1  # 只警告一次
     assert "raw 基准" in warnings[0]
 
 
@@ -112,16 +88,15 @@ def test_atomic_write_tmp_names_unique(tmp_path, monkeypatch):
     out = tmp_path / "part.parquet"
 
     captured: list[Path] = []
-    monkeypatch.setattr(kline_sync, "replace_with_retry",
-                        lambda tmp, dst: captured.append(tmp))
+    monkeypatch.setattr(kline_sync, "replace_with_retry", lambda tmp, dst: captured.append(tmp))
 
     kline_sync._atomic_write_parquet(df, out)
     kline_sync._atomic_write_parquet(df, out)
 
     assert len(captured) == 2
     assert captured[0] != captured[1]
-    assert all(p.name.endswith(".tmp") for p in captured)   # 不匹配 *.parquet glob
-    assert not list(tmp_path.glob("*.parquet"))             # 正常路径无残留
+    assert all(p.name.endswith(".tmp") for p in captured)  # 不匹配 *.parquet glob
+    assert not list(tmp_path.glob("*.parquet"))  # 正常路径无残留
 
 
 # ─────────────────────── ③ 门控: 服务健康放行本地读 ───────────────────────
@@ -129,12 +104,18 @@ def test_atomic_write_tmp_names_unique(tmp_path, monkeypatch):
 
 def _bars(sym: str, n: int) -> pl.DataFrame:
     start = datetime(_BJ.year, _BJ.month, _BJ.day, 9, 31)
-    return pl.DataFrame({
-        "symbol": [sym] * n,
-        "datetime": [start + timedelta(minutes=i) for i in range(n)],
-        "open": [10.0] * n, "high": [10.1] * n, "low": [9.9] * n, "close": [10.0] * n,
-        "volume": [100.0] * n, "amount": [1000.0] * n,
-    })
+    return pl.DataFrame(
+        {
+            "symbol": [sym] * n,
+            "datetime": [start + timedelta(minutes=i) for i in range(n)],
+            "open": [10.0] * n,
+            "high": [10.1] * n,
+            "low": [9.9] * n,
+            "close": [10.0] * n,
+            "volume": [100.0] * n,
+            "amount": [1000.0] * n,
+        }
+    )
 
 
 def _gate_env(monkeypatch, *, healthy: bool | None):
@@ -146,10 +127,10 @@ def _gate_env(monkeypatch, *, healthy: bool | None):
 
     repo = MagicMock()
     repo.get_etf_symbol_set.return_value = set()
-    repo.get_minute_batch.return_value = _bars(_SYM, 240)   # 240 根 = 盘后完整, 不触发补拉
+    repo.get_minute_batch.return_value = _bars(_SYM, 240)  # 240 根 = 盘后完整, 不触发补拉
 
     capset = MagicMock()
-    capset.has.return_value = False                          # 无 Pro+ BATCH 能力
+    capset.has.return_value = False  # 无 Pro+ BATCH 能力
     capset.limits.return_value = None
 
     svc = None
@@ -199,13 +180,21 @@ def test_pull_uses_resolve_limit_safety_rpm(monkeypatch):
     monkeypatch.setattr(kline_api, "in_continuous_session", lambda: True)
 
     # 中间有洞 (间距 2min) → 全天补拉, 捕获传给 sync_minute_batch 的限速参数
-    hole = pl.DataFrame({
-        "symbol": [_SYM] * 2,
-        "datetime": [datetime(_BJ.year, _BJ.month, _BJ.day, 9, 31),
-                     datetime(_BJ.year, _BJ.month, _BJ.day, 9, 33)],
-        "open": [10.0] * 2, "high": [10.1] * 2, "low": [9.9] * 2, "close": [10.0] * 2,
-        "volume": [100.0] * 2, "amount": [1000.0] * 2,
-    })
+    hole = pl.DataFrame(
+        {
+            "symbol": [_SYM] * 2,
+            "datetime": [
+                datetime(_BJ.year, _BJ.month, _BJ.day, 9, 31),
+                datetime(_BJ.year, _BJ.month, _BJ.day, 9, 33),
+            ],
+            "open": [10.0] * 2,
+            "high": [10.1] * 2,
+            "low": [9.9] * 2,
+            "close": [10.0] * 2,
+            "volume": [100.0] * 2,
+            "amount": [1000.0] * 2,
+        }
+    )
     repo = MagicMock()
     repo.get_etf_symbol_set.return_value = set()
     repo.get_minute_batch.return_value = hole
@@ -215,8 +204,9 @@ def test_pull_uses_resolve_limit_safety_rpm(monkeypatch):
 
     captured: dict[str, object] = {}
 
-    def spy_sync(symbols, *, start_time, end_time, batch_size=None, rpm=None,
-                 asset_type="stock", **kw):
+    def spy_sync(
+        symbols, *, start_time, end_time, batch_size=None, rpm=None, asset_type="stock", **kw
+    ):
         captured["batch"] = batch_size
         captured["rpm"] = rpm
         return pl.DataFrame()
@@ -229,5 +219,5 @@ def test_pull_uses_resolve_limit_safety_rpm(monkeypatch):
     request.app.state.capabilities = capset
     kline_api.get_minute_batch(request, {"symbols": [_SYM], "date": str(_BJ)})
 
-    assert captured["batch"] == 200          # batch 原样透传
-    assert captured["rpm"] == 48             # 60 × 0.8 安全系数, 与盘后同步同桶
+    assert captured["batch"] == 200  # batch 原样透传
+    assert captured["rpm"] == 48  # 60 × 0.8 安全系数, 与盘后同步同桶

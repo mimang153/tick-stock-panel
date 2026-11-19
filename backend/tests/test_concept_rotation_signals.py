@@ -1,4 +1,5 @@
 """概念/行业轮动信号预计算 (_compute_rotation_signals) 单元测试。"""
+
 from __future__ import annotations
 
 from app.services.concept_rotation_analyzer import _compute_rotation_signals
@@ -28,11 +29,7 @@ def test_missing_early_days_do_not_shift_ranks_forward():
         columns[d] = _column([("新晋题材", pct)]) + columns[d]
 
     signals = _compute_rotation_signals(_DATES, columns)
-    by_name = {
-        item["concept"]: item
-        for group in signals.values()
-        for item in group
-    }
+    by_name = {item["concept"]: item for group in signals.values() for item in group}
     assert "新晋题材" in by_name
     # ranks[0]=最早日, ranks[-1]=最新日: 最早两日缺席(999), 最近两日排第一
     assert by_name["新晋题材"]["ranks"] == [999, 999, 999, 1, 1]
@@ -50,11 +47,7 @@ def test_missing_recent_days_pad_at_the_right_end():
         columns[d] = _column([("退潮题材", pct)]) + columns[d]
 
     signals = _compute_rotation_signals(_DATES, columns)
-    by_name = {
-        item["concept"]: item
-        for group in signals.values()
-        for item in group
-    }
+    by_name = {item["concept"]: item for group in signals.values() for item in group}
     assert "退潮题材" in by_name
     assert by_name["退潮题材"]["ranks"] == [1, 1, 999, 999, 999]
     assert "退潮题材" in [item["concept"] for item in signals["fading"]]

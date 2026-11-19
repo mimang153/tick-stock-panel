@@ -10,6 +10,7 @@
   夏普显著性; 期望最大夏普 EM = sqrt(V[SR]) * ((1-gamma)Φ^-1(1-1/N) + gammaΦ^-1(1-1/(Ne)))
   其中 gamma 为欧拉-马歇罗尼常数。
 """
+
 from __future__ import annotations
 
 import math
@@ -20,7 +21,9 @@ EULER_GAMMA = 0.5772156649015329
 
 
 def _clean_values(values) -> np.ndarray:
-    array = np.asarray([value for value in values if value is not None and np.isfinite(value)], dtype=float)
+    array = np.asarray(
+        [value for value in values if value is not None and np.isfinite(value)], dtype=float
+    )
     return array
 
 
@@ -70,10 +73,7 @@ def bh_fdr_qvalues(pvalues: list[float | None]) -> list[float | None]:
     m 取可检验假设数 (None 不计入); q_i = min over j>=rank_i { p_j * m / rank_j },
     从大到小单调回填保证递增约束。
     """
-    indexed = [
-        (index, p) for index, p in enumerate(pvalues)
-        if p is not None and np.isfinite(p)
-    ]
+    indexed = [(index, p) for index, p in enumerate(pvalues) if p is not None and np.isfinite(p)]
     qvalues: list[float | None] = [None] * len(pvalues)
     if not indexed:
         return qvalues
@@ -93,27 +93,51 @@ def _normal_ppf(probability: float) -> float:
     """标准正态分位数 Acklam 逆逼近 (相对误差 < 1.15e-9), 零依赖替代 scipy.stats.norm.ppf。"""
     if not (0.0 < probability < 1.0):
         raise ValueError("probability 必须在 (0,1) 开区间")
-    a = (-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
-         1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00)
-    b = (-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
-         6.680131188771972e+01, -1.328068155288572e+01)
-    c = (-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
-         -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00)
-    d = (7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
-         3.754408661907416e+00)
+    a = (
+        -3.969683028665376e01,
+        2.209460984245205e02,
+        -2.759285104469687e02,
+        1.383577518672690e02,
+        -3.066479806614716e01,
+        2.506628277459239e00,
+    )
+    b = (
+        -5.447609879822406e01,
+        1.615858368580409e02,
+        -1.556989798598866e02,
+        6.680131188771972e01,
+        -1.328068155288572e01,
+    )
+    c = (
+        -7.784894002430293e-03,
+        -3.223964580411365e-01,
+        -2.400758277161838e00,
+        -2.549732539343734e00,
+        4.374664141464968e00,
+        2.938163982698783e00,
+    )
+    d = (7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e00, 3.754408661907416e00)
     p_low, p_high = 0.02425, 1 - 0.02425
     if probability < p_low:
         q_value = math.sqrt(-2 * math.log(probability))
-        return (((((c[0] * q_value + c[1]) * q_value + c[2]) * q_value + c[3]) * q_value + c[4]) * q_value + c[5]) / \
-               ((((d[0] * q_value + d[1]) * q_value + d[2]) * q_value + d[3]) * q_value + 1)
+        return (
+            ((((c[0] * q_value + c[1]) * q_value + c[2]) * q_value + c[3]) * q_value + c[4])
+            * q_value
+            + c[5]
+        ) / ((((d[0] * q_value + d[1]) * q_value + d[2]) * q_value + d[3]) * q_value + 1)
     if probability <= p_high:
         q_value = probability - 0.5
         r = q_value * q_value
-        return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q_value / \
-               (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1)
+        return (
+            (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5])
+            * q_value
+            / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1)
+        )
     q_value = math.sqrt(-2 * math.log(1 - probability))
-    return -(((((c[0] * q_value + c[1]) * q_value + c[2]) * q_value + c[3]) * q_value + c[4]) * q_value + c[5]) / \
-        ((((d[0] * q_value + d[1]) * q_value + d[2]) * q_value + d[3]) * q_value + 1)
+    return -(
+        ((((c[0] * q_value + c[1]) * q_value + c[2]) * q_value + c[3]) * q_value + c[4]) * q_value
+        + c[5]
+    ) / ((((d[0] * q_value + d[1]) * q_value + d[2]) * q_value + d[3]) * q_value + 1)
 
 
 def expected_max_sharpe(n_trials: int, variance_sharpes: float) -> float:

@@ -1,4 +1,5 @@
 """状态请求不能等待统计, 并发请求共享同一次后台刷新。"""
+
 from __future__ import annotations
 
 import threading
@@ -39,12 +40,19 @@ def test_cold_status_returns_before_slow_aggregate_finishes(tmp_path, monkeypatc
         return {
             "daily": {"trading_days": 240},
             "storage": {"total_size_mb": 42},
-            "last_runs": {"last_pipeline_run": "2026-11-04T06:00:00Z", "last_instruments_run": None},
+            "last_runs": {
+                "last_pipeline_run": "2026-11-04T06:00:00Z",
+                "last_instruments_run": None,
+            },
         }[part]
 
     for name in data_api._TABLE_TTLS:
         monkeypatch.setattr(data_api, f"_safe_aggregate_{name}", lambda _repo: None)
-    target = {"daily": "_safe_aggregate_daily", "storage": "_compute_storage", "last_runs": "_load_last_runs"}
+    target = {
+        "daily": "_safe_aggregate_daily",
+        "storage": "_compute_storage",
+        "last_runs": "_load_last_runs",
+    }
     monkeypatch.setattr(data_api, target[part], slow_aggregate)
     app = FastAPI()
     app.include_router(data_api.router)

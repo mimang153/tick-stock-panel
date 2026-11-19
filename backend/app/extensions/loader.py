@@ -1,10 +1,12 @@
 """Discover in-repository backend customizations without touching user data."""
+
 from __future__ import annotations
 
 import importlib
 import logging
 import pkgutil
 from dataclasses import dataclass
+from typing import cast
 
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
@@ -47,7 +49,7 @@ def configure_backend_extensions(
             api_version = getattr(module, "EXTENSION_API_VERSION", None)
             if not isinstance(extension_id, str):
                 raise ValueError("backend extension module must define EXTENSION_ID")
-            registrar = BackendExtensionRegistrar(extension_id, api_version=api_version)
+            registrar = BackendExtensionRegistrar(extension_id, api_version=cast(int, api_version))
             setup = getattr(module, "setup", None)
             if not callable(setup):
                 raise ValueError("backend extension module must define setup(registrar)")
@@ -56,7 +58,7 @@ def configure_backend_extensions(
             registry.register(registrar)
             for router in registrar.routers:
                 app.include_router(router)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 扩展模块加载失败需隔离, 不阻断主程序启动
             logger.warning("backend extension load failed %s: %s", module_name, exc)
             errors.append(BackendExtensionLoadError(module_name, str(exc)))
 
@@ -69,14 +71,14 @@ def _validate_router_conflicts(app: FastAPI, registrar: BackendExtensionRegistra
         (route.path, method)
         for route in app.routes
         if isinstance(route, APIRoute)
-        for method in route.methods
+        for method in (route.methods or ())
     }
     staged: set[tuple[str, str]] = set()
     for router in registrar.routers:
         for route in router.routes:
             if not isinstance(route, APIRoute):
                 continue
-            for method in route.methods:
+            for method in route.methods or ():
                 key = (route.path, method)
                 if key in existing or key in staged:
                     raise ValueError(
@@ -99,7 +101,7 @@ def start_backend_extensions(
             startup = getattr(module, "startup", None)
             if callable(startup):
                 startup(context)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 扩展启动钩子失败需隔离, 不影响其它扩展
             logger.warning("backend extension startup failed %s: %s", module_name, exc)
 
 

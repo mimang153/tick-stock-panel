@@ -89,7 +89,6 @@ def _rpi_incremental_new_dates(
             dt = date_df["date"][0]
             ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
             out = enriched_base / f"date={ds}" / "part.parquet"
-            out.parent.mkdir(parents=True, exist_ok=True)
             date_df = _root._select_storage_cols(date_df).sort(["symbol"])
             publication.write_parquet(date_df, out)
             written += date_df.height
@@ -144,7 +143,6 @@ def _rpi_incremental_symbols(
             dt = date_df["date"][0]
             ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
             out = enriched_base / f"date={ds}" / "part.parquet"
-            out.parent.mkdir(parents=True, exist_ok=True)
             _root._upsert_enriched_day(
                 store,
                 dt,
@@ -292,7 +290,6 @@ def _rpi_full_batch_write(
             dt = date_df["date"][0]
             ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
             out = base / f"date={ds}" / "part.parquet"
-            out.parent.mkdir(parents=True, exist_ok=True)
             _root._upsert_enriched_day(
                 store,
                 dt,
@@ -359,7 +356,6 @@ def _rpi_full_merge(
             ds = date_df["date"][0]
             ds_str = ds.isoformat() if hasattr(ds, "isoformat") else str(ds)
             out = base / f"date={ds_str}" / "part.parquet"
-            out.parent.mkdir(parents=True, exist_ok=True)
             publication.write_parquet(date_df.sort(["symbol"]), out)
     gc.collect()
     _root.logger.info("全量暂存合并完成: %d 个日期分区", len(unique_dates))

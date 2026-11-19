@@ -1,4 +1,5 @@
 """自定义/复合因子存储与 scoring 桥测试 (P3)。"""
+
 from __future__ import annotations
 
 from datetime import date
@@ -20,7 +21,7 @@ from app.strategy import scoring
 @pytest.fixture()
 def cleanup_registry():
     """测试注册的自定义因子在用例后清理, 不污染全局注册表。"""
-    before = set()
+    before: set = set()
     yield before
     for fid in before:
         unregister_factor(fid)
@@ -31,11 +32,17 @@ def _panel(n_days: int = 30) -> pl.DataFrame:
     volumes = {"A": 1000.0, "B": 3000.0, "C": 2000.0}
     for index in range(n_days):
         for symbol, close in (("A", 10.0 + index), ("B", 50.0 - index), ("C", 20.0 + index * 2)):
-            rows.append({
-                "symbol": symbol, "date": date(2026, 1, index + 1),
-                "close": close, "volume": volumes[symbol] + index, "amount": (1000.0 + index) * close,
-            })
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "date": date(2026, 1, index + 1),
+                    "close": close,
+                    "volume": volumes[symbol] + index,
+                    "amount": (1000.0 + index) * close,
+                }
+            )
     return pl.DataFrame(rows).sort(["symbol", "date"])
+
 
 @pytest.fixture(autouse=True)
 def _isolate_runtime_ext_factors(tmp_path, monkeypatch):
@@ -57,12 +64,17 @@ def _isolate_runtime_ext_factors(tmp_path, monkeypatch):
     ext_factors._sync_state = None
 
 
-
 def test_custom_factor_definition_roundtrip(tmp_path, cleanup_registry) -> None:
     definition = {
-        "id": "uf_test_rev", "kind": "custom", "version": 1, "label": "测试反转",
-        "group": "自定义", "formula": "rank(-ts_sum(close / ts_delay(close, 1) - 1, 5))",
-        "description": "", "direction": "low", "status": "draft",
+        "id": "uf_test_rev",
+        "kind": "custom",
+        "version": 1,
+        "label": "测试反转",
+        "group": "自定义",
+        "formula": "rank(-ts_sum(close / ts_delay(close, 1) - 1, 5))",
+        "description": "",
+        "direction": "low",
+        "status": "draft",
     }
     spec = store.register_definition(definition)
     cleanup_registry.add("uf_test_rev")
@@ -87,21 +99,35 @@ def test_custom_factor_definition_roundtrip(tmp_path, cleanup_registry) -> None:
 
 def test_custom_factor_invalid_rejected(cleanup_registry) -> None:
     with pytest.raises(ValueError, match="E005"):
-        store.register_definition({
-            "id": "uf_bad", "kind": "custom", "label": "坏因子",
-            "formula": "ts_delay(close, -3)", "status": "draft",
-        })
+        store.register_definition(
+            {
+                "id": "uf_bad",
+                "kind": "custom",
+                "label": "坏因子",
+                "formula": "ts_delay(close, -3)",
+                "status": "draft",
+            }
+        )
     with pytest.raises(ValueError, match="uf_"):
-        store.register_definition({
-            "id": "wrong_prefix", "kind": "custom", "label": "坏前缀",
-            "formula": "close", "status": "draft",
-        })
+        store.register_definition(
+            {
+                "id": "wrong_prefix",
+                "kind": "custom",
+                "label": "坏前缀",
+                "formula": "close",
+                "status": "draft",
+            }
+        )
 
 
 def test_composite_definition_and_cycle_guard(cleanup_registry) -> None:
     definition = {
-        "id": "cf_test_combo", "kind": "composite", "version": 1, "label": "测试组合",
-        "members": {"momentum_20d": 0.6, "turnover_rate": 0.4}, "status": "draft",
+        "id": "cf_test_combo",
+        "kind": "composite",
+        "version": 1,
+        "label": "测试组合",
+        "members": {"momentum_20d": 0.6, "turnover_rate": 0.4},
+        "status": "draft",
     }
     spec = store.register_definition(definition)
     cleanup_registry.add("cf_test_combo")
@@ -116,10 +142,16 @@ def test_composite_definition_and_cycle_guard(cleanup_registry) -> None:
 
 def test_scoring_bridge_composite(cleanup_registry) -> None:
     """复合因子经 scoring 物化: 截面加权 z 分可计算且依赖展开正确。"""
-    store.register_definition({
-        "id": "cf_ztest", "kind": "composite", "version": 1, "label": "桥接测试",
-        "members": {"close": 0.5, "volume": 0.5}, "status": "active",
-    })
+    store.register_definition(
+        {
+            "id": "cf_ztest",
+            "kind": "composite",
+            "version": 1,
+            "label": "桥接测试",
+            "members": {"close": 0.5, "volume": 0.5},
+            "status": "active",
+        }
+    )
     cleanup_registry.add("cf_ztest")
 
     deps = scoring.scoring_dependencies({"cf_ztest": 1.0})
@@ -136,10 +168,16 @@ def test_scoring_bridge_composite(cleanup_registry) -> None:
 
 def test_scoring_bridge_custom_materializes(cleanup_registry) -> None:
     """自定义 DSL 因子经 materialize_scoring_columns 物化 (与检验共用路径)。"""
-    store.register_definition({
-        "id": "uf_rank_close", "kind": "custom", "version": 1, "label": "价格排名",
-        "formula": "rank(close)", "status": "draft",
-    })
+    store.register_definition(
+        {
+            "id": "uf_rank_close",
+            "kind": "custom",
+            "version": 1,
+            "label": "价格排名",
+            "formula": "rank(close)",
+            "status": "draft",
+        }
+    )
     cleanup_registry.add("uf_rank_close")
     frame = scoring.materialize_scoring_columns(_panel(), {"uf_rank_close"})
     assert "uf_rank_close" in frame.columns
@@ -149,8 +187,12 @@ def test_scoring_bridge_custom_materializes(cleanup_registry) -> None:
 
 def test_load_into_registry_isolated_failure(tmp_path, cleanup_registry) -> None:
     good = {
-        "id": "uf_good", "kind": "custom", "version": 1, "label": "好因子",
-        "formula": "close + 1", "status": "draft",
+        "id": "uf_good",
+        "kind": "custom",
+        "version": 1,
+        "label": "好因子",
+        "formula": "close + 1",
+        "status": "draft",
     }
     store.save_one(tmp_path, good)
     (tmp_path / "user_data" / "custom_factors" / "uf_broken.json").write_text(

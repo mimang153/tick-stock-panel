@@ -3,9 +3,11 @@
 沿用 tests/test_job_stall_and_cancel.py 的 mini-app 模式: 只挂需要的路由,
 不进主应用 lifespan (避免拉起数据源/调度器)。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fastapi import FastAPI
@@ -55,8 +57,8 @@ def test_validate_ok_for_template(client: TestClient) -> None:
         "/api/backtest/position-policies/validate",
         json={
             "label": "波动率目标",
-            "params": pp.TEMPLATE_VOL_TARGET["meta"]["params"],
-            "code": pp.TEMPLATE_VOL_TARGET["code"],
+            "params": cast(dict, pp.TEMPLATE_VOL_TARGET)["meta"]["params"],
+            "code": cast(dict, pp.TEMPLATE_VOL_TARGET)["code"],
         },
     )
     assert r.status_code == 200
@@ -71,8 +73,8 @@ def test_save_get_list_delete_cycle(client: TestClient, tmp_path: Path) -> None:
         json={
             "label": "我的波动率仓位",
             "description": "测试",
-            "params": pp.TEMPLATE_VOL_TARGET["meta"]["params"],
-            "code": pp.TEMPLATE_VOL_TARGET["code"],
+            "params": cast(dict, pp.TEMPLATE_VOL_TARGET)["meta"]["params"],
+            "code": cast(dict, pp.TEMPLATE_VOL_TARGET)["code"],
         },
     )
     assert r.status_code == 200

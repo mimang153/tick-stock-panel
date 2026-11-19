@@ -6,9 +6,10 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from app.backtest.worker import make_worker_task, run_worker_task
+from app.services.coordination import coordination
 from app.services.heavy_job_limiter import (
     HeavyJobCancelledError,
     shared_heavy_job_limiter,
@@ -20,6 +21,7 @@ from app.services.mining_jobs import (
     MiningRunStore,
     MiningRunValidationError,
     compute_run_signature,
+    get_run_store,
 )
 
 WorkerRunner = Callable[
@@ -30,6 +32,22 @@ TaskFactory = Callable[[str, Path, dict[str, Any]], dict[str, Any]]
 
 _SUCCESS_STATUSES = {"succeeded", "succeeded_with_budget_exhausted"}
 _SHUTDOWN_JOIN_SECONDS = 1.0
+
+
+class _CoordinatedCancelEvent(threading.Event):
+    """本地 Event 即时唤醒 + 协调层取消标志的跨实例可见性。
+
+    worker 父进程每 100ms 轮询 ``is_set``，这里叠加协调层查询后即可把另一个
+    worker 的取消请求传播到本进程的 worker 子进程；memory 模式下协调层查询是
+    noop，语义与单进程 ``threading.Event`` 完全一致。
+    """
+
+    def __init__(self, job_key: str) -> None:
+        super().__init__()
+        self._job_key = job_key
+
+    def is_set(self) -> bool:
+        return super().is_set() or coordination.cancel_flags.is_set(self._job_key)
 
 
 class MiningJobManager:
@@ -46,7 +64,7 @@ class MiningJobManager:
     ) -> None:
         self._data_dir = Path(data_dir).resolve()
         self._kind = kind
-        self._store = store if store is not None else MiningRunStore(self._data_dir)
+        self._store = store if store is not None else get_run_store(self._data_dir)
         self._worker_runner = worker_runner
         self._task_factory = task_factory
         self._lock = threading.RLock()
@@ -73,13 +91,13 @@ class MiningJobManager:
             if not force:
                 active = self._store.find_by_signature(
                     signature,
-                    statuses=ACTIVE_RUN_STATUSES,
+                    statuses=cast(Any, ACTIVE_RUN_STATUSES),
                 )
                 if active is not None:
                     return active
                 succeeded = self._store.find_by_signature(
                     signature,
-                    statuses=SUCCESS_RUN_STATUSES,
+                    statuses=cast(Any, SUCCESS_RUN_STATUSES),
                 )
                 if succeeded is not None:
                     return succeeded
@@ -106,6 +124,10 @@ class MiningJobManager:
             self._start_thread_locked(run_id, source)
             return manifest
 
+    def _cancel_key(self, run_id: str) -> str:
+        """跨实例取消标志键: 带 kind 前缀, 避免 mining/guardian 同名 run 串号。"""
+        return f"mining:{self._kind}:{run_id}"
+
     def cancel(self, run_id: str) -> dict[str, Any]:
         with self._lock:
             manifest = self._store.get(run_id)
@@ -113,6 +135,10 @@ class MiningJobManager:
                 raise KeyError(run_id)
             if manifest["status"] in TERMINAL_RUN_STATUSES:
                 return manifest
+
+            # 先落跨实例取消标志: 即便本 worker 没有该 run 的线程, 持有它的
+            # worker 也能在 100ms 轮询内感知。memory 模式下这是 noop。
+            coordination.cancel_flags.set(self._cancel_key(run_id))
 
             cancel_event = self._cancel_events.get(run_id)
             if cancel_event is None:
@@ -151,7 +177,7 @@ class MiningJobManager:
     def _start_thread_locked(self, run_id: str, source: str) -> None:
         if run_id in self._threads:
             return
-        cancel_event = threading.Event()
+        cancel_event = _CoordinatedCancelEvent(self._cancel_key(run_id))
         thread = threading.Thread(
             target=self._run_job,
             args=(run_id, source, cancel_event),
@@ -194,7 +220,7 @@ class MiningJobManager:
                 self._finish_success(run_id, result, cancel_event)
         except HeavyJobCancelledError:
             self._finish_cancelled(run_id)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - worker 任意失败都要回填到 run 状态,避免悬挂
             if cancel_event.is_set():
                 self._finish_cancelled(run_id)
             else:

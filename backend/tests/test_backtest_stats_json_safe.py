@@ -8,6 +8,7 @@ vectorbt 的 pf.stats() 常态产出这类值: 全部交易都盈利时 Profit F
 零波动/无交易时 Sharpe 等为 NaN; pandas 的 Series.to_dict() 会把 numpy 标量
 装箱成原生 float, 所以 _json_safe 的 (int, float, str, bool) 分支会原样放行。
 """
+
 from __future__ import annotations
 
 import json
@@ -27,9 +28,9 @@ def _render_like_starlette(payload) -> str:
 @pytest.mark.parametrize(
     "value",
     [
-        float("inf"),          # Profit Factor: 没有亏损单
+        float("inf"),  # Profit Factor: 没有亏损单
         float("-inf"),
-        float("nan"),          # Sharpe / Sortino: 零波动
+        float("nan"),  # Sharpe / Sortino: 零波动
         np.float64("inf"),
         np.float64("nan"),
     ],
@@ -42,7 +43,7 @@ def test_stats_dict_survives_starlette_json_render():
     """pf.stats() 形态的统计字典清洗后可被 allow_nan=False 渲染。"""
     stats_dict = {
         "Total Return [%]": 12.5,
-        "Profit Factor": float("inf"),   # 全胜 → gross_loss = 0
+        "Profit Factor": float("inf"),  # 全胜 → gross_loss = 0
         "Sharpe Ratio": float("nan"),
         "Max Drawdown [%]": np.float64(3.25),
         "Start": date(2026, 1, 2),

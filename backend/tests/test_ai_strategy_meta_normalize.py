@@ -1,4 +1,5 @@
 """AI 策略 META 规范化回归测试。"""
+
 from __future__ import annotations
 
 import pytest
@@ -61,7 +62,7 @@ def test_normalize_build_result_updates_code_and_meta():
 
 
 def test_normalize_strategy_meta_inserts_missing_name_fields():
-    raw = '''import polars as pl
+    raw = """import polars as pl
 
 META = {
     "id": "wrong",
@@ -70,7 +71,7 @@ META = {
 
 def filter(df: pl.DataFrame, params: dict) -> pl.Expr:
     return pl.lit(True)
-'''
+"""
 
     code = _normalize_strategy_meta(raw, "ai_inserted", name="中文名", description="描述")
 
@@ -199,10 +200,10 @@ def test_validate_code_rejects_missing_strategy_entrypoint():
 def test_validate_code_accepts_matrix_strategy_entrypoint():
     from app.strategy.ai_generator import AIStrategyGenerator
 
-    code = '''META = {"id": "matrix", "execution_backend": "matrix_native"}
+    code = """META = {"id": "matrix", "execution_backend": "matrix_native"}
 EXECUTION_BACKEND = "matrix_native"
 MATRIX_STRATEGY = object()
-'''
+"""
 
     result = AIStrategyGenerator().validate_code(code)
 
@@ -211,33 +212,34 @@ MATRIX_STRATEGY = object()
 
 
 def test_validate_matrix_strategy_accepts_its_own_signal_labels():
-    code = '''from app.strategy.research.factor_rank_research import FactorRankResearchMatrixStrategy
+    code = """from app.strategy.research.factor_rank_research import FactorRankResearchMatrixStrategy
 META = {"id": "matrix", "scoring": {}}
 EXECUTION_BACKEND = "matrix_native"
 ENTRY_SIGNALS = ["signal_factor_rank_entry"]
 EXIT_SIGNALS = ["signal_factor_rank_exit"]
 MATRIX_STRATEGY = FactorRankResearchMatrixStrategy({"turnover_rate": 1.0})
-'''
+"""
 
     result = AIStrategyGenerator().validate_code(code)
 
     assert result["valid"] is True
     assert result["error"] is None
     polars_code = RAW_CODE.replace(
-        "ENTRY_SIGNALS = []", 'ENTRY_SIGNALS = ["signal_factor_rank_entry"]',
+        "ENTRY_SIGNALS = []",
+        'ENTRY_SIGNALS = ["signal_factor_rank_entry"]',
     )
     invalid = AIStrategyGenerator().validate_code(polars_code)
     assert invalid["valid"] is False
     assert "signal_factor_rank_entry" in invalid["error"]
 
 
-@pytest.mark.parametrize("signals", ['"not-a-list"', '[42]', '[""]'])
+@pytest.mark.parametrize("signals", ['"not-a-list"', "[42]", '[""]'])
 def test_validate_matrix_strategy_rejects_invalid_signal_declarations(signals):
-    code = f'''META = {{"id": "matrix", "scoring": {{}}}}
+    code = f"""META = {{"id": "matrix", "scoring": {{}}}}
 EXECUTION_BACKEND = "matrix_native"
 ENTRY_SIGNALS = {signals}
 MATRIX_STRATEGY = object()
-'''
+"""
 
     result = AIStrategyGenerator().validate_code(code)
 
@@ -283,9 +285,9 @@ def test_validate_code_rejects_param_without_id():
 def test_validate_code_rejects_missing_matrix_strategy_entrypoint():
     from app.strategy.ai_generator import AIStrategyGenerator
 
-    code = '''META = {"id": "matrix", "execution_backend": "matrix_native"}
+    code = """META = {"id": "matrix", "execution_backend": "matrix_native"}
 EXECUTION_BACKEND = "matrix_native"
-'''
+"""
 
     result = AIStrategyGenerator().validate_code(code)
 

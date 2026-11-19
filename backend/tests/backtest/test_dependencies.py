@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import types
 from datetime import date, timedelta
+from typing import Any, cast
 
 import polars as pl
 import pytest
@@ -11,7 +12,7 @@ from app.strategy.engine import StrategyDef
 
 
 def _strategy(**overrides) -> StrategyDef:
-    values = dict(
+    values: dict[str, Any] = dict(
         meta={"id": "deps", "scoring": {"momentum_20d": 1.0}, "order_by": "score"},
         basic_filter={"enabled": False},
         entry_signals=["signal_macd_golden"],
@@ -34,6 +35,7 @@ def _strategy(**overrides) -> StrategyDef:
 def _migrated_signal_definitions(monkeypatch):
     """注入迁移自内置的信号定义 (信号列定义驱动, 不依赖运行目录)。"""
     from tests.signal_seeds import install_pipeline_caches
+
     install_pipeline_caches(monkeypatch)
 
 
@@ -47,8 +49,23 @@ def test_resolver_merges_signals_scoring_filter_and_execution_columns():
     )
 
     assert {"macd_dif", "macd_dea", "ma20", "momentum_20d", "rsi_14"} <= set(plan.indicator_columns)
-    assert {"signal_macd_golden", "signal_ma20_breakdown", "signal_limit_up", "signal_limit_down"} <= set(plan.signal_columns)
-    assert {"symbol", "date", "open", "high", "low", "close", "volume", "raw_close", "raw_high"} <= set(plan.base_columns)
+    assert {
+        "signal_macd_golden",
+        "signal_ma20_breakdown",
+        "signal_limit_up",
+        "signal_limit_down",
+    } <= set(plan.signal_columns)
+    assert {
+        "symbol",
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "raw_close",
+        "raw_high",
+    } <= set(plan.base_columns)
     # 涨跌停信号族统一加载不复权三价 (翘板用 raw_low 判定"曾触及跌停")
     assert "raw_low" in plan.base_columns
     assert "rsi_6" not in plan.indicator_columns
@@ -86,20 +103,31 @@ def test_load_panel_for_backtest_supplies_raw_low_for_recovery(monkeypatch, tmp_
     start = date(2024, 1, 1)
     dates = [start + timedelta(days=i) for i in range(n_days)]
     px = [10.0 + 0.01 * i for i in range(n_days)]
-    panel_lf = pl.LazyFrame({
-        "symbol": ["600001.SH"] * n_days,
-        "date": dates,
-        "open": px, "high": px, "low": px, "close": px,
-        "volume": [100_000.0] * n_days,
-        "amount": [1_000_000.0] * n_days,
-        "raw_close": px, "raw_high": px, "raw_low": px,
-    })
+    panel_lf = pl.LazyFrame(
+        {
+            "symbol": ["600001.SH"] * n_days,
+            "date": dates,
+            "open": px,
+            "high": px,
+            "low": px,
+            "close": px,
+            "volume": [100_000.0] * n_days,
+            "amount": [1_000_000.0] * n_days,
+            "raw_close": px,
+            "raw_high": px,
+            "raw_low": px,
+        }
+    )
     monkeypatch.setattr("app.backtest.engine.pl.scan_parquet", lambda path, *a, **k: panel_lf)
 
-    instruments = pl.DataFrame({
-        "symbol": ["600001.SH"], "name": ["普通股"],
-        "limit_up": [11.0], "limit_down": [9.0],
-    })
+    instruments = pl.DataFrame(
+        {
+            "symbol": ["600001.SH"],
+            "name": ["普通股"],
+            "limit_up": [11.0],
+            "limit_down": [9.0],
+        }
+    )
     repo = types.SimpleNamespace(
         store=types.SimpleNamespace(data_dir=tmp_path),
         get_enriched_range=lambda *a, **k: None,
@@ -114,8 +142,12 @@ def test_load_panel_for_backtest_supplies_raw_low_for_recovery(monkeypatch, tmp_
         exit_signals=[],
     )
 
-    df = BacktestEngine(repo).load_panel_for_backtest(
-        ["600001.SH"], start, dates[-1], plan, asset_type="stock",
+    df = BacktestEngine(cast(Any, repo)).load_panel_for_backtest(
+        ["600001.SH"],
+        start,
+        dates[-1],
+        plan,
+        asset_type="stock",
     )
 
     assert "raw_low" in df.columns
@@ -123,11 +155,13 @@ def test_load_panel_for_backtest_supplies_raw_low_for_recovery(monkeypatch, tmp_
 
 
 def test_resolver_expands_virtual_scoring_dependencies():
-    strategy = _strategy(meta={
-        "id": "deps",
-        "scoring": {"ma20_bias": 0.6, "vol_ratio_5d": 0.4},
-        "order_by": "score",
-    })
+    strategy = _strategy(
+        meta={
+            "id": "deps",
+            "scoring": {"ma20_bias": 0.6, "vol_ratio_5d": 0.4},
+            "order_by": "score",
+        }
+    )
 
     plan = StrategyDependencyResolver().resolve(
         strategy,

@@ -6,6 +6,7 @@
 - 缓存 schema 已 bump (旧 capabilities.json 触发重探测)
 - 盘中分钟服务门控挂在该能力位上
 """
+
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -48,5 +49,5 @@ def test_service_gate_requires_universe_not_batch_alone():
     batch_only = {Cap.INTRADAY_BATCH: CapabilityLimits(rpm=60, batch=200)}
 
     assert _svc_with(universe).capability_ok() is True
-    assert _svc_with(batch_only).capability_ok() is False       # 仅有 intraday.batch 不放行
+    assert _svc_with(batch_only).capability_ok() is False  # 仅有 intraday.batch 不放行
     assert _svc_with({}).capability_ok() is False

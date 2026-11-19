@@ -14,9 +14,11 @@ time_field 列最大值, 以 ?{since_param}={值} 附到请求 — 源只返回�
   - API PullConfigReq.since_param 校验参数名合法性
 mock httpx.MockTransport, 不发真实请求。
 """
+
 from __future__ import annotations
 
 from datetime import date
+from typing import Any
 
 import httpx
 import polars as pl
@@ -29,7 +31,7 @@ TARGET = date(2026, 10, 26)
 
 
 def _config(**pull_over) -> ExtConfig:
-    kwargs = dict(
+    kwargs: dict[str, Any] = dict(
         url="https://example.test/flow",
         response_path="data",
         time_field="ts",
@@ -92,17 +94,19 @@ def test_since_cursor_fallbacks(tmp_path) -> None:
 
 # ---------------------------------------------------------------- E2E: 首拉全量 → 增量
 def _rows(*slots: str) -> dict:
-    return {"data": [
-        {"symbol": "000001.SZ", "val": 10.0, "ts": s} for s in slots
-    ]}
+    return {"data": [{"symbol": "000001.SZ", "val": 10.0, "ts": s} for s in slots]}
 
 
 async def test_first_pull_full_then_incremental(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """首拉无分区不带 since (全量); 落库后二次拉取带 since=本地最大 ts;
     增量行并入同日分区, 按 [symbol, ts] 去重。"""
-    urls = _install_transport(monkeypatch, lambda req: httpx.Response(
-        200, json=_rows("1030") if "since=" in str(req.url) else _rows("0930", "1000"),
-    ))
+    urls = _install_transport(
+        monkeypatch,
+        lambda req: httpx.Response(
+            200,
+            json=_rows("1030") if "since=" in str(req.url) else _rows("0930", "1000"),
+        ),
+    )
 
     n1, d1 = await ext_pull.fetch_and_ingest(_config(), tmp_path, TARGET)
     assert n1 == 2 and d1 == TARGET.isoformat()
@@ -121,9 +125,13 @@ async def test_first_pull_full_then_incremental(monkeypatch: pytest.MonkeyPatch,
 async def test_partition_deleted_resumes_full(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """删分区修复: 游标随分区消失, 自动退回整日全量 (自愈路径)。"""
     mode = {"full": False}
-    urls = _install_transport(monkeypatch, lambda req: httpx.Response(
-        200, json=_rows("1000", "1030") if mode["full"] else _rows("0930"),
-    ))
+    urls = _install_transport(
+        monkeypatch,
+        lambda req: httpx.Response(
+            200,
+            json=_rows("1000", "1030") if mode["full"] else _rows("0930"),
+        ),
+    )
     cfg = _config()
     await ext_pull.fetch_and_ingest(cfg, tmp_path, TARGET)
 
@@ -137,7 +145,9 @@ async def test_partition_deleted_resumes_full(monkeypatch: pytest.MonkeyPatch, t
 
 
 # ---------------------------------------------------------------- 与其他机制共存
-async def test_since_with_date_param_and_pagination(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+async def test_since_with_date_param_and_pagination(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     """since 与 date_param / 分页参数共存: 每页都带 since + 页码。"""
     cfg = _config(
         url="https://example.test/day",
@@ -189,6 +199,11 @@ async def test_backfill_path_never_sends_cursor(monkeypatch: pytest.MonkeyPatch,
 def test_api_request_model_validates_since_param() -> None:
     from app.api.ext_data import PullConfigReq
 
-    assert PullConfigReq(url="https://x", since_param="since").since_param == "since"
+    assert (
+        PullConfigReq.model_validate({"url": "https://x", "since_param": "since"}).since_param
+        == "since"
+    )
     with pytest.raises(ValueError):
-        PullConfigReq(url="https://x", since_param="bad-name")  # 参数名只允许字母数字下划线
+        PullConfigReq.model_validate(
+            {"url": "https://x", "since_param": "bad-name"}
+        )  # 参数名只允许字母数字下划线

@@ -27,35 +27,41 @@ def test_minute_range_returns_latest_sessions_with_previous_closes():
     repo = MagicMock()
     repo.resolve_asset_type.return_value = "stock"
     # _get_stock_info 走 instruments 内存缓存 (不再走 execute_one DuckDB 查询)
-    repo.get_instruments.return_value = pl.DataFrame({
-        "symbol": ["600000.SH"],
-        "name": ["浦发银行"],
-        "total_shares": [1.0],
-        "float_shares": [1.0],
-    })
-    repo.get_minute_range.return_value = pl.DataFrame({
-        "symbol": ["600000.SH"] * 3,
-        "datetime": [
-            datetime(2026, 8, 5, 1, 30),
-            datetime(2026, 8, 6, 1, 30),
-            datetime(2026, 8, 7, 1, 30),
-        ],
-        "open": [10.0, 11.0, 12.0],
-        "high": [10.2, 11.2, 12.2],
-        "low": [9.8, 10.8, 11.8],
-        "close": [10.1, 11.1, 12.1],
-        "volume": [100.0, 110.0, 120.0],
-        "amount": [101_000.0, 122_100.0, 145_200.0],
-    })
-    repo.get_daily_asset.return_value = pl.DataFrame({
-        "date": [
-            date(2026, 8, 4),
-            date(2026, 8, 5),
-            date(2026, 8, 6),
-            date(2026, 8, 7),
-        ],
-        "close": [9.9, 10.1, 11.1, 12.1],
-    })
+    repo.get_instruments.return_value = pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "name": ["浦发银行"],
+            "total_shares": [1.0],
+            "float_shares": [1.0],
+        }
+    )
+    repo.get_minute_range.return_value = pl.DataFrame(
+        {
+            "symbol": ["600000.SH"] * 3,
+            "datetime": [
+                datetime(2026, 8, 5, 1, 30),
+                datetime(2026, 8, 6, 1, 30),
+                datetime(2026, 8, 7, 1, 30),
+            ],
+            "open": [10.0, 11.0, 12.0],
+            "high": [10.2, 11.2, 12.2],
+            "low": [9.8, 10.8, 11.8],
+            "close": [10.1, 11.1, 12.1],
+            "volume": [100.0, 110.0, 120.0],
+            "amount": [101_000.0, 122_100.0, 145_200.0],
+        }
+    )
+    repo.get_daily_asset.return_value = pl.DataFrame(
+        {
+            "date": [
+                date(2026, 8, 4),
+                date(2026, 8, 5),
+                date(2026, 8, 6),
+                date(2026, 8, 7),
+            ],
+            "close": [9.9, 10.1, 11.1, 12.1],
+        }
+    )
 
     result = kline_api.get_minute_range(_request(repo), "600000.SH", 2)
 
@@ -95,14 +101,21 @@ def test_sync_minute_single_uses_requested_days(monkeypatch):
     monkeypatch.setattr(kline_api.kline_sync, "sync_and_persist_minute", sync)
     monkeypatch.setattr("app.jobs.daily_pipeline._refresh_single_view", refresh)
 
-    result = asyncio.run(kline_api.sync_minute_single(
-        _request(repo, capset),
-        {"symbol": "600000.SH", "days": 10},
-    ))
+    result = asyncio.run(
+        kline_api.sync_minute_single(
+            _request(repo, capset),
+            {"symbol": "600000.SH", "days": 10},
+        )
+    )
 
     assert result["rows"] == 2400
     sync.assert_called_once_with(
-        ["600000.SH"], repo, capset, days=10, force_full_days=True, asset_type="stock",
+        ["600000.SH"],
+        repo,
+        capset,
+        days=10,
+        force_full_days=True,
+        asset_type="stock",
         expected_source=kline_api.kline_sync.minute_source_stamp(),
     )
     refresh.assert_called_once_with(repo, "kline_minute")
@@ -110,7 +123,9 @@ def test_sync_minute_single_uses_requested_days(monkeypatch):
 
 def test_sync_minute_single_rejects_invalid_days():
     with pytest.raises(HTTPException, match="days 必须在 1 到 30 之间"):
-        asyncio.run(kline_api.sync_minute_single(
-            _request(),
-            {"symbol": "600000.SH", "days": 0},
-        ))
+        asyncio.run(
+            kline_api.sync_minute_single(
+                _request(),
+                {"symbol": "600000.SH", "days": 0},
+            )
+        )

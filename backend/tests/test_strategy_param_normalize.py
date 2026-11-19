@@ -5,11 +5,11 @@
 TypeError, 导致整个 /api/strategies 列表 500. 加载边界归一化后保证 params 永远
 是标准 list[dict], 下游推导式天然安全.
 """
+
 from __future__ import annotations
 
 from app.api.strategy import _strategy_detail
-from app.strategy.engine import _normalize_param_defs, StrategyDef
-
+from app.strategy.engine import StrategyDef, _normalize_param_defs
 
 # ── 归一化各格式分支 ──────────────────────────────────────────────────
 
@@ -21,8 +21,15 @@ def test_none_returns_empty_list():
 def test_standard_list_dict_keeps_and_fills_defaults():
     """标准 list[dict]: 保持结构, 补齐缺失的 label/type/default."""
     params = [
-        {"id": "lookback", "label": "回看天数", "type": "int", "default": 7,
-         "min": 3, "max": 30, "step": 1},
+        {
+            "id": "lookback",
+            "label": "回看天数",
+            "type": "int",
+            "default": 7,
+            "min": 3,
+            "max": 30,
+            "step": 1,
+        },
         {"id": "threshold", "type": "float", "default": 0.1},  # 缺 label
         {"id": "flag", "default": True},  # 缺 label/type
     ]
@@ -81,8 +88,8 @@ def test_mixed_dirty_items_drop_unrecognized():
     """混合脏项: dict 项保留, 不可识别项 (int/None) 丢弃."""
     params = [
         {"id": "valid", "default": 10},
-        42,        # 丢弃
-        None,      # 丢弃
+        42,  # 丢弃
+        None,  # 丢弃
         "str_id",  # 保留作 id
     ]
     result = _normalize_param_defs(params)
@@ -110,12 +117,17 @@ def _make_strategy_with_params(params) -> StrategyDef:
     return StrategyDef(
         meta={"id": "test_strat", "name": "测试", "params": params},
         basic_filter={"enabled": True},
-        entry_signals=[], exit_signals=[],
-        stop_loss=None, trailing_stop=None,
-        trailing_take_profit_activate=None, trailing_take_profit_drawdown=None,
+        entry_signals=[],
+        exit_signals=[],
+        stop_loss=None,
+        trailing_stop=None,
+        trailing_take_profit_activate=None,
+        trailing_take_profit_drawdown=None,
         max_hold_days=None,
-        filter_fn=None, filter_history_fn=None,
-        lookback_days=60, source="custom",
+        filter_fn=None,
+        filter_history_fn=None,
+        lookback_days=60,
+        source="custom",
     )
 
 

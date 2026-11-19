@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import date, timedelta
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -30,11 +31,13 @@ def _row(symbol: str, day: int, price: float, **overrides) -> dict:
 
 
 def test_sparse_mapping_is_stable_read_only_and_not_forward_filled():
-    panel = pl.DataFrame([
-        _row("B", 1, 20, signal_entry=True),
-        _row("A", 2, 12),
-        _row("A", 0, 10, signal_entry=True),
-    ])
+    panel = pl.DataFrame(
+        [
+            _row("B", 1, 20, signal_entry=True),
+            _row("A", 2, 12),
+            _row("A", 0, 10, signal_entry=True),
+        ]
+    )
     entries = panel["signal_entry"]
     matrix = build_market_matrix(panel, entries, None)
 
@@ -60,42 +63,48 @@ def test_duplicate_timestamp_symbol_is_rejected():
 
 
 def test_intraday_timestamps_share_daily_session_id():
-    panel = pl.DataFrame({
-        "symbol": ["A", "A", "A"],
-        "datetime": [
-            "2024-01-01 09:30:00",
-            "2024-01-01 10:30:00",
-            "2024-01-02 09:30:00",
-        ],
-        "open": [10.0, 10.1, 10.2],
-        "high": [10.0, 10.1, 10.2],
-        "low": [10.0, 10.1, 10.2],
-        "close": [10.0, 10.1, 10.2],
-        "volume": [100, 100, 100],
-    }).with_columns(pl.col("datetime").str.to_datetime())
+    panel = pl.DataFrame(
+        {
+            "symbol": ["A", "A", "A"],
+            "datetime": [
+                "2024-01-01 09:30:00",
+                "2024-01-01 10:30:00",
+                "2024-01-02 09:30:00",
+            ],
+            "open": [10.0, 10.1, 10.2],
+            "high": [10.0, 10.1, 10.2],
+            "low": [10.0, 10.1, 10.2],
+            "close": [10.0, 10.1, 10.2],
+            "volume": [100, 100, 100],
+        }
+    ).with_columns(pl.col("datetime").str.to_datetime())
 
     matrix = build_market_matrix(panel, None, None)
     assert matrix.session_ids.tolist() == [0, 0, 1]
 
 
 def test_tradable_matches_legacy_suspension_rules():
-    panel = pl.DataFrame([
-        _row("A", 0, 10, volume=100),
-        _row("B", 0, 10, volume=0),
-        _row("C", 0, 10, volume=0, high=11, low=9),
-        _row("D", 0, 0, volume=100),
-    ])
+    panel = pl.DataFrame(
+        [
+            _row("A", 0, 10, volume=100),
+            _row("B", 0, 10, volume=0),
+            _row("C", 0, 10, volume=0, high=11, low=9),
+            _row("D", 0, 0, volume=100),
+        ]
+    )
     matrix = build_market_matrix(panel, None, None)
-    tradable = dict(zip(matrix.symbols, matrix.tradable[0].tolist()))
+    tradable = dict(zip(matrix.symbols, matrix.tradable[0].tolist(), strict=False))
     assert tradable == {"A": 1, "B": 0, "C": 1, "D": 0}
 
 
 def test_open_t_plus_one_keeps_legacy_next_asset_bar_semantics():
-    panel = pl.DataFrame([
-        _row("A", 0, 10, signal_entry=True),
-        _row("B", 1, 20),
-        _row("A", 2, 12),
-    ])
+    panel = pl.DataFrame(
+        [
+            _row("A", 0, 10, signal_entry=True),
+            _row("B", 1, 20),
+            _row("A", 2, 12),
+        ]
+    )
     matrix = build_market_matrix(
         panel,
         panel["signal_entry"],
@@ -112,21 +121,22 @@ def test_matrix_matcher_matches_legacy_trade_records_and_equity():
     rows = []
     for symbol, score in (("A", 90), ("B", 80), ("C", 70)):
         for day in range(5):
-            overrides = {"score": score}
+            overrides: dict[str, Any] = {"score": score}
             if symbol == "A" and day == 2:
                 overrides.update(open=9, high=9, low=9, close=9, signal_limit_down=True)
             if symbol == "B" and day == 3:
-                overrides.update(open=8.5, high=9, low=8, close=8.5)
+                overrides.update({"open": 8.5, "high": 9, "low": 8, "close": 8.5})
             rows.append(_row(symbol, day, 10 + day * 0.1, **overrides))
     panel = pl.DataFrame(rows).sort(["symbol", "date"])
-    entries = pl.Series([
-        row["date"] == date(2024, 1, 1)
-        for row in panel.select("date").iter_rows(named=True)
-    ])
-    exits = pl.Series([
-        row["symbol"] == "A" and row["date"] == date(2024, 1, 2)
-        for row in panel.select(["symbol", "date"]).iter_rows(named=True)
-    ])
+    entries = pl.Series(
+        [row["date"] == date(2024, 1, 1) for row in panel.select("date").iter_rows(named=True)]
+    )
+    exits = pl.Series(
+        [
+            row["symbol"] == "A" and row["date"] == date(2024, 1, 2)
+            for row in panel.select(["symbol", "date"]).iter_rows(named=True)
+        ]
+    )
     config = MatcherConfig(
         matching="open_t+1",
         fees_pct=0,
@@ -147,17 +157,22 @@ def test_matrix_matcher_matches_legacy_trade_records_and_equity():
     assert matrix_result.equity_curve == legacy_result.equity_curve
     assert matrix_result.drawdown_curve == legacy_result.drawdown_curve
     assert matrix_result.stats["execution"] == legacy_result.stats["execution"]
-    assert matrix_result.stats["pending_exit_positions"] == legacy_result.stats["pending_exit_positions"]
+    assert (
+        matrix_result.stats["pending_exit_positions"]
+        == legacy_result.stats["pending_exit_positions"]
+    )
 
 
 def test_independent_matrix_matches_legacy_candidates():
-    panel = pl.DataFrame([
-        _row("A", 0, 10, signal_entry=True),
-        _row("A", 1, 11, signal_entry=True),
-        _row("A", 2, 12),
-        _row("A", 3, 9, low=8.5),
-        _row("A", 4, 10),
-    ]).sort(["symbol", "date"])
+    panel = pl.DataFrame(
+        [
+            _row("A", 0, 10, signal_entry=True),
+            _row("A", 1, 11, signal_entry=True),
+            _row("A", 2, 12),
+            _row("A", 3, 9, low=8.5),
+            _row("A", 4, 10),
+        ]
+    ).sort(["symbol", "date"])
     entries = panel["signal_entry"]
     exits = panel["signal_exit"]
     config = MatcherConfig(
@@ -179,12 +194,14 @@ def test_independent_matrix_matches_legacy_candidates():
 
 
 def test_lightweight_portfolio_keeps_stats_without_curves_or_monte_carlo(monkeypatch):
-    panel = pl.DataFrame([
-        _row("A", 0, 10, signal_entry=True),
-        _row("A", 1, 11),
-        _row("A", 2, 12, signal_exit=True),
-        _row("A", 3, 11),
-    ]).sort(["symbol", "date"])
+    panel = pl.DataFrame(
+        [
+            _row("A", 0, 10, signal_entry=True),
+            _row("A", 1, 11),
+            _row("A", 2, 12, signal_exit=True),
+            _row("A", 3, 11),
+        ]
+    ).sort(["symbol", "date"])
     matrix = build_market_matrix(
         panel,
         panel["signal_entry"],

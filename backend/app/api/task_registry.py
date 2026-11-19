@@ -3,6 +3,7 @@
 PUT/DELETE 由任务启动/终态触发 (不阻塞 UI, 失败静默); GET 在任务页挂载时
 最多调用一次。全部是小 JSON 文件读写, 不触碰任务执行路径。
 """
+
 from __future__ import annotations
 
 import re

@@ -3,6 +3,7 @@
 - /intraday: 盘中量价信号聚合 (enriched 当日信号列, 零新增采集)
 - /overview: 偏移异动边缘总览 (交易所异动规则口径的接近度)
 """
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Query, Request

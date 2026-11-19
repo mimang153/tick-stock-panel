@@ -167,3 +167,52 @@ class StorageProtocol(Protocol):
     def write(self, table: str, df: pl.DataFrame) -> None:
         """按逻辑表名写入任意已知表；表名合法性由实现校验。"""
         ...
+
+    # ── 修补契约（DES-002）─────────────────────────────────────
+    def begin_repair(self, dataset: str, day: date, reason: str, actor: str) -> str:
+        """创建修补单号；审计/快照共享该 ID。"""
+        ...
+
+    def append_repair_snapshot(
+        self, repair_id: str, dataset: str, day: date, rows: pl.DataFrame, actor: str
+    ) -> None:
+        """写入修补前完整旧行。"""
+        ...
+
+    def append_repair_audit(
+        self, repair_id: str, dataset: str, day: date, diffs: pl.DataFrame, actor: str
+    ) -> None:
+        """写入修补前后差异行。"""
+        ...
+
+    def set_repair_status(self, repair_id: str, status: str, actor: str) -> None:
+        """更新修补单状态（started/committed/failed）。"""
+        ...
+
+    def read_repair_snapshot(self, repair_id: str) -> pl.DataFrame:
+        """读取某次修补的旧行快照。"""
+        ...
+
+    def rollback_repair(self, repair_id: str, actor: str) -> None:
+        """按快照回滚某次修补。"""
+        ...
+
+    def begin_generation(self, asset_type: str, actor: str, changed_from: date | None) -> str:
+        """创建 enriched publishing generation。"""
+        ...
+
+    def heartbeat_generation(self, asset_type: str, generation_id: str, actor: str) -> None:
+        """刷新 generation 心跳。"""
+        ...
+
+    def commit_generation(self, asset_type: str, generation_id: str, actor: str) -> None:
+        """将 generation 标记为 ready。"""
+        ...
+
+    def fail_generation(self, asset_type: str, generation_id: str, actor: str) -> None:
+        """将 generation 标记为 failed。"""
+        ...
+
+    def current_generation(self, asset_type: str) -> dict:
+        """读取当前 ready generation；空表返回空 dict。"""
+        ...

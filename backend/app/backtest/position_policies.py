@@ -11,6 +11,7 @@ AIStrategyGenerator._validate_safety, 白名单追加本契约模块) 拦截已�
 - 保存 = 安全校验 + 结构解析 + 合成冒烟 (position_sizing.smoke_compute),
   三关全过才落盘 (fail-closed)。
 """
+
 from __future__ import annotations
 
 import ast
@@ -47,6 +48,7 @@ class PolicyDefinition:
 
 
 # ── 文件渲染与解析 (表单 ⇄ .py 往返) ────────────────────────
+
 
 def render_policy_file(meta: dict, compute_src: str) -> str:
     """表单 META + compute 源码 → 完整 .py 文件内容。"""
@@ -88,10 +90,7 @@ def parse_policy_file(code: str) -> tuple[dict, str]:
         body = body[1:]
     has_compute = False
     for node in body:
-        if (
-            isinstance(node, ast.ImportFrom)
-            and node.module == "app.backtest.position_sizing"
-        ):
+        if isinstance(node, ast.ImportFrom) and node.module == "app.backtest.position_sizing":
             excluded_ranges.append((node.lineno, node.end_lineno or node.lineno))
         elif isinstance(node, ast.Assign) and any(
             isinstance(t, ast.Name) and t.id == "META" for t in node.targets
@@ -101,7 +100,7 @@ def parse_policy_file(code: str) -> tuple[dict, str]:
             except (ValueError, SyntaxError) as e:
                 raise ValueError(f"META 必须是字面量字典: {e}") from e
             excluded_ranges.append((node.lineno, node.end_lineno or node.lineno))
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "compute":
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == "compute":
             has_compute = True
     if not isinstance(meta, dict):
         raise ValueError("缺少模块级 META 字典")
@@ -110,12 +109,10 @@ def parse_policy_file(code: str) -> tuple[dict, str]:
     if not has_compute:
         raise ValueError("缺少模块级 def compute(ctx) 函数")
     lines = code.splitlines()
-    drop = set()
+    drop: set[int] = set()
     for start, end in excluded_ranges:
         drop.update(range(start, end + 1))
-    user_src = "\n".join(
-        line for i, line in enumerate(lines, start=1) if i not in drop
-    ).strip("\n")
+    user_src = "\n".join(line for i, line in enumerate(lines, start=1) if i not in drop).strip("\n")
     return meta, user_src
 
 
@@ -126,7 +123,7 @@ def _normalize_meta(meta: dict, *, require_id: bool = True) -> dict:
         "description": str(meta.get("description", "")),
         "params": list(meta.get("params") or []),
     }
-    if require_id and not ID_RE.match(normalized["id"]):
+    if require_id and not ID_RE.match(str(normalized["id"])):
         raise ValueError(f"id 必须匹配 {ID_RE.pattern} (小写字母数字下划线, up_ 前缀)")
     if not normalized["label"]:
         raise ValueError("label 不能为空")
@@ -205,6 +202,7 @@ def _exec_policy(code: str, *, source_hint: str) -> PolicyDefinition | Exception
 
 
 # ── 目录注册表 (mtime 签名缓存, 惰性扫描) ──────────────────────
+
 
 @dataclass
 class _Snapshot:
@@ -289,6 +287,7 @@ def invalidate_cache() -> None:
 
 # ── 保存 / 删除 (API 层调用, 三关全过才写盘) ────────────────────
 
+
 def save_policy(data_dir: Path, meta: dict, compute_src: str) -> dict:
     """渲染 → 三关校验 → 原子写盘; 返回 {ok, id, issues}。"""
     normalized = _normalize_meta(meta, require_id=False)
@@ -347,7 +346,15 @@ TEMPLATE_VOL_TARGET = {
         "label": "波动率目标仓位",
         "description": "按波动率倒数分配候选权重",
         "params": [
-            {"id": "window", "label": "波动率窗口(日)", "type": "int", "default": 20, "min": 5, "max": 60, "step": 1},
+            {
+                "id": "window",
+                "label": "波动率窗口(日)",
+                "type": "int",
+                "default": 20,
+                "min": 5,
+                "max": 60,
+                "step": 1,
+            },
         ],
     },
     "code": (
@@ -355,7 +362,7 @@ TEMPLATE_VOL_TARGET = {
         "\n"
         "\n"
         "def compute(ctx):\n"
-        "    window = int(ctx.params.get(\"window\", 20))\n"
+        '    window = int(ctx.params.get("window", 20))\n'
         "    inv = []\n"
         "    for cand in ctx.selected:\n"
         "        rets = list(ctx.recent_returns.get(cand.symbol, ()))[-window:]\n"
@@ -376,14 +383,30 @@ TEMPLATE_DRAWDOWN = {
         "label": "回撤自适应仓位",
         "description": "按组合回撤缩放总预算",
         "params": [
-            {"id": "max_drawdown", "label": "最大容忍回撤(%)", "type": "float", "default": 20.0, "min": 5.0, "max": 50.0, "step": 1.0},
-            {"id": "floor_scale", "label": "最低预算比例", "type": "float", "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05},
+            {
+                "id": "max_drawdown",
+                "label": "最大容忍回撤(%)",
+                "type": "float",
+                "default": 20.0,
+                "min": 5.0,
+                "max": 50.0,
+                "step": 1.0,
+            },
+            {
+                "id": "floor_scale",
+                "label": "最低预算比例",
+                "type": "float",
+                "default": 0.3,
+                "min": 0.0,
+                "max": 1.0,
+                "step": 0.05,
+            },
         ],
     },
     "code": (
         "def compute(ctx):\n"
-        "    max_dd = float(ctx.params.get(\"max_drawdown\", 20.0)) / 100.0\n"
-        "    floor = float(ctx.params.get(\"floor_scale\", 0.3))\n"
+        '    max_dd = float(ctx.params.get("max_drawdown", 20.0)) / 100.0\n'
+        '    floor = float(ctx.params.get("floor_scale", 0.3))\n'
         "    drawdown = abs(min(ctx.portfolio.drawdown, 0.0))\n"
         "    scale = max(floor, 1.0 - drawdown / max(max_dd, 1e-6))\n"
         "    n = len(ctx.selected)\n"

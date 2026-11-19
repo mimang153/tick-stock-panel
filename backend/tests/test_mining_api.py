@@ -95,90 +95,89 @@ def _client(tmp_path):
     return TestClient(app), app.state.mining_manager.store
 
 
-def _successful_run(store: MiningRunStore, run_id: str = "result-run"):
-    manifest = store.create(
-        {
-            "factor_names": ["turnover_rate"],
-            "strategy_ids": [],
-            "asset_type": "stock",
-            "budget_profile": "exploratory",
-            "correlation_threshold": 0.75,
-        },
-        {"generation": "test"},
-        run_id=run_id,
-    )
-    store.append_event(run_id, "queued", {"status": "queued", "source": "manual"})
-    store.transition_status(run_id, "running")
-    store.append_event(run_id, "running", {"status": "running"})
-
-    frames = {
-        "factors": pl.DataFrame({
-            "factor_name": ["turnover_rate"],
-            "label": ["换手率"],
-            "direction": [1],
-            "score": [1.2],
-            "ic_mean": [0.1],
-            "ir": [0.8],
-            "coverage": [1.0],
-            "turnover": [0.2],
-            "spread_return": [None],
-            "spread_sharpe": [None],
-            "selected": [True],
-            "excluded_reason": [None],
-        }),
-        "correlation": pl.DataFrame({
-            "factor_x": ["turnover_rate"],
-            "factor_y": ["turnover_rate"],
-            "rho": [1.0],
-            "pair_count": [3],
-        }),
-        "candidates": pl.DataFrame({
-            "signature": [_FACTOR_SIGNATURE],
-            "name": ["因子组合 · 换手率"],
-            "kind": ["factor_combination"],
-            "factor_names_json": ['["turnover_rate"]'],
-            "strategy_id": [None],
-            "definition_json": [json.dumps(_FACTOR_DEFINITION, sort_keys=True)],
-            "regime_state": ["overall"],
-            "score": [0.9],
-            "oos_return": [0.08],
-            "oos_sharpe": [0.9],
-            "oos_max_drawdown": [-0.12],
-            "oos_positive_fold_ratio": [1.0],
-            "oos_n_trades": [70],
-            "confidence": ["standard"],
-            "valid_folds": [3],
-            "skipped_folds": [0],
-            "promoted_candidate_id": [None],
-            "published_strategy_id": [None],
-        }, schema_overrides={
-            "strategy_id": pl.String,
-            "promoted_candidate_id": pl.String,
-            "published_strategy_id": pl.String,
-        }),
-        "folds": pl.DataFrame({
-            "candidate_signature": [_FACTOR_SIGNATURE, _FACTOR_SIGNATURE],
-            "fold": [0, 0],
-            "label": ["OOS 1", "OOS 1"],
-            "regime_state": ["overall", "strong"],
-            "n_dates": [3, 2],
-            "train_start": ["2025-01-01", "2025-01-01"],
-            "train_end": ["2025-12-31", "2025-12-31"],
-            "test_start": ["2026-01-05", "2026-01-05"],
-            "test_end": ["2026-01-09", "2026-01-09"],
-            "selected_factors_json": ['["turnover_rate"]'] * 2,
-            "total_return": [0.08, 0.1],
-            "sharpe": [0.9, 1.1],
-            "max_drawdown": [-0.12, -0.08],
-            "n_trades": [70, 40],
-            "skipped": [False, False],
-            "reason": [None, None],
-        }),
+def _successful_metric_frames():
+    return {
+        "factors": pl.DataFrame(
+            {
+                "factor_name": ["turnover_rate"],
+                "label": ["换手率"],
+                "direction": [1],
+                "score": [1.2],
+                "ic_mean": [0.1],
+                "ir": [0.8],
+                "coverage": [1.0],
+                "turnover": [0.2],
+                "spread_return": [None],
+                "spread_sharpe": [None],
+                "selected": [True],
+                "excluded_reason": [None],
+            }
+        ),
+        "correlation": pl.DataFrame(
+            {
+                "factor_x": ["turnover_rate"],
+                "factor_y": ["turnover_rate"],
+                "rho": [1.0],
+                "pair_count": [3],
+            }
+        ),
     }
-    for name, frame in frames.items():
-        frame.write_parquet(store.artifact_path(run_id, name))
-        store.register_artifact(run_id, name)
-    store.write_summary(run_id, {
+
+
+def _successful_candidate_frames():
+    return {
+        "candidates": pl.DataFrame(
+            {
+                "signature": [_FACTOR_SIGNATURE],
+                "name": ["因子组合 · 换手率"],
+                "kind": ["factor_combination"],
+                "factor_names_json": ['["turnover_rate"]'],
+                "strategy_id": [None],
+                "definition_json": [json.dumps(_FACTOR_DEFINITION, sort_keys=True)],
+                "regime_state": ["overall"],
+                "score": [0.9],
+                "oos_return": [0.08],
+                "oos_sharpe": [0.9],
+                "oos_max_drawdown": [-0.12],
+                "oos_positive_fold_ratio": [1.0],
+                "oos_n_trades": [70],
+                "confidence": ["standard"],
+                "valid_folds": [3],
+                "skipped_folds": [0],
+                "promoted_candidate_id": [None],
+                "published_strategy_id": [None],
+            },
+            schema_overrides={
+                "strategy_id": pl.String,
+                "promoted_candidate_id": pl.String,
+                "published_strategy_id": pl.String,
+            },
+        ),
+        "folds": pl.DataFrame(
+            {
+                "candidate_signature": [_FACTOR_SIGNATURE, _FACTOR_SIGNATURE],
+                "fold": [0, 0],
+                "label": ["OOS 1", "OOS 1"],
+                "regime_state": ["overall", "strong"],
+                "n_dates": [3, 2],
+                "train_start": ["2025-01-01", "2025-01-01"],
+                "train_end": ["2025-12-31", "2025-12-31"],
+                "test_start": ["2026-01-05", "2026-01-05"],
+                "test_end": ["2026-01-09", "2026-01-09"],
+                "selected_factors_json": ['["turnover_rate"]'] * 2,
+                "total_return": [0.08, 0.1],
+                "sharpe": [0.9, 1.1],
+                "max_drawdown": [-0.12, -0.08],
+                "n_trades": [70, 40],
+                "skipped": [False, False],
+                "reason": [None, None],
+            }
+        ),
+    }
+
+
+def _successful_run_summary():
+    return {
         "status": "succeeded",
         "factor_count": 1,
         "selected_factor_count": 1,
@@ -195,7 +194,30 @@ def _successful_run(store: MiningRunStore, run_id: str = "result-run"):
         "matrix_bytes": 4096,
         "phase_ms": {"panel": 1.0, "total": 123.4},
         "worker": {"peak_rss_bytes": 1000, "serialized_result_bytes": 2000},
-    })
+    }
+
+
+def _successful_run(store: MiningRunStore, run_id: str = "result-run"):
+    manifest = store.create(
+        {
+            "factor_names": ["turnover_rate"],
+            "strategy_ids": [],
+            "asset_type": "stock",
+            "budget_profile": "exploratory",
+            "correlation_threshold": 0.75,
+        },
+        {"generation": "test"},
+        run_id=run_id,
+    )
+    store.append_event(run_id, "queued", {"status": "queued", "source": "manual"})
+    store.transition_status(run_id, "running")
+    store.append_event(run_id, "running", {"status": "running"})
+
+    frames = {**_successful_metric_frames(), **_successful_candidate_frames()}
+    for name, frame in frames.items():
+        frame.write_parquet(store.artifact_path(run_id, name))
+        store.register_artifact(run_id, name)
+    store.write_summary(run_id, _successful_run_summary())
     store.transition_status(run_id, "succeeded")
     store.append_event(run_id, "succeeded", {"status": "succeeded"})
     return manifest
@@ -218,14 +240,20 @@ def test_start_is_strict_and_projects_server_signature(tmp_path):
     assert body["request"]["factor_names"] == ["turnover_rate"]
     assert "force" not in body["request"]
     assert body["source"] == "manual"
-    assert client.post(
-        "/api/backtest/mining/runs",
-        json={**payload, "matching": "close_t"},
-    ).status_code == 422
-    assert client.post(
-        "/api/backtest/mining/runs",
-        json={"factor_names": ["unknown_factor"]},
-    ).status_code == 422
+    assert (
+        client.post(
+            "/api/backtest/mining/runs",
+            json={**payload, "matching": "close_t"},
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            "/api/backtest/mining/runs",
+            json={"factor_names": ["unknown_factor"]},
+        ).status_code
+        == 422
+    )
 
 
 def test_start_accepts_iso_dates_and_persists_json_safe_request(tmp_path):
@@ -247,13 +275,16 @@ def test_start_accepts_iso_dates_and_persists_json_safe_request(tmp_path):
     assert manifest is not None
     assert manifest["request"]["start"] == "2022-08-15"
     assert manifest["request"]["end"] == "2026-08-15"
-    assert client.post(
-        "/api/backtest/mining/runs",
-        json={
-            "factor_names": ["turnover_rate"],
-            "start": "2022/08/15",
-        },
-    ).status_code == 422
+    assert (
+        client.post(
+            "/api/backtest/mining/runs",
+            json={
+                "factor_names": ["turnover_rate"],
+                "start": "2022/08/15",
+            },
+        ).status_code
+        == 422
+    )
 
 
 @pytest.mark.parametrize(
@@ -472,6 +503,7 @@ def test_publish_endpoint_uses_persisted_definition_and_invalidates_runtime(
     strategy = engine.get(strategy_id)
     assert strategy.meta["origin_run_id"] == "result-run"
     assert strategy.meta["candidate_signature"] == _FACTOR_SIGNATURE
+    assert strategy is not None and strategy.matrix_strategy is not None
     assert strategy.matrix_strategy._scoring == {"turnover_rate": 1.0}
     assert strategy.matrix_strategy._directions == {"turnover_rate": "high"}
     assert invalidations == ["monitor"]
@@ -497,9 +529,7 @@ def test_sse_maps_failed_event_and_honors_last_event_id(tmp_path):
         {"generation": "test"},
         run_id="failed-run",
     )
-    queued = store.append_event(
-        "failed-run", "queued", {"status": "queued", "source": "manual"}
-    )
+    queued = store.append_event("failed-run", "queued", {"status": "queued", "source": "manual"})
     store.transition_status("failed-run", "failed", error="worker failed")
     failed = store.append_event(
         "failed-run", "error", {"status": "failed", "message": "worker failed"}

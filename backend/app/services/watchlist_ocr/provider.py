@@ -1,4 +1,5 @@
 """OCR 引擎抽象层 — 当前实现为 Tesseract。"""
+
 from __future__ import annotations
 
 import logging
@@ -38,7 +39,7 @@ def preprocess_for_ocr(image_bytes: bytes) -> Image.Image:
     Raises:
         ValueError: 图片分辨率过高（像素数超限）或解压炸弹。
     """
-    img = Image.open(BytesIO(image_bytes))
+    img: Image.Image = Image.open(BytesIO(image_bytes))
     # 多数格式可读头得到尺寸，在完整解码前拒绝超限图，避免 OOM
     pixels = img.width * img.height
     if pixels > _MAX_PIXELS:
@@ -62,9 +63,7 @@ def preprocess_for_ocr(image_bytes: bytes) -> Image.Image:
     w, h = contrasted.size
     if w < _MIN_WIDTH:
         scale = _MIN_WIDTH / w
-        contrasted = contrasted.resize(
-            (int(w * scale), int(h * scale)), Image.Resampling.LANCZOS
-        )
+        contrasted = contrasted.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
     return contrasted
 
 

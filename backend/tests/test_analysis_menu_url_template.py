@@ -1,4 +1,5 @@
 """url 嵌入型扩展页面: 模板绑定校验 (url 必填 http(s) / 数据型模板仍需 data_source)。"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -36,9 +37,15 @@ def test_url_template_roundtrip(tmp_path):
 def test_url_template_rejects_missing_bad_and_long_urls(tmp_path):
     c = _client(tmp_path)
     assert c.post("/api/analysis-menus/a", json=_url_body(url=None)).status_code == 422
-    assert c.post("/api/analysis-menus/b", json=_url_body(url="javascript:alert(1)")).status_code == 422
+    assert (
+        c.post("/api/analysis-menus/b", json=_url_body(url="javascript:alert(1)")).status_code
+        == 422
+    )
     assert c.post("/api/analysis-menus/d", json=_url_body(url="ftp://x/y")).status_code == 422
-    assert c.post("/api/analysis-menus/e", json=_url_body(url="https://x/" + "a" * 600)).status_code == 422
+    assert (
+        c.post("/api/analysis-menus/e", json=_url_body(url="https://x/" + "a" * 600)).status_code
+        == 422
+    )
 
 
 def test_data_templates_still_require_data_source(tmp_path):

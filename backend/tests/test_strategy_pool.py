@@ -1,8 +1,10 @@
 """策略池服务与 API 测试 — 池成员 / 库级分组与归档 / 迁移链 / 惰性登记。"""
+
 from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -48,22 +50,34 @@ def test_first_load_seeds_pool_from_legacy_ui_prefs():
 def test_v1_file_migrates_pool_and_meta(tmp_path):
     """v1 文件 (entries/archived 各带属性) → 池取顺序, 属性折入 meta。"""
     strategy_pool.load_snapshot()  # 建立文件
-    (tmp_path / "user_data" / "strategy_pool.json").write_text(json.dumps({
-        "version": 1,
-        "groups": [{"id": "g1", "name": "动量"}],
-        "entries": [
-            {"id": "a", "added_at": "2026-01-01T00:00:00", "group": "g1"},
-            {"id": "b", "added_at": "2026-01-02T00:00:00", "group": None},
-        ],
-        "archived": [
-            {"id": "c", "added_at": "2026-01-03T00:00:00", "group": "g1",
-             "archived_at": "2026-02-01T00:00:00"},
-        ],
-    }, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "user_data" / "strategy_pool.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "groups": [{"id": "g1", "name": "动量"}],
+                "entries": [
+                    {"id": "a", "added_at": "2026-01-01T00:00:00", "group": "g1"},
+                    {"id": "b", "added_at": "2026-01-02T00:00:00", "group": None},
+                ],
+                "archived": [
+                    {
+                        "id": "c",
+                        "added_at": "2026-01-03T00:00:00",
+                        "group": "g1",
+                        "archived_at": "2026-02-01T00:00:00",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     snapshot = strategy_pool.load_snapshot()
     assert snapshot["pool"] == ["a", "b"]  # 归档项不进池
     assert snapshot["meta"]["a"] == {
-        "group": "g1", "archived": False, "archived_at": None,
+        "group": "g1",
+        "archived": False,
+        "archived_at": None,
         "added_at": "2026-01-01T00:00:00",
     }
     assert snapshot["meta"]["c"]["archived"] is True
@@ -229,12 +243,18 @@ def test_strategy_lists_include_library_metadata_without_hiding_existing_referen
     directory.mkdir(parents=True)
     (directory / "custom_a.py").write_text(
         'import polars as pl\nMETA = {"id":"custom_a", "name":"A"}\n'
-        'def filter(df, params):\n    return pl.lit(True)\n', encoding="utf-8",
+        "def filter(df, params):\n    return pl.lit(True)\n",
+        encoding="utf-8",
     )
     engine = StrategyEngine(strategy_dirs=[directory])
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)), strategy_engine=engine,
-    )))
+    request: Any = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
+                strategy_engine=engine,
+            )
+        )
+    )
     _, group = strategy_pool.create_group("观察组")
     strategy_pool.set_strategy_group("custom_a", group["id"])
     strategy_pool.archive("custom_a")
@@ -242,7 +262,10 @@ def test_strategy_lists_include_library_metadata_without_hiding_existing_referen
     assert listing[0]["library"]["archived"] is True
     assert listing[0]["library"]["group_name"] == "观察组"
     assert strategy.get_strategy("custom_a", request)["library"] == listing[0]["library"]
-    assert screener.strategies(request, "stock", "1d")["presets"][0]["library"] == listing[0]["library"]
+    assert (
+        screener.strategies(request, "stock", "1d")["presets"][0]["library"]
+        == listing[0]["library"]
+    )
     assert engine.has("custom_a")  # 归档不注销, 已保存的回测/监控/叠加仍可解析
 
 
@@ -267,9 +290,13 @@ def test_api_roundtrip_pool_archive_groups():
     assert grouped.json()["meta"]["custom_a"]["group"] == group_id
 
     # 未知分组 fail-closed
-    assert client.post(
-        "/api/strategy-pool/strategies/custom_a/group", json={"group": "ghost"},
-    ).status_code == 400
+    assert (
+        client.post(
+            "/api/strategy-pool/strategies/custom_a/group",
+            json={"group": "ghost"},
+        ).status_code
+        == 400
+    )
 
     # 归档: 移出池 + meta 标记
     archived = client.post("/api/strategy-pool/strategies/custom_a/archive")
@@ -311,9 +338,14 @@ def test_api_get_syncs_engine_strategy_ids(tmp_path):
     app = FastAPI()
     app.include_router(strategy_pool_api.router)
     app.state.strategy_engine = type(
-        "Engine", (), {"list_strategies": lambda self: [
-            type("S", (), {"id": "engine_a"})(), type("S", (), {"id": "engine_b"})(),
-        ]},
+        "Engine",
+        (),
+        {
+            "list_strategies": lambda self: [
+                type("S", (), {"id": "engine_a"})(),
+                type("S", (), {"id": "engine_b"})(),
+            ]
+        },
     )()
     client = TestClient(app)
     body = client.get("/api/strategy-pool").json()

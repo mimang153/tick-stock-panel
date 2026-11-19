@@ -25,6 +25,7 @@
 
 接入点: app.main.lifespan → ensure_builtin_presets(store.data_dir)
 """
+
 from __future__ import annotations
 
 import logging
@@ -60,6 +61,7 @@ _SEED_MARKER = ".builtin_presets_seeded"
 # ---------------------------------------------------------------------------
 # 预设定义: 字段结构 + 完整拉取配方
 # ---------------------------------------------------------------------------
+
 
 def _fuyao_auth() -> dict:
     """fuyao 鉴权: X-api-key 头, 凭据复用行情插件的 fuyao_api_key。"""
@@ -206,7 +208,7 @@ def _is_retired_factory_pull(config_id: str, pull: PullConfig | None) -> bool:
         return True
     url = (pull.url or "").strip()
     if not url:
-        return True   # 空 URL 的空壳配置: 由出厂空壳演进而来, 需补齐
+        return True  # 空 URL 的空壳配置: 由出厂空壳演进而来, 需补齐
     if pull.fanout:
         return False  # 已带两级配方 (当前形态或用户自建), 不碰
     return any(url == retired["url"] for retired in _RETIRED_FACTORY_PULLS.get(config_id, ()))
@@ -243,11 +245,12 @@ async def ensure_builtin_presets(data_dir: Path) -> None:
             if _is_retired_factory_pull(config.id, existing.pull):
                 existing.pull = config.pull
                 changed = True
-            if not (existing.description or "").strip() or \
-                    (existing.description or "").startswith(_FACTORY_DESC_PREFIXES):
-                if existing.description != config.description:
-                    existing.description = config.description
-                    changed = True
+            if (
+                not (existing.description or "").strip()
+                or (existing.description or "").startswith(_FACTORY_DESC_PREFIXES)
+            ) and existing.description != config.description:
+                existing.description = config.description
+                changed = True
 
             if changed:
                 store.upsert(existing)

@@ -12,6 +12,7 @@
 
 午休应与 market_time.trading_minutes_elapsed_from_dt 同口径: 保持上午累计 120。
 """
+
 from __future__ import annotations
 
 import json
@@ -35,11 +36,13 @@ SYMBOL = "600519.SH"
 def _morning(symbol: str = SYMBOL, bars: int = 120) -> pl.DataFrame:
     """当日上午从 09:31 起连续 bars 根分钟K (120 根 = 完整上午, 到 11:30)。"""
     start = datetime(TODAY.year, TODAY.month, TODAY.day, 9, 31)
-    return pl.DataFrame({
-        "symbol": [symbol] * bars,
-        "datetime": [start + timedelta(minutes=i) for i in range(bars)],
-        "close": [100.0] * bars,
-    })
+    return pl.DataFrame(
+        {
+            "symbol": [symbol] * bars,
+            "datetime": [start + timedelta(minutes=i) for i in range(bars)],
+            "close": [100.0] * bars,
+        }
+    )
 
 
 @pytest.fixture
@@ -73,8 +76,9 @@ class _FakeRepo:
         self._bars = bars
         # /minute 与 /minute-batch 读取 repo.store.data_dir 判断分钟基准标记
         import tempfile
-        from types import SimpleNamespace
         from pathlib import Path
+        from types import SimpleNamespace
+
         self.store = SimpleNamespace(data_dir=Path(tempfile.mkdtemp()))
 
     def resolve_asset_type(self, symbol: str) -> str:
@@ -141,7 +145,9 @@ def _batch_request(bars: int = 120) -> MagicMock:
     repo = MagicMock()
     repo.get_etf_symbol_set.return_value = set()
     repo.get_minute_batch.side_effect = (
-        lambda syms, day, asset_type="stock": _morning(bars=bars) if day == TODAY else pl.DataFrame()
+        lambda syms, day, asset_type="stock": _morning(bars=bars)
+        if day == TODAY
+        else pl.DataFrame()
     )
     capset = MagicMock()
     capset.has.return_value = True
@@ -169,7 +175,9 @@ def test_minute_batch_trading_session_expected_unchanged(clock, hour, minute, ba
     set_time, _, sync = clock
     set_time(hour, minute)
 
-    payload = json.loads(kline_api.get_minute_batch(_batch_request(bars), {"symbols": [SYMBOL]}).body)
+    payload = json.loads(
+        kline_api.get_minute_batch(_batch_request(bars), {"symbols": [SYMBOL]}).body
+    )
 
     assert len(payload["data"].get(SYMBOL, [])) == bars
     sync.assert_not_called()

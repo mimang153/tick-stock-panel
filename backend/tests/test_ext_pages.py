@@ -3,11 +3,13 @@
 TestClient 最小 app 风格(同 test_ext_market_level): 不起完整后端,
 app.state.repo 只提供 store.data_dir。
 """
+
 from __future__ import annotations
 
 import io
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
@@ -72,7 +74,10 @@ def test_upload_and_lifecycle(client: TestClient, tmp_path: Path):
     assert b"export default" in r.content
 
     # 停用 / 删除
-    assert client.put("/api/ext-pages/demo_page/enabled", json={"enabled": False}).json()["enabled"] is False
+    assert (
+        client.put("/api/ext-pages/demo_page/enabled", json={"enabled": False}).json()["enabled"]
+        is False
+    )
     assert client.delete("/api/ext-pages/demo_page").json() == {"ok": True}
     assert client.get("/api/ext-pages/demo_page/bundle.js").status_code == 404
 
@@ -133,6 +138,10 @@ def test_write_bundle_capped_stops_reading(tmp_path: Path):
 
     stream = CountingStream(b"x" * 200)
     with pytest.raises(Exception) as exc:
-        asyncio.run(_write_bundle_capped(UploadFile(stream), tmp_path / "dummy.bin", max_bytes=64))
+        asyncio.run(
+            _write_bundle_capped(
+                cast(Any, UploadFile(cast(Any, stream))), tmp_path / "dummy.bin", max_bytes=64
+            )
+        )
     assert getattr(exc.value, "status_code", None) == 413
     assert stream.reads == 1  # 超限块读出后不再继续读

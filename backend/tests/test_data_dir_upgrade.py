@@ -1,4 +1,5 @@
 """Upgrade with real configuration files; never use a contributor's runtime data."""
+
 from __future__ import annotations
 
 import json
@@ -29,7 +30,9 @@ def installed(tmp_path, monkeypatch):
     monkeypatch.setattr(secrets_store, "_cache_sig", None)
     monkeypatch.setattr(preferences, "_cache", None)
     monkeypatch.setattr(preferences, "_cache_sig", None)
-    yield SimpleNamespace(exe=exe, target=target, legacy=exe.parent.parent / "TickFlowStockPanel_Data")
+    yield SimpleNamespace(
+        exe=exe, target=target, legacy=exe.parent.parent / "TickFlowStockPanel_Data"
+    )
     desktop._release_single_instance()
 
 
@@ -47,14 +50,21 @@ def migrate(target: Path):
 
 
 def seed(root: Path):
-    secrets = put(root / "user_data" / "secrets.json", {
-        "ai_api_key": "upgrade-test-ai-key-not-real",
-        "custom_source_keys": {"old-source": "upgrade-test-source-key-not-real"},
-    })
-    prefs = put(root / "user_data" / "preferences.json", {
-        "onboarding_completed": True, "realtime_quotes_enabled": True,
-        "ui_prefs": {"tf-theme": "dark", "columns": ["price", "volume"]},
-    })
+    secrets = put(
+        root / "user_data" / "secrets.json",
+        {
+            "ai_api_key": "upgrade-test-ai-key-not-real",
+            "custom_source_keys": {"old-source": "upgrade-test-source-key-not-real"},
+        },
+    )
+    prefs = put(
+        root / "user_data" / "preferences.json",
+        {
+            "onboarding_completed": True,
+            "realtime_quotes_enabled": True,
+            "ui_prefs": {"tf-theme": "dark", "columns": ["price", "volume"]},
+        },
+    )
     put(root / "user_data" / "strategy_overrides" / "mine.json", {"params": {"window": 17}})
     put(root / "ext_data" / "example" / "config.json", {"id": "example", "mode": "snapshot"})
     return secrets, prefs
@@ -102,15 +112,27 @@ def test_recovers_already_nested_configuration_and_keeps_originals(installed, de
     assert (nested / "preferences.json").read_bytes() == old_prefs
 
 
-def test_existing_credentials_are_preserved_as_a_whole_and_preferences_keep_existing_values(installed):
+def test_existing_credentials_are_preserved_as_a_whole_and_preferences_keep_existing_values(
+    installed,
+):
     seed(installed.legacy)
-    existing_key = put(installed.target / "user_data" / "secrets.json", {
-        "ai_api_key": "current-test-key-not-real", "custom_source_keys": {"new-source": "current-source-test-key"},
-    })
-    existing_prefs = put(installed.target / "user_data" / "preferences.json", {
-        "onboarding_completed": False, "realtime_quotes_enabled": False,
-        "ui_prefs": {"tf-theme": "light", "columns": []}, "count": 0, "empty": "",
-    })
+    existing_key = put(
+        installed.target / "user_data" / "secrets.json",
+        {
+            "ai_api_key": "current-test-key-not-real",
+            "custom_source_keys": {"new-source": "current-source-test-key"},
+        },
+    )
+    existing_prefs = put(
+        installed.target / "user_data" / "preferences.json",
+        {
+            "onboarding_completed": False,
+            "realtime_quotes_enabled": False,
+            "ui_prefs": {"tf-theme": "light", "columns": []},
+            "count": 0,
+            "empty": "",
+        },
+    )
     migrate(installed.target)
     assert secrets_store.get_ai_key() == "current-test-key-not-real"
     assert (installed.target / "user_data" / "secrets.json").read_bytes() == existing_key
@@ -123,13 +145,19 @@ def test_existing_credentials_are_preserved_as_a_whole_and_preferences_keep_exis
 
 def test_preferences_fill_missing_nested_fields_without_changing_existing_choices(installed):
     seed(installed.legacy)
-    before = put(installed.target / "user_data" / "preferences.json", {"ui_prefs": {"tf-theme": "light"}})
+    before = put(
+        installed.target / "user_data" / "preferences.json", {"ui_prefs": {"tf-theme": "light"}}
+    )
     migrate(installed.target)
     assert preferences.load() == {
-        "onboarding_completed": True, "realtime_quotes_enabled": True,
+        "onboarding_completed": True,
+        "realtime_quotes_enabled": True,
         "ui_prefs": {"tf-theme": "light", "columns": ["price", "volume"]},
     }
-    assert any(p.read_bytes() == before for p in (installed.target / "upgrade_backups").rglob("current-*.backup"))
+    assert any(
+        p.read_bytes() == before
+        for p in (installed.target / "upgrade_backups").rglob("current-*.backup")
+    )
 
 
 def test_conflicting_ordinary_files_are_never_overwritten_or_deleted(installed):
@@ -175,12 +203,12 @@ def test_malformed_completed_record_does_not_repeat_recovery(installed):
     seed(installed.legacy)
     migrate(installed.target)
     secret = installed.target / "user_data" / "secrets.json"
-    secret.write_bytes(b'{}')
+    secret.write_bytes(b"{}")
     marker = next((installed.target / "upgrade_backups").rglob("completed.json"))
     marker.write_bytes(b"broken-recovery-record")
     with pytest.raises(RuntimeError, match="升级恢复记录无效"):
         migrate(installed.target)
-    assert secret.read_bytes() == b'{}'
+    assert secret.read_bytes() == b"{}"
 
 
 def test_symbolic_links_cannot_redirect_recovery_outside_data_dir(installed, tmp_path):
@@ -214,7 +242,9 @@ def test_desktop_recovers_before_backend_reads_keys_and_preferences(installed, m
     monkeypatch.setattr(desktop, "_setup_logging", lambda: None)
     monkeypatch.setattr(desktop, "_precheck_mining_lock", lambda: None)
     monkeypatch.setattr(desktop, "_find_free_port", lambda _: 59998)
-    monkeypatch.setattr(desktop, "_wait_for_server", lambda port, timeout, done_event: done_event.wait(1))
+    monkeypatch.setattr(
+        desktop, "_wait_for_server", lambda port, timeout, done_event: done_event.wait(1)
+    )
     seen = []
 
     def backend(port, ready):
@@ -245,7 +275,9 @@ def test_saved_access_password_is_restored_before_env_bootstrap(installed, monke
     monkeypatch.setattr(desktop, "_setup_logging", lambda: None)
     monkeypatch.setattr(desktop, "_precheck_mining_lock", lambda: None)
     monkeypatch.setattr(desktop, "_find_free_port", lambda _: 59998)
-    monkeypatch.setattr(desktop, "_wait_for_server", lambda port, timeout, done_event: done_event.wait(1))
+    monkeypatch.setattr(
+        desktop, "_wait_for_server", lambda port, timeout, done_event: done_event.wait(1)
+    )
     seen = []
 
     def backend(port, ready):
@@ -317,7 +349,9 @@ def test_corrupt_existing_backup_aborts_before_overwriting_preferences(installed
     seed(installed.legacy)
     dest = installed.target / "user_data" / "preferences.json"
     current = put(dest, {"ui_prefs": {"tf-theme": "light"}})
-    token = hashlib.sha256(os.path.normcase(str(installed.legacy.resolve())).encode()).hexdigest()[:20]
+    token = hashlib.sha256(os.path.normcase(str(installed.legacy.resolve())).encode()).hexdigest()[
+        :20
+    ]
     folder = installed.target / "upgrade_backups" / "data-dir-v1" / token
     folder.mkdir(parents=True)
     backup = folder / f"current-preferences.json-{hashlib.sha256(current).hexdigest()}.backup"
@@ -363,7 +397,9 @@ def test_existing_file_created_during_publication_wins(installed, monkeypatch):
 
 
 @pytest.mark.parametrize("cross_volume", [False, True])
-def test_market_partition_migration_preserves_bytes_and_does_not_duplicate_directory_names(installed, monkeypatch, cross_volume):
+def test_market_partition_migration_preserves_bytes_and_does_not_duplicate_directory_names(
+    installed, monkeypatch, cross_volume
+):
     import errno
 
     from app.services import data_dir_upgrade as upgrade
@@ -382,7 +418,9 @@ def test_market_partition_migration_preserves_bytes_and_does_not_duplicate_direc
 
         monkeypatch.setattr(upgrade.os, "link", no_link_between_volumes)
     migrate(installed.target)
-    assert (installed.target / "kline_daily" / "date=2026-11-06" / "part.parquet").read_bytes() == b"immutable-partition-byte-sample"
+    assert (
+        installed.target / "kline_daily" / "date=2026-11-06" / "part.parquet"
+    ).read_bytes() == b"immutable-partition-byte-sample"
     assert not source.exists()
     assert not (installed.target / "kline_daily" / "kline_daily").exists()
 

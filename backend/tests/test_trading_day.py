@@ -8,7 +8,7 @@ tickflow 戳的 OR 语义与开盘缓冲窗、失败/无权限 → None、TTL �
 
 from __future__ import annotations
 
-from datetime import date, datetime, time as dt_time, timezone, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -27,11 +27,18 @@ def _clean_cache():
 
 def _no_probes(monkeypatch):
     """探测函数替换为爆炸 — 用于验证未被打到。"""
-    monkeypatch.setattr(trading_day, "_probe_fuyao", lambda now: (_ for _ in ()).throw(AssertionError("不应探测")))
-    monkeypatch.setattr(trading_day, "_probe_tickflow", lambda now: (_ for _ in ()).throw(AssertionError("不应探测")))
+    monkeypatch.setattr(
+        trading_day, "_probe_fuyao", lambda now: (_ for _ in ()).throw(AssertionError("不应探测"))
+    )
+    monkeypatch.setattr(
+        trading_day,
+        "_probe_tickflow",
+        lambda now: (_ for _ in ()).throw(AssertionError("不应探测")),
+    )
 
 
 # ---- 周末零成本直判 ----
+
 
 def test_weekend_returns_false_without_probing(monkeypatch):
     sat = datetime(2026, 8, 29, 10, 0, tzinfo=CN)  # 周六
@@ -43,12 +50,14 @@ def test_weekend_returns_false_without_probing(monkeypatch):
 
 # ---- 探测链优先级 ----
 
+
 def test_fuyao_calendar_is_authoritative_even_before_open(monkeypatch):
     """fuyao 日历结论无时段依赖: 开盘缓冲窗内也直接生效。"""
     holiday_mon = datetime(2026, 9, 7, 9, 31, tzinfo=CN)  # 周一 (缓冲窗内)
     monkeypatch.setattr(trading_day, "_probe_fuyao", lambda now: False)
     monkeypatch.setattr(
-        trading_day, "_probe_tickflow",
+        trading_day,
+        "_probe_tickflow",
         lambda now: (_ for _ in ()).throw(AssertionError("fuyao 已有结论不应继续探测")),
     )
     assert is_trading_day(holiday_mon) is False
@@ -123,6 +132,7 @@ def test_slow_oracle_followers_degrade_to_unknown_without_duplicate_probes(monke
 
 # ---- tickflow 戳语义 ----
 
+
 def test_tickflow_stale_stamp_before_buffer_is_unknown(monkeypatch):
     """开盘缓冲窗内戳停在昨日: 可能是集合竞价未翻新, 保守判未知。"""
     monday_935 = datetime(2026, 9, 7, 9, 35, tzinfo=CN)
@@ -190,6 +200,7 @@ def test_tickflow_error_returns_none(monkeypatch):
 
 # ---- TTL 缓存 ----
 
+
 def test_verdict_cached_within_ttl(monkeypatch):
     monday = datetime(2026, 9, 7, 10, 0, tzinfo=CN)
     calls = {"n": 0}
@@ -225,6 +236,7 @@ def test_unknown_verdict_retries_after_short_ttl(monkeypatch):
 
 # ---- 消费方 1: 实时行情门控 ----
 
+
 def test_quote_service_holiday_gate_blocks_polling(monkeypatch):
     from app.services.quote_service import QuoteService
 
@@ -249,6 +261,7 @@ def test_quote_service_polls_when_trading_or_unknown(monkeypatch):
 
 # ---- 消费方 2: 分钟增量 gate_reason ----
 
+
 def _minute_service(monkeypatch):
     from app.services.minute_refresh import MinuteRefreshService
 
@@ -265,34 +278,31 @@ def _minute_service(monkeypatch):
 def test_minute_refresh_gate_returns_holiday(monkeypatch):
     """周几+时段门控放行 (周一盘中) 但探针判休市 → holiday。"""
     svc = _minute_service(monkeypatch)
-    monday_1030 = datetime(2026, 9, 7, 10, 30, tzinfo=CN)
-    monkeypatch.setattr(
-        "app.services.minute_refresh._in_continuous_session", lambda now=None: True
-    )
+    monkeypatch.setattr("app.services.minute_refresh._in_continuous_session", lambda now=None: True)
     monkeypatch.setattr(trading_day, "is_trading_day", lambda now=None: False)
     assert svc._gate_reason() == "holiday"
 
 
 def test_minute_refresh_gate_passes_when_trading(monkeypatch):
     svc = _minute_service(monkeypatch)
-    monkeypatch.setattr(
-        "app.services.minute_refresh._in_continuous_session", lambda now=None: True
-    )
+    monkeypatch.setattr("app.services.minute_refresh._in_continuous_session", lambda now=None: True)
     monkeypatch.setattr(trading_day, "is_trading_day", lambda now=None: True)
     assert svc._gate_reason() is None
 
 
 # ---- fuyao 日历解析 ----
 
+
 def test_fuyao_provider_trading_days_conversion(monkeypatch):
-    from app.plugins.fuyao.provider import FuyaoProvider
     from app.plugins.fuyao import provider as fp
+    from app.plugins.fuyao.provider import FuyaoProvider
 
     class _CalClient:
         def trading_days(self):
             # 上海零点戳按 provider 的 _ms_of_date 口径构造
             def _midnight_ms(d):
                 import calendar
+
                 return (calendar.timegm(d.timetuple()) - 28800) * 1000
 
             d4, d7 = date(2026, 9, 4), date(2026, 9, 7)
