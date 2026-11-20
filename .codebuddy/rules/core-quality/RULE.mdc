@@ -1,0 +1,22 @@
+---
+description: tick-stock-panel 核心代码质量硬约束（提交门禁强制）：函数/文件行数、注释覆盖率、圈复杂度、命名、异常、docstring。写码时始终遵守。
+alwaysApply: true
+enabled: true
+---
+
+# 核心代码质量硬约束
+
+本规则是 `AGENTS.md`「核心代码质量硬约束」小节的规则副本，确保 AI 每次会话必加载。
+真相源为 `CONVENTIONS.md` §3/§4 与 `tsp-rule/code-quality.mdc`；本文件只固化最高频约束，避免口径漂移。
+由 pre-commit 增量门禁强制（只检查本次改动文件），写码时一次做对。
+
+- **方法/函数 ≤80 行**：超出先拆函数；确需超限须在签名行写 `# func-length-allow: <理由>` 显式承认（理由必填、可 grep）。
+- **文件 ≤1000 行**：超出先拆模块（唯一存量豁免 `app/backtest/strategy.py`，已登记待重构）。
+- **注释/docstring 覆盖率 5%~60%**（测试与 scripts 豁免）：文档行 = 行注释 + docstring；低于下限补必要注释，高于上限删冗余注释。
+- **圈复杂度 ≤12**（ruff C901）：超出用 `# noqa: C901` 附理由。
+- **命名**：snake_case / camelCase / PascalCase / UPPER_SNAKE；禁拼音、缩写与含混单字母（循环索引除外）。
+- **异常**：禁裸 `except Exception` 不留痕（须 raise 或记日志后约束范围）、禁 `print(` 报错、禁无用空 `try/except`。
+- **docstring**：模块、公开类/函数、API handler、数据转换边界函数必须有，写清「输入约束 → 行为 → 输出/异常」，中文为主。
+- **嵌套深度 ≤2 层**（if/try/for 相互嵌套）：超出用 guard clause 或抽 `is_valid(...)` / `_do_x(...)` 子函数。
+
+禁止静默删规则或改阈值；确需调整走 `CONVENTIONS.md` §4 变更流程。
