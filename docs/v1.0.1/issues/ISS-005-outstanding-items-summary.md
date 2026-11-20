@@ -8,9 +8,9 @@
 
 - 盘点范围：`docs/v1.0.1/issues/`（ISS-001~004）、`docs/v1.0.1/design/`（DES-001~005）、`docs/v1.0.1/requirements/`（REQ-001~002）共 11 份文档。
 - 唯一编号条目约 88 项 + 无编号风险/待办约 15 项；其中已完成约 35 项，其余为本清单登记的未闭环项。
-- **历史实测数字**（4820/4848/4898 passed、163→0 failed）是各阶段过程证据，保留在原文，不作为当前状态。当前全量基线为 `4922 passed / 13 skipped / 1 xfailed / 0 failed`（2026-11-20 本轮 DIST-05~14 分布式缺口补齐后重跑，四后端 conftest 锁 memory）；`pre-commit run --all-files` 仍因存量 mypy 错误与本机缺 `pnpm` 未通过（改动文件 ruff/mypy/门禁通过）。
+- **历史实测数字**（4820/4848/4898 passed、163→0 failed）是各阶段过程证据，保留在原文，不作为当前状态。当前全量基线为 `4923 passed / 13 skipped / 1 xfailed / 0 failed`（2026-11-20 本轮 DIST-05~14 + DIST-13 fencing 接入后重跑，四后端 conftest 锁 memory）；`pre-commit run --all-files` 仍因存量 mypy 错误与本机缺 `pnpm` 未通过（改动文件 ruff/mypy/门禁通过）。
 - **2026-11-20 代码核对 correction（已补齐）**：§7.1 中 DES-002 §9 与 DES-003 D-02/D-05 原记"均已落地"，逐项读码核对发现 30 天快照 TTL、repair CAS、私有 staging owner、D-02 审计 90 天 TTL、D-05 多 worker 强制 redis 五项缺失。本轮已全部补齐并定向验证；§4/§7.1.1/§7.1.2 状态同步为"已落地"。
-- **2026-11-20 二次深度核对（分布式端到端，已补齐）**：核对发现 §7.1.1/§7.1.2 三项"已落地"实为部分落地、另有四类跨实例状态本地化违反与三类故障恢复缺口，登记 DIST-05~14。本轮已补齐：DIST-05/06/07/08/09/10/11/12 闭环；DIST-13（fencing 基础设施就绪、未逐一接入全部资源）、DIST-14（无接管调度器）为部分闭环。§7.1.1/§7.1.2 状态同步更正。
+- **2026-11-20 二次深度核对（分布式端到端，已补齐）**：核对发现 §7.1.1/§7.1.2 三项"已落地"实为部分落地、另有四类跨实例状态本地化违反与三类故障恢复缺口，登记 DIST-05~14。本轮已补齐：DIST-05/06/07/08/09/10/11/12/13 闭环；DIST-14（无接管调度器）为部分闭环。§7.1.1/§7.1.2 状态同步更正。
 - 分类：`A 环境/人工验收`、`B 可做代码与产物`、`C 工程与质量债`、`D 设计待定/产品决策`、`E 文档滞后（已修正/待修正）`。
 
 ## 1. A 类：环境 / 人工验收（阻断发布，需外部条件）
@@ -47,7 +47,7 @@
 | DIST-10（已闭环） | §7.1.0 总原则 | `sync_state.updated_at` 跨实例单调 | 已落地：`_write` 用 `coordination.lock(sync_state:{task})` 串行化，updated_at 以 CK 历史 max 为下界 +1ms，FINAL 收敛确定 |
 | DIST-11（已闭环） | §7.1.0 总原则 | `strategy_cache` 多 worker 强制 redis | 已落地：validator 拒绝 `api_workers>1` + `cache_backend=memory`，与 mining 校验对齐 |
 | DIST-12（已闭环） | DES-004 | mining recover owner 存活判定 | 已落地：run 转 running 写 `owner_pid`/`owner_host`；recover 对 running run 用 `os.kill(pid,0)` 判存活（跨主机保守跳过），不再误标 live run |
-| DIST-13（部分闭环） | DES-004 | coordination fencing token | 部分落地：token 改为 `<全局单调序号>:<uuid>`（Redis INCR）+ `fence_sequence()` API，基础设施就绪；generation 写入已用 fencing（A1）。**其余被保护资源（repair 写入等）尚未逐一比对序号** |
+| DIST-13（已闭环） | DES-004 | coordination fencing token 接入被保护资源 | 已落地：`lock()` yield token（调用方 `if not acquired` 语义不变）；新增 `coordination.fence(key, token)`——写前比对 Redis 锁当前值是否仍是自己的 token，失配即拒。`apply_ck_repair()` 在写快照/审计/事实表前调用 fence，租约被接管时拦住迟到写入。generation 沿用 CK 侧 `_assert_lease`。测试覆盖 token 失配被拒；47 passed |
 | DIST-14（部分闭环） | DES-004 | repair 任务级跨 worker 接管 | 部分落地：任务状态已跨实例可见且崩溃后标 failed（`_reap_orphans`）；**无自动接管重跑调度器**，需独立设计 |
 
 ## 3. C 类：工程与质量债（非阻断，可延后）
@@ -102,10 +102,10 @@
 ## 6. 当前全量门禁基线
 
 ```
-4922 passed / 13 skipped / 1 xfailed / 0 failed
+4923 passed / 13 skipped / 1 xfailed / 0 failed
 ```
 
-> 该数字是 2026-11-20 本轮 DIST-05~14 分布式缺口补齐后的全量回归结果（改造前基线 4898）。`pre-commit run --all-files` 因存量 mypy 错误（多个未改动文件）与本机缺 `pnpm` 未通过；改动文件 ruff/mypy/门禁单独通过，提交/发布前仍需清除存量门禁欠账。
+> 该数字是 2026-11-20 本轮 DIST-05~14 分布式缺口补齐 + DIST-13 fencing 接入后的全量回归结果（改造前基线 4898）。`pre-commit run --all-files` 因存量 mypy 错误（多个未改动文件）与本机缺 `pnpm` 未通过；改动文件 ruff/mypy/门禁单独通过，提交/发布前仍需清除存量门禁欠账。
 
 - 四后端（cache/event_bus/coordination/mining_store）由 `tests/conftest.py` 强制 memory 保证隔离；redis 路径由 `test_*_redis.py` 与 `test_coordination_once.py` 单独覆盖。
 - PG 容器 `tsp-pg-dev` 需运行（DES-005 账户测试）；CK 测试库 `tsp_test`。
@@ -167,7 +167,7 @@ CH-04 只依赖已有观察日志和冻结版本，不依赖 PH-1 的代码改�
 - [ ] 4 个 PR 按序提交并 DCO 签署，`git status` 工作区干净（或仅剩明确不提交的文件）
 - [ ] 冻结版本 tag 已打
 - [ ] CH-04 观察结论落 DEP-002
-- [ ] 全量门禁仍 4922/0 failed
+- [ ] 全量门禁仍 4923/0 failed
 
 ### 7.1 PH-1 决策记录（2026-11-20）
 

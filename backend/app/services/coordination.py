@@ -372,12 +372,29 @@ class Coordination:
         except Exception as exc:
             raise CoordinationUnavailableError(f"释放租约 {key}", exc) from exc
 
+    def fence(self, key: str, token: bytes | None) -> None:
+        """写共享资源前校验仍持有租约；失配（租约过期被接管）即拒绝（DIST-13）。
+
+        这正是 fencing 的实质：不要求下游存储每行记 token，而是在每次写前
+        确认 Redis 锁的每个 key 仍是自己的；若已被别人拿走，迟到写入被拦。
+        memory 后端无跨实例，恒定通过。
+        """
+        if token is None or self._once_client is None:
+            return
+        lock_key = f"{self._once_prefix}lock:{key}"
+        try:
+            current = self._once_client.get(lock_key)
+        except Exception as exc:
+            raise CoordinationUnavailableError(f"fence 校验 {key}", exc) from exc
+        if current != token:
+            raise PermissionError(f"租约已失效或被接管, 拒绝写入: {key}")
+
     @contextmanager
     def lock(self, key: str, ttl_s: int = 600):
-        """上下文形式获取并自动释放租约；yield 是否获得执行权。"""
+        """上下文形式获取并自动释放租约；yield 持有 token（真值表示获得执行权）。"""
         token = self.acquire_lock(key, ttl_s)
         try:
-            yield token is not None
+            yield token
         finally:
             self.release_lock(key, token)
 

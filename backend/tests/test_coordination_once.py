@@ -25,7 +25,7 @@ def test_once_memory_single_shot(monkeypatch) -> None:
 
 
 def test_lock_memory_can_be_released(monkeypatch) -> None:
-    """memory 模式的租约释放后可再次获取。"""
+    """memory 模式的租约释放后可再次获取；lock 上下文 yield 持有 token。"""
     monkeypatch.setattr(settings, "coordination_backend", "memory")
     from app.services.coordination import Coordination
 
@@ -35,7 +35,45 @@ def test_lock_memory_can_be_released(monkeypatch) -> None:
     assert token is not None
     assert coord.acquire_lock(key) is None
     coord.release_lock(key, token)
-    assert coord.acquire_lock(key) is not None
+    token2 = coord.acquire_lock(key)
+    assert token2 is not None
+    # fence 在 memory 后端恒定通过（无跨实例），且 lock 上下文 yield token 真值。
+    coord.fence(key, token2)
+    coord.release_lock(key, token2)
+    with coord.lock(key) as acquired:
+        assert acquired  # yield 的是 token（bytes），非 bool
+        coord.fence(key, acquired)
+
+
+def test_fence_rejects_stale_token_redis(monkeypatch) -> None:
+    """redis 模式：租约被接管后，旧 token 的 fence 必须拒绝写入（DIST-13）。"""
+    pytest.importorskip("redis")
+    monkeypatch.setattr(settings, "coordination_backend", "redis")
+    monkeypatch.setattr(settings, "coordination_redis_url", settings.cache_redis_url)
+    from app.services.coordination import Coordination
+
+    try:
+        first = Coordination()
+    except Exception as exc:  # noqa: BLE001 - Redis 不可用时 skip，不误判失败
+        pytest.skip(f"Redis 不可用: {exc}")
+    second = Coordination()
+    key = f"repair:stock:{uuid.uuid4().hex}"
+    lock_key = f"{first._once_prefix}lock:{key}"
+    try:
+        token = first.acquire_lock(key)
+        assert token is not None
+        first.fence(key, token)  # 仍持有 → 通过
+        # 模拟租约过期被接管：删除旧锁，second 拿新 token。
+        first.release_lock(key, token)
+        token2 = second.acquire_lock(key)
+        assert token2 is not None
+        with pytest.raises(PermissionError, match="租约已失效或被接管"):
+            first.fence(key, token)  # 旧 token → 拒绝
+        second.fence(key, token2)  # 新 token → 通过
+        second.release_lock(key, token2)
+    finally:
+        assert first._once_client is not None
+        first._once_client.delete(lock_key)
 
 
 def test_once_redis_cross_worker(monkeypatch) -> None:

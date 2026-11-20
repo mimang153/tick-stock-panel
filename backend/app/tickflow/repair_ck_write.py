@@ -35,6 +35,9 @@ def apply_ck_repair(
         current = store.read_daily(table, start=day, end=day)
         if not current.equals(day_rows):
             raise ValueError("修补期间发生变化, 请重新自检")
+        # fencing：写快照/审计/事实表前确认租约未被接管（DIST-13）。若本 worker
+        # 曾卡到租约过期、另一实例已接管同分区，此处拒绝迟到写入，避免双写污染。
+        coordination.fence(f"repair:{table}:{day}", acquired)
         repair_id = store.begin_repair(table, day, "precise", actor)
         try:
             store.append_repair_snapshot(repair_id, table, day, before, actor)
