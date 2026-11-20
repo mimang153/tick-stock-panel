@@ -88,10 +88,40 @@ class MiningJobManager:
         with self._lock:
             if self._shutdown:
                 raise RuntimeError("mining job manager is shut down")
+
+        # claim → create 必须跨实例串行化：否则 A claim 后未 create 时，B 观察到
+        # 悬挂 signature 会另建 run，产生同签名双 run（DIST-07）。拿不到锁说明
+        # 另一 worker 正在创建同签名 run，读取它的结果即可。
+        with coordination.lock(f"mining_claim:{signature}") as acquired:
+            if not acquired:
+                existing = self._store.find_by_signature(signature)
+                if existing is not None:
+                    return existing
+                raise RuntimeError("同一签名的 mining run 正在被其他实例创建, 请稍后重试")
+            return self._start_locked(
+                request, data_fingerprint, signature, proposed_run_id, force, source
+            )
+
+    def _start_locked(
+        self,
+        request: dict[str, Any],
+        data_fingerprint: Any,
+        signature: str,
+        proposed_run_id: str,
+        force: bool,
+        source: str,
+    ) -> dict[str, Any]:
+        """在持有 signature 跨实例租约的前提下 claim 并创建 run。"""
+        with self._lock:
             if not force:
                 claimed = self._store.claim_signature(signature, proposed_run_id)
                 if claimed != proposed_run_id:
                     existing = self._store.get(claimed)
+                    if existing is not None:
+                        return existing
+                    # 悬挂签名由 claim 的 Lua 自愈（重指到 proposed_run_id），
+                    # 正常情况下不会走到这里；保守再取一次，仍无则继续创建（DIST-07）。
+                    existing = self._store.get(proposed_run_id)
                     if existing is not None:
                         return existing
 
@@ -227,6 +257,14 @@ class MiningJobManager:
                 self._finish_cancelled_locked(run_id)
                 return False
             self._store.transition_status(run_id, "running")
+            # 记录 owner 供启动恢复判定存活（DIST-12）；文件版无跨实例恢复需求，
+            # 仅 Redis 后端提供 set_run_owner。
+            set_owner = getattr(self._store, "set_run_owner", None)
+            if set_owner is not None:
+                import os
+                import socket
+
+                set_owner(run_id, os.getpid(), socket.gethostname())
             self._store.append_event(run_id, "running", {"status": "running"})
             return True
 

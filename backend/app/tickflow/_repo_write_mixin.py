@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from uuid import uuid4
 
 from app.tickflow._repo_mixin_base import _RepoMixinBase
 from app.tickflow.repository import (
@@ -656,13 +657,15 @@ class _WriteMixin(_RepoMixinBase):
     ):
         if asset_type not in {"stock", "etf", "index"}:
             return action()
-        generation_id = store.begin_generation(asset_type, "system", day)
+        # leased generation：旧 owner 迟到 commit 因 token 失配被拒（DIST-05）。
+        owner_id = uuid4().hex
+        generation_id, token = store.begin_generation_leased(asset_type, "system", day, owner_id)
         try:
             result = action()
         except BaseException:
-            store.fail_generation(asset_type, generation_id, "system")
+            store.fail_generation_leased(asset_type, generation_id, owner_id, token)
             raise
-        store.commit_generation(asset_type, generation_id, "system")
+        store.commit_generation_leased(asset_type, generation_id, owner_id, token)
         return result
 
     def _write_daily_partition_ck(

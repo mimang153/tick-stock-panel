@@ -317,6 +317,10 @@ class Settings(BaseSettings):
             raise ValueError(
                 "MINING_STORE_BACKEND=memory 不允许多 worker（API_WORKERS>1），请改用 redis"
             )
+        # 多 worker 禁用 memory 缓存：strategy_cache 的"今日曾命中"并集靠进程内锁
+        # read-merge-write，多 worker 会丢并集（DIST-11）。
+        if self.api_workers > 1 and self.cache_backend == "memory":
+            raise ValueError("CACHE_BACKEND=memory 不允许多 worker（API_WORKERS>1），请改用 redis")
         if self.mining_artifact_store == "s3" and not self.mining_artifact_s3_bucket:
             raise ValueError("MINING_ARTIFACT_S3_BUCKET 必须在 MINING_ARTIFACT_STORE=s3 时配置")
         if self.backtest_matrix_cache_max_mb <= 0:

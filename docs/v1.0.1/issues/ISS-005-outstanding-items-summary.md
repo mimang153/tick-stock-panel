@@ -8,8 +8,9 @@
 
 - 盘点范围：`docs/v1.0.1/issues/`（ISS-001~004）、`docs/v1.0.1/design/`（DES-001~005）、`docs/v1.0.1/requirements/`（REQ-001~002）共 11 份文档。
 - 唯一编号条目约 88 项 + 无编号风险/待办约 15 项；其中已完成约 35 项，其余为本清单登记的未闭环项。
-- **历史实测数字**（4820/4848/4898 passed、163→0 failed）是各阶段过程证据，保留在原文，不作为当前状态。当前全量基线为 `4920 passed / 13 skipped / 1 xfailed / 0 failed`（2026-11-20 本轮 DIST/B4/B5 改动后重跑，四后端 conftest 锁 memory）；`pre-commit run --all-files` 仍因存量 mypy 错误与本机缺 `pnpm` 未通过（改动文件 ruff/mypy/门禁通过）。
+- **历史实测数字**（4820/4848/4898 passed、163→0 failed）是各阶段过程证据，保留在原文，不作为当前状态。当前全量基线为 `4922 passed / 13 skipped / 1 xfailed / 0 failed`（2026-11-20 本轮 DIST-05~14 分布式缺口补齐后重跑，四后端 conftest 锁 memory）；`pre-commit run --all-files` 仍因存量 mypy 错误与本机缺 `pnpm` 未通过（改动文件 ruff/mypy/门禁通过）。
 - **2026-11-20 代码核对 correction（已补齐）**：§7.1 中 DES-002 §9 与 DES-003 D-02/D-05 原记"均已落地"，逐项读码核对发现 30 天快照 TTL、repair CAS、私有 staging owner、D-02 审计 90 天 TTL、D-05 多 worker 强制 redis 五项缺失。本轮已全部补齐并定向验证；§4/§7.1.1/§7.1.2 状态同步为"已落地"。
+- **2026-11-20 二次深度核对（分布式端到端，已补齐）**：核对发现 §7.1.1/§7.1.2 三项"已落地"实为部分落地、另有四类跨实例状态本地化违反与三类故障恢复缺口，登记 DIST-05~14。本轮已补齐：DIST-05/06/07/08/09/10/11/12 闭环；DIST-13（fencing 基础设施就绪、未逐一接入全部资源）、DIST-14（无接管调度器）为部分闭环。§7.1.1/§7.1.2 状态同步更正。
 - 分类：`A 环境/人工验收`、`B 可做代码与产物`、`C 工程与质量债`、`D 设计待定/产品决策`、`E 文档滞后（已修正/待修正）`。
 
 ## 1. A 类：环境 / 人工验收（阻断发布，需外部条件）
@@ -38,6 +39,16 @@
 | DIST-03（已闭环） | DES-003 D-02 | 审计表 90 天 TTL | 已落地：`ck_mining_run_audit` DDL+v3 迁移加 90 天 TTL（CK 无独立 `ck_mining_events`，审计表即重建源）；schema 测试通过 |
 | DIST-04（已闭环） | DES-003 D-05 | 多 worker 强制 redis 后端 | 已落地：新增 `API_WORKERS` 配置，validator 拒绝 `api_workers>1` + `mining_store_backend=memory`；测试进程锁 `API_WORKERS=1`；配置测试通过 |
 | B4/B5 DoD（待重定义） | REQ-002 §6/§7 | grep 归零 / 裸 DataStore 清零 | 二次核对确认与架构原则冲突：剩余 parquet 调用多为 CK 优先回退、上游 dump、产物、暂存、取证、用户 SQL 引擎；本轮完成 ETF 因子 CK 优先、删 `screener_results` 残留。DoD 口径需走 REQ-002 §12 变更控制，见 REQ-002 B4/B5 收敛结论 |
+| DIST-05（已闭环，后台接管除外） | DES-004 / §7.1.1 | generation 抢占原子化 + fencing 覆盖数据写入 | 已落地：`begin_generation_leased` 用 `coordination.lock(generation_lease:{asset})` 串行 SELECT→INSERT；CK enriched 写入改用 leased generation + 唯一 owner，迟到 commit 因 token 失配被拒。**仍无后台自动接管**：过期租约由下个任务启动时抢占，CK 孤儿 publishing 只检测（读不阻塞） |
+| DIST-06（已闭环） | DES-002 §9 | repair 状态 CAS 原子化 | 已落地：`set_repair_status` 用 `coordination.lock(repair_status:{id})` 串行化 read-then-write，跨 worker 不再各写终态；42 passed |
+| DIST-07（已闭环） | DES-003 D-01 | 签名 claim→create 竞态闭环 + 悬挂签名修复 | 已落地：manager 用 `coordination.lock(mining_claim:{sig})` 包住 claim→create（并发双 run 窗口消除）；`clear_dangling_signatures()` 随启动 recover 清理悬挂映射；32 passed |
+| DIST-08（已闭环） | §7.1.0 总原则 | `last_runs` 缓存 inf TTL | 已落地：TTL inf → 有界 30s（`_LAST_RUNS_TTL`），数据源本就共享，跨 worker 最终一致 |
+| DIST-09（已闭环） | §7.1.0 总原则 | `/api/data/clear` 跨实例同步 | 已落地：`job_store.clear()` 同步 `coordination.job_state.clear()`；取消标志按 TTL 自愈。**CK 数据清库仍是运维独立操作**，clear API 只清本地 |
+| DIST-10（已闭环） | §7.1.0 总原则 | `sync_state.updated_at` 跨实例单调 | 已落地：`_write` 用 `coordination.lock(sync_state:{task})` 串行化，updated_at 以 CK 历史 max 为下界 +1ms，FINAL 收敛确定 |
+| DIST-11（已闭环） | §7.1.0 总原则 | `strategy_cache` 多 worker 强制 redis | 已落地：validator 拒绝 `api_workers>1` + `cache_backend=memory`，与 mining 校验对齐 |
+| DIST-12（已闭环） | DES-004 | mining recover owner 存活判定 | 已落地：run 转 running 写 `owner_pid`/`owner_host`；recover 对 running run 用 `os.kill(pid,0)` 判存活（跨主机保守跳过），不再误标 live run |
+| DIST-13（部分闭环） | DES-004 | coordination fencing token | 部分落地：token 改为 `<全局单调序号>:<uuid>`（Redis INCR）+ `fence_sequence()` API，基础设施就绪；generation 写入已用 fencing（A1）。**其余被保护资源（repair 写入等）尚未逐一比对序号** |
+| DIST-14（部分闭环） | DES-004 | repair 任务级跨 worker 接管 | 部分落地：任务状态已跨实例可见且崩溃后标 failed（`_reap_orphans`）；**无自动接管重跑调度器**，需独立设计 |
 
 ## 3. C 类：工程与质量债（非阻断，可延后）
 
@@ -91,10 +102,10 @@
 ## 6. 当前全量门禁基线
 
 ```
-4920 passed / 13 skipped / 1 xfailed / 0 failed
+4922 passed / 13 skipped / 1 xfailed / 0 failed
 ```
 
-> 该数字是 2026-11-20 本轮 DIST/B4/B5 改动后的全量回归结果（改造前基线 4898）。`pre-commit run --all-files` 因存量 mypy 错误（多个未改动文件）与本机缺 `pnpm` 未通过；改动文件 ruff/mypy/门禁单独通过，提交/发布前仍需清除存量门禁欠账。
+> 该数字是 2026-11-20 本轮 DIST-05~14 分布式缺口补齐后的全量回归结果（改造前基线 4898）。`pre-commit run --all-files` 因存量 mypy 错误（多个未改动文件）与本机缺 `pnpm` 未通过；改动文件 ruff/mypy/门禁单独通过，提交/发布前仍需清除存量门禁欠账。
 
 - 四后端（cache/event_bus/coordination/mining_store）由 `tests/conftest.py` 强制 memory 保证隔离；redis 路径由 `test_*_redis.py` 与 `test_coordination_once.py` 单独覆盖。
 - PG 容器 `tsp-pg-dev` 需运行（DES-005 账户测试）；CK 测试库 `tsp_test`。
@@ -156,7 +167,7 @@ CH-04 只依赖已有观察日志和冻结版本，不依赖 PH-1 的代码改�
 - [ ] 4 个 PR 按序提交并 DCO 签署，`git status` 工作区干净（或仅剩明确不提交的文件）
 - [ ] 冻结版本 tag 已打
 - [ ] CH-04 观察结论落 DEP-002
-- [ ] 全量门禁仍 4920/0 failed
+- [ ] 全量门禁仍 4922/0 failed
 
 ### 7.1 PH-1 决策记录（2026-11-20）
 
@@ -172,10 +183,10 @@ CH-04 只依赖已有观察日志和冻结版本，不依赖 PH-1 的代码改�
 
 | 项 | 决策 | 落地状态（2026-11-20 读码核对） |
 |---|---|---|
-| 快照保留期 | **30 天 TTL** | ✅ 已落地（2026-11-20 补）：`ck_repair_snapshot` DDL + v3 迁移加 `TTL toDate(created_at)+INTERVAL 30 DAY`；`set_repair_status()` 增加按 `repair_id` 最新状态的状态机 CAS，终态不可覆写。未引入 owner/fencing 列（外层 `coordination.lock` 已串行化读-改-写），过期快照不承诺可回滚 |
+| 快照保留期 | **30 天 TTL** | ✅ 已落地（2026-11-20 补）：`ck_repair_snapshot` DDL + v3 迁移加 30 天 TTL；`set_repair_status()` 的 CAS 已用 `coordination.lock(repair_status:{id})` 串行化 read-then-write（DIST-06），跨 worker 不再各写终态。过期快照不承诺可回滚 |
 | `ck_` 前缀 | **保留** | ✅ 已落地：三张元数据表仍用 `ck_` 前缀 |
 | 审计 JSON 字段类型 | **保持 `String` + `schema_version`** | ✅ 已落地：字段保持 `String`，未引入 `Map` |
-| generation 心跳超时 | **600s 租约 + 自动接管** | ✅ 已落地：`ck_enriched_generation` 有 owner/fencing_token/lease_expires_at，`_LEASE_SECONDS=600`，过期仅 owner 可续期/接管，测试覆盖错 owner/token 被拒 |
+| generation 心跳超时 | **600s 租约 + 自动接管** | ⚠️ 大部分落地（2026-11-20 补）：字段与 `_LEASE_SECONDS=600` 在、错 owner/token 被拒已测；抢占已用 `coordination.lock` 串行化不再重复（DIST-05），CK enriched 写入改用 leased generation + 唯一 owner，迟到 commit 因 token 失配被拒。**无后台自动接管循环**：过期租约由下个任务启动时抢占，CK 孤儿只检测（读不阻塞） |
 | staging 清理策略 | **按 `repair_id` 私有化** | ✅ 已落地（2026-11-20 补）：staging 用本次唯一 `backup_id` 私有目录并写 `.owner` 标记，`finally` 校验 owner 后才 `rmtree`。CK `repair_id` 在更底层 `apply_ck_repair()` 内生成且不向上传递，故以等价的备份批次 id 作为私有 owner；效果一致（防同名/重试误删） |
 
 补充约束：修补审计、快照、事实表写入无跨表事务，需 outbox/对账补偿；generation commit 与 `cache.bump("enriched")` 非原子，缓存失效必须可由 CK generation 幂等重建，不能依赖调用顺序。
@@ -186,7 +197,7 @@ CH-04 只依赖已有观察日志和冻结版本，不依赖 PH-1 的代码改�
 
 | 编号 | 决策 | 落地状态（2026-11-20 读码核对） |
 |---|---|---|
-| 数据指纹口径 | **拆分“数据指纹 + 实现指纹”，且实现指纹不进签名** | ✅ 已落地：`_build_data_fingerprint_once()` 拆分 data/implementation digest，`compute_run_signature()` 只消费 data digest |
+| 数据指纹口径 | **拆分“数据指纹 + 实现指纹”，且实现指纹不进签名** | ✅ 已落地（2026-11-20 补）：指纹拆分在 `_build_data_fingerprint_once()`；claim→create 已用 `coordination.lock(mining_claim:{sig})` 串行化，悬挂签名由 `clear_dangling_signatures()` 随启动 recover 清理（DIST-07） |
 | D-02 事件 TTL | **90 天，且不小于协调态重建窗口** | ✅ 已落地（2026-11-20 补）：`ck_mining_run_audit` DDL + v3 迁移加 `TTL toDate(created_at)+INTERVAL 90 DAY`。当前实现事件存 Redis、审计存 CK（`ck_mining_run_audit` 即 Redis 状态机重建源），无独立 `ck_mining_events` 表，TTL 落在审计表 |
 | D-03 artifact 归属 | **内容寻址 + 共享 URI，CK 只存元数据** | ✅ 已落地：`content_addr` sha256、`store_artifact_uri()` 返回 `file://`/`s3://`、`ck_mining_artifact` 只存元数据 |
 | D-04 候选库迁移 | **随 artifact 一起共享，不保留本地独占副本** | ✅ 已落地（依赖部署共享存储）：候选库随 artifact 走共享根/对象存储 |

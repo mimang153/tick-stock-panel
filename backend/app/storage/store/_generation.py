@@ -248,36 +248,45 @@ class ClickHouseGenerationMixin:
         owner_id: str,
         lease_seconds: int = _LEASE_SECONDS,
     ) -> tuple[str, int]:
-        """抢占未过期租约并返回 generation 与 fencing token。"""
-        latest = self._latest_generation_row(asset_type)
-        expires = latest.get("lease_expires_at")
-        # 只抢占已过期或无租约的 publishing；未过期租约由原 owner 独占。
-        if (
-            latest.get("state") == "publishing"
-            and expires is not None
-            and expires > datetime.now()
-            and str(latest.get("owner_id") or "") != owner_id
-        ):
-            raise PermissionError("generation lease is held by another owner")
-        token = int(latest.get("fencing_token") or 0) + 1
-        generation_id = str(uuid.uuid4())
-        now = datetime.now()
-        self._insert_generation(
-            generation_id=generation_id,
-            asset_type=asset_type,
-            state="publishing",
-            changed_from=changed_from,
-            heartbeat_at=now,
-            committed_at=None,
-            owner_id=owner_id,
-            fencing_token=token,
-            lease_expires_at=now + timedelta(seconds=lease_seconds),
-            created_by=actor,
-            created_at=now,
-            updated_by=actor,
-            updated_at=now,
-        )
-        return generation_id, token
+        """抢占未过期租约并返回 generation 与 fencing token。
+
+        SELECT-then-INSERT 用按 asset_type 的跨实例租约串行化（DIST-05）：
+        否则两 worker 同时看到过期租约会各插一行、拿到相同 token，fencing 失去意义。
+        """
+        from app.services.coordination import coordination
+
+        with coordination.lock(f"generation_lease:{asset_type}") as acquired:
+            if not acquired:
+                raise RuntimeError(f"generation 抢占正在被其他实例执行: {asset_type}")
+            latest = self._latest_generation_row(asset_type)
+            expires = latest.get("lease_expires_at")
+            # 只抢占已过期或无租约的 publishing；未过期租约由原 owner 独占。
+            if (
+                latest.get("state") == "publishing"
+                and expires is not None
+                and expires > datetime.now()
+                and str(latest.get("owner_id") or "") != owner_id
+            ):
+                raise PermissionError("generation lease is held by another owner")
+            token = int(latest.get("fencing_token") or 0) + 1
+            generation_id = str(uuid.uuid4())
+            now = datetime.now()
+            self._insert_generation(
+                generation_id=generation_id,
+                asset_type=asset_type,
+                state="publishing",
+                changed_from=changed_from,
+                heartbeat_at=now,
+                committed_at=None,
+                owner_id=owner_id,
+                fencing_token=token,
+                lease_expires_at=now + timedelta(seconds=lease_seconds),
+                created_by=actor,
+                created_at=now,
+                updated_by=actor,
+                updated_at=now,
+            )
+            return generation_id, token
 
     def heartbeat_generation_leased(
         self,

@@ -176,11 +176,25 @@ class ClickHouseRepairMixin:
 
         CAS 语义：按 repair_id 读最新状态并校验流转合法，终态不可再次写入，
         防止跨实例/迟到的状态更新覆盖已结束的修补单（DES-002 §9）。
+        read-then-write 用跨实例租约串行化（redis 后端），单进程用实例锁；
+        否则两个 worker 同时读到 started 可各自写终态，CAS 形同虚设（DIST-06）。
         """
-        current = self.read_repair_status(repair_id)
-        allowed = _REPAIR_STATUS_TRANSITIONS.get(current or "", frozenset())
-        if status not in allowed:
-            raise ValueError(f"非法修补状态流转: {current!r} -> {status!r}")
+        from app.services.coordination import coordination
+
+        def _apply() -> None:
+            current = self.read_repair_status(repair_id)
+            allowed = _REPAIR_STATUS_TRANSITIONS.get(current or "", frozenset())
+            if status not in allowed:
+                raise ValueError(f"非法修补状态流转: {current!r} -> {status!r}")
+            self._write_repair_status(repair_id, status, actor)
+
+        with coordination.lock(f"repair_status:{repair_id}") as acquired:
+            if not acquired:
+                raise ValueError(f"修补状态更新正在被其他实例执行: {repair_id}")
+            _apply()
+
+    def _write_repair_status(self, repair_id: str, status: str, actor: str) -> None:
+        """在已持有 repair_id 租约的前提下追加一条状态审计行。"""
         now = datetime.now()
         self._client.insert_rows(
             self._table("ck_repair_audit"),

@@ -592,7 +592,13 @@ class JobStore:
         release_run_slot(job_id)
 
     def clear(self) -> None:
-        """清空所有任务（内存 + 磁盘文件 + 取消标志）。"""
+        """清空所有任务（内存 + 磁盘文件 + 跨实例 job_state + 取消标志）。
+
+        DIST-09：分布式部署下跨实例可见的任务状态在 coordination.job_state，
+        只清本地内存/文件会让其他 worker 仍看到已"清空"的旧任务历史。
+        """
+        from app.services.coordination import coordination
+
         with self._lock:
             self._active_jobs.clear()
             self._active_id = None
@@ -602,6 +608,8 @@ class JobStore:
                     f.unlink()
         with _CANCEL_FLAGS_LOCK:
             _CANCEL_FLAGS.clear()
+        # 跨实例任务状态一并清空；取消标志按 job_id 带 TTL 自愈，无需逐个清。
+        coordination.job_state.clear()
 
 
 def _summary(j: dict[str, Any]) -> dict[str, Any]:

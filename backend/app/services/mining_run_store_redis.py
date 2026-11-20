@@ -483,13 +483,62 @@ class RedisMiningRunStore:
             matches[file_match["run_id"]] = file_match
         return max(matches.values(), key=_manifest_sort_key, default=None)
 
+    def set_run_owner(self, run_id: str, pid: int, host: str) -> None:
+        """记录执行该 run 的 worker pid/host，供启动恢复判定存活（DIST-12）。"""
+        safe_id = self._validate_run_id(run_id)
+        raw = self._client.hget(self._runs_key, safe_id)
+        if raw is None:
+            return
+        manifest = json.loads(raw)
+        manifest["owner_pid"] = pid
+        manifest["owner_host"] = host
+        self._client.hset(self._runs_key, safe_id, json.dumps(manifest, default=str))
+
+    @staticmethod
+    def _owner_alive(manifest: dict[str, Any]) -> bool:
+        """owner 在同主机且进程存活时视为 live，recover 不得误标 interrupted。"""
+        import os
+        import socket
+
+        pid = manifest.get("owner_pid")
+        host = manifest.get("owner_host")
+        if not isinstance(pid, int) or not host:
+            return False  # 老 run 无 owner 信息：按中断处理（保守，与既有语义一致）
+        if host != socket.gethostname():
+            return True  # 跨主机无法探测，保守认为对端仍在执行
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
+
     def recover_interrupted(self) -> list[str]:
         recovered: list[str] = []
         # 只读回退的历史文件 run 不参与 Redis 状态机恢复，避免在只读副本上写状态。
         for rid in self._client.smembers(self._index_key):
             run_id = rid.decode() if isinstance(rid, bytes) else str(rid)
             manifest = self._manifest(run_id)
-            if manifest is not None and manifest.get("status") in ACTIVE_RUN_STATUSES:
-                self.transition_status(run_id, "interrupted")
-                recovered.append(run_id)
+            if manifest is None or manifest.get("status") not in ACTIVE_RUN_STATUSES:
+                continue
+            # DIST-12：owner 仍存活的 run 不得被其他 worker 的启动恢复误标中断。
+            if manifest.get("status") == "running" and self._owner_alive(manifest):
+                continue
+            self.transition_status(run_id, "interrupted")
+            recovered.append(run_id)
+        self.clear_dangling_signatures()
         return recovered
+
+    def clear_dangling_signatures(self) -> int:
+        """删除指向不存在 run 的悬挂签名映射（DIST-07）。
+
+        claim 后进程崩溃会留下 signature→run_id 但 run 从未创建；不清理会让
+        后续 claim 永远返回不存在的 run_id。启动时随 recover_interrupted 调用。
+        """
+        raw = self._client.hgetall(self._signature_key)
+        removed = 0
+        for signature, run_id in (raw or {}).items():
+            target = run_id.decode() if isinstance(run_id, bytes) else str(run_id)
+            if self._manifest(target) is None:
+                self._client.hdel(self._signature_key, signature)
+                removed += 1
+        return removed

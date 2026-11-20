@@ -194,6 +194,18 @@ def test_signature_claim_is_atomic_and_replaces_failed_run(store: RedisMiningRun
     assert store.claim_signature(signature, second) == second
 
 
+def test_dangling_signature_is_cleaned_on_recovery(store: RedisMiningRunStore) -> None:
+    """DIST-07：claim 后崩溃（run 从未创建）的悬挂签名在启动恢复时清理。"""
+    signature = "dangling-signature"
+    crashed = _rid()
+    recovering = _rid()
+
+    assert store.claim_signature(signature, crashed) == crashed
+    assert store.get(crashed) is None  # 悬挂：signature 指向不存在的 run
+    assert store.clear_dangling_signatures() >= 1
+    assert store.claim_signature(signature, recovering) == recovering
+
+
 def test_concurrent_transitions_only_one_wins(store: RedisMiningRunStore) -> None:
     import threading
 

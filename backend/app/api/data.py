@@ -189,7 +189,11 @@ _TABLE_TTLS = {
         "financials",
     )
 }
-_status_cache = DataStatusCache({**_TABLE_TTLS, "storage": 60.0, "last_runs": float("inf")})
+# last_runs 的数据源是共享的 coordination.job_state.recent()；缓存 TTL 必须有界，
+# 否则 worker B 完成的任务在 worker A 永久不可见（违反 §7.1.0 跨实例可见性，DIST-08）。
+# 30s 上界 = 最终一致窗口；写入侧 invalidate_data_cache 仍即时失效本进程。
+_LAST_RUNS_TTL = 30.0
+_status_cache = DataStatusCache({**_TABLE_TTLS, "storage": 60.0, "last_runs": _LAST_RUNS_TTL})
 
 
 def invalidate_data_cache(table: str | None = None, *, discard_stale: bool = False) -> None:

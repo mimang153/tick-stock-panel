@@ -94,13 +94,31 @@ class SyncStateStore:
     def _write(
         self, task: str, status: str, last_ok_at: datetime | None, error: str | None
     ) -> None:
+        # 同一 task 的跨实例写串行化：否则两 worker 各自生成 updated_at，
+        # CK ReplacingMergeTree FINAL 收敛不确定（DIST-10）。锁内读上次时间
+        # 保证全局单调，而非仅进程内单调。
+        from app.services.coordination import coordination
+
+        with coordination.lock(f"sync_state:{task}") as acquired:
+            if not acquired:
+                raise RuntimeError(f"同步状态更新正在被其他实例执行: {task}")
+            # 跨实例单调：取 CK 已有最大 updated_at 与本地时钟的较大者，
+            # 再 +1ms，保证本行严格大于所有历史行（含其他 worker 写入的）。
+            ck_max = self._client.query(
+                f"SELECT max(updated_at) AS m FROM {self.table} WHERE task = {{task:String}}",
+                {"task": task},
+            )
+            floor = None
+            if not ck_max.is_empty() and ck_max["m"][0] is not None:
+                floor = ck_max["m"][0]
+            updated_at = self._next_updated_at(floor)
         df = pl.DataFrame(
             {
                 "task": [task],
                 "status": [status],
                 "last_ok_at": [last_ok_at],
                 "last_error": [error],
-                "updated_at": [self._next_updated_at()],
+                "updated_at": [updated_at],
             },
             schema={
                 "task": pl.Utf8,
@@ -112,11 +130,12 @@ class SyncStateStore:
         )
         self._client.insert(self.table, df)
 
-    def _next_updated_at(self) -> datetime:
-        """保证进程内严格递增，避免同毫秒多次 mark 时 FINAL 结果不确定。"""
+    def _next_updated_at(self, floor: datetime | None = None) -> datetime:
+        """保证时间戳严格大于本地上次值与传入下界（跨实例单调，DIST-10）。"""
         with self._lock:
             now = datetime.now()
-            if self._last_updated_at is not None and now <= self._last_updated_at:
-                now = self._last_updated_at + timedelta(milliseconds=1)
+            candidates = [c for c in (self._last_updated_at, floor) if c is not None]
+            if candidates and now <= max(candidates):
+                now = max(candidates) + timedelta(milliseconds=1)
             self._last_updated_at = now
             return now

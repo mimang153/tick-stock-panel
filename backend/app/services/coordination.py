@@ -283,6 +283,7 @@ class Coordination:
         self._once_prefix = ""
         self._memory_once: set[str] = set()
         self._memory_locks: dict[str, bytes] = {}
+        self._fence_seq = 0  # memory 后端的 fencing 序号（离线兼容）
         if settings.coordination_backend != "redis":
             return
         import redis
@@ -322,19 +323,41 @@ class Coordination:
             raise CoordinationUnavailableError(f"once 标记 {key}", exc) from exc
 
     def acquire_lock(self, key: str, ttl_s: int = 600) -> bytes | None:
-        """获取可释放的跨实例租约；返回 token 表示当前调用者持有。"""
-        token = uuid.uuid4().hex.encode()
+        """获取可释放的跨实例租约；返回 token 表示当前调用者持有。
+
+        token 形如 ``<全局单调序号>:<uuid>``：序号由 Redis INCR 生成，供
+        被保护资源做 fencing（迟到的旧 owner 序号更小可被拒，DIST-13）；
+        uuid 保证释放时比对唯一。memory 后端序号为进程内计数（离线兼容）。
+        """
         if self._once_client is None:
             if key in self._memory_locks:
                 return None
+            self._fence_seq += 1
+            token = f"{self._fence_seq}:{uuid.uuid4().hex}".encode()
             self._memory_locks[key] = token
             return token
+        try:
+            seq = self._once_client.incr(f"{self._once_prefix}fence_seq")
+            token = f"{seq}:{uuid.uuid4().hex}".encode()
+        except Exception as exc:
+            raise CoordinationUnavailableError(f"生成 fencing 序号 {key}", exc) from exc
         lock_key = f"{self._once_prefix}lock:{key}"
         try:
             acquired = self._once_client.set(lock_key, token, nx=True, px=ttl_s * 1000)
         except Exception as exc:
             raise CoordinationUnavailableError(f"获取租约 {key}", exc) from exc
         return token if acquired else None
+
+    @staticmethod
+    def fence_sequence(token: bytes | None) -> int | None:
+        """从租约 token 提取 fencing 序号；被保护资源据此拒绝迟到的旧 owner。"""
+        if token is None:
+            return None
+        prefix = token.split(b":", 1)[0]
+        try:
+            return int(prefix)
+        except ValueError:
+            return None
 
     def release_lock(self, key: str, token: bytes | None) -> None:
         """释放自己持有的租约，避免误删其他实例的锁。"""

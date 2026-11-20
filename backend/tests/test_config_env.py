@@ -57,6 +57,18 @@ def test_multi_worker_forces_redis_mining_backend(tmp_path: Path) -> None:
     assert configured.mining_store_backend == "memory"
     assert configured.api_workers == 1
 
+
+def test_multi_worker_forces_redis_cache_backend(tmp_path: Path) -> None:
+    """DIST-11：多 worker 下禁用 memory 缓存（并集 read-merge-write 会丢更新）。"""
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+
+    base = dict(mining_store_backend="redis", mining_artifact_root=tmp_path / "artifacts")
+    with pytest.raises(ValueError, match="CACHE_BACKEND=memory"):
+        _settings(_env_file=env_path, cache_backend="memory", api_workers=2, **base)
+    configured = _settings(_env_file=env_path, cache_backend="memory", api_workers=1, **base)
+    assert configured.cache_backend == "memory"
+
     configured = _settings(
         _env_file=env_path,
         mining_store_backend="redis",
