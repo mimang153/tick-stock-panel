@@ -10,7 +10,7 @@ from __future__ import annotations
 import gc
 import logging
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import polars as pl
 
@@ -409,6 +409,15 @@ def sync_and_persist_index_daily(
 
 
 def _load_etf_factors(repo: KlineRepository) -> pl.DataFrame:
+    """读 ETF 复权因子：CK 为优先读源，无 runtime/CK 失败时回退本地 parquet。"""
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is not None:
+        try:
+            return runtime.store.read_adj_factor(etf=True)
+        except Exception as e:  # noqa: BLE001 - CK 读失败回退本地
+            logger.warning("CK 读取 ETF 复权因子失败, 回退本地: %s", e)
     factor_path = repo.store.data_dir / "adj_factor_etf" / "all.parquet"
     if not factor_path.exists():
         return pl.DataFrame()
@@ -426,6 +435,23 @@ def etf_adj_factor_window_start(adj_path, history_start: datetime) -> datetime:
     不要只拉最近 30 天: 拆分落在窗口外则全年日K都不复权。已有文件则从最新
     事件日续拉。
     """
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is not None:
+        try:
+            factors = runtime.store.read_adj_factor(etf=True, columns=["trade_date"])
+            if not factors.is_empty() and "trade_date" in factors.columns:
+                # CK 侧 trade_date 是 Date 列；to_list 得到的元素归一为 date。
+                ck_dates: list[date] = [
+                    value.date() if isinstance(value, datetime) else value
+                    for value in factors["trade_date"].to_list()
+                    if isinstance(value, date | datetime)
+                ]
+                if ck_dates:
+                    return datetime.combine(max(ck_dates), datetime.min.time())
+        except Exception as e:  # noqa: BLE001 - CK 读失败回退本地
+            logger.warning("CK 读取 ETF 除权因子最新日期失败, 回退本地: %s", e)
     if not adj_path.exists():
         return history_start
     try:

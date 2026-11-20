@@ -19,8 +19,8 @@
 |---|---|---|
 | S1 首次使用全流程 | ✅ | 新增 `tests/scenarios/test_s1_first_use.py`：空库→造数→status 可观测→instruments 搜索→kline/daily 行数→watchlist→CK 落库 |
 | S2 指标口径交叉 | ✅（部分） | `scripts/cmp_stacks.py` 实测 4 数据集；3 个零差异，`instruments` 差异已判定为预期（见"差异判定"）。origin API 逐值对照 + 手算四方比对未做完整自动化 |
-| S3 复权链路 | ⬜（现有测试背书） | `test_adj_factor_event_columns.py` 已断言前复权价=原始价/累计因子；当前 API 无 `adjust` 参数，forward/none 双响应对比不适用 |
-| S4 同步中断恢复 | ⬜（现有测试背书） | `test_final_sync_confirmation.py`、`test_ch_writer.py` 分段覆盖落盘边界+失败记账；完整 kill→重启→failed 未自动化 |
+| S3 复权链路 | ✅（2026-11-20 补齐） | `/api/kline/daily` 已支持 `adjust=forward|none`，新增 `/api/adj-factor`；`tests/scenarios/test_s3_adjustment_chain.py` 真 CK 三响应逐行对账通过 |
+| S4 同步中断恢复 | ✅（2026-11-20 补齐） | `tests/scenarios/test_s4_sync_interruption.py` 子进程 `os._exit()` 模拟 kill，启动恢复后 `/api/sync/status` failed 且 error 含“中断”，重跑行数完整无重复 |
 | S5 实时写入可见性 | ✅（现有测试背书） | `test_quote_chain.py::test_three_assets_share_publication...` 完整覆盖 provider→缓存→三读端点→落盘 |
 | S6 回测全链路 | ✅（现有测试背书） | `tests/backtest/test_composite_backtest_e2e.py` 覆盖策略→回测→trades/曲线 |
 | S7 扩展数据端到端 | ✅ | 新增 `tests/scenarios/test_s7_ext_data.py`：建配置→ingest→rows（CK 读）→删除→404/空→主页面不受影响 |
@@ -214,4 +214,15 @@
 - DES-002 P4 主体完成：显式 storage 路径移除本地 backup/fingerprint/marker/glob 依赖；无 storage 的离线兼容路径保留。`SCHEMA_VERSION` 无需因三张元数据表升级；`pipeline_recompute` 常规编排与派生缓存仍写本地 marker/parquet，指数 enriched 表尚未纳入 CK。
 - Redis 缓存层：`RedisCacheBackend` 已实现，`CACHE_BACKEND=redis` 可切换；复用宿主机已有 Redis 容器（compose 不新建服务），部署检查脚本 `./redis-cache.sh check`。`pool:*`、`benchmark:momentum:v1` 已接入，enriched bump 同步递增 Redis generation。
 - 最终验证：定向测试全绿；全量回归 `4820 passed / 13 skipped / 1 xfailed`，0 failed / 0 errors；改动文件 Ruff 全绿，`git diff --check` 通过。
-- 仍未闭环：连续 3 天观察、回滚演练、S3/S4 完整自动化、页面级双栈对照、满量性能标定、`pnpm build`。因此 DEP-002 的“有条件通过”结论不变；CK/缓存/多实例后续任务见 ISS-002、ISS-003。
+- CH-09 已闭环：2026-11-20 用 `corepack pnpm@9.10.0` 在可写临时副本执行 `tsc -b && vite build` 成功（2923 modules transformed，仅 chunk-size/browserslist 警告）。
+- 2026-11-20 分布式主体已落地（2026-11-20 读码核对后更正范围）：generation fencing/lease（600s 自动接管）、mining 指纹分层/原子去重/审计 outbox、共享产物根 `MINING_ARTIFACT_ROOT`（redis 后端未配置则启动失败）已落地；**repair 租约/CAS 与 30 天快照 TTL、D-02 事件表 90 天 TTL 实际未落地，私有 staging 未按 `repair_id`/owner 清理，D-05 多 worker 强制 redis 仅靠默认值无代码拦截**，详见 ISS-005 §7.1.1/§7.1.2 与 B 类 DIST-01~04。定向测试与改动文件 pre-commit 全通过，全量回归与全量 pre-commit（存量 mypy 错误、缺 pnpm）未通过。
+- 仍未闭环：页面级双栈对照（CH-07）与满量性能标定（CH-08）。CH-04 三天观察、CH-05 回滚演练按 2026-11-20 用户决定本轮暂缓/不纳入范围；CH-06 环境阻塞已解除并完成实测（见下）；CK artifact 表与对象存储适配器已落地。因此 DEP-002 结论按本轮范围更新见下方 CH-06 记录。
+
+## 追加：CH-06 实测记录（2026-11-20）
+
+- **执行人**：CodeBuddy（AI 辅助）；**环境**：当前 `tsp-dev` 环境 CK，测试库 `tsp_test`，无需另建 CK 测试环境。
+- **S3 实现与验证**：`GET /api/kline/daily` 新增 `adjust=forward|none`（默认 forward，保持旧调用方）；新增 `GET /api/adj-factor`。`tests/scenarios/test_s3_adjustment_chain.py` 用真实 CK + TestClient 验证三响应，逐行断言 `forward_close == raw_close / F`，覆盖除权日前一日、当日、后一日。
+- **S4 实现与验证**：新增 `GET /api/sync/status`；盘后/除权因子任务接入 `sync_state` 的 running/ok/failed 生命周期。`tests/scenarios/test_s4_sync_interruption.py` 用子进程 `os._exit()` 安全模拟 kill，父进程执行启动恢复后断言 `status=failed`、`error` 含“中断”、中断期目标表 0 行、重跑后行数完整且 `(symbol,date)` 无重复。
+- **S3/S4 定向命令**：`bash run_tests.sh -q tests/scenarios/test_s3_adjustment_chain.py tests/scenarios/test_s4_sync_interruption.py tests/test_pipeline_capacity.py tests/test_ch_writer.py tests/storage/test_b3_store.py::test_sync_state_transitions_keep_last_ok tests/storage/test_b3_store.py::test_sync_state_recovers_interrupted` → **32 passed**。
+- **13 类矩阵近似集合 + 场景命令**：`bash run_tests.sh -q tests/storage tests/scenarios tests/test_repository_index.py tests/test_shared_matrix_cache.py tests/backtest/test_composite_backtest_e2e.py` → **85 passed**；覆盖 storage 契约、S1/S7/S8/S9 场景、ETF/指数、matrix cache、backtest、sync_state 等矩阵类。
+- **结论**：CH-06 已按 DEP-001 原口径补齐 S3 `adjust` 双响应与 S4 进程级 kill→重启→failed→重跑自动化，结合 13 类矩阵近似集合实测，记为**已闭环**；页面双栈对照（CH-07）与满量性能（CH-08）仍是本轮剩余项。

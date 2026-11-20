@@ -21,6 +21,8 @@ os.environ["CACHE_BACKEND"] = "memory"
 os.environ["EVENT_BUS_BACKEND"] = "memory"
 os.environ["COORDINATION_BACKEND"] = "memory"
 os.environ["MINING_STORE_BACKEND"] = "memory"
+# mining memory 文件版仅允许单 worker（flock 是进程内锁）；测试进程固定 1。
+os.environ["API_WORKERS"] = "1"
 
 import uuid
 from collections.abc import Iterator

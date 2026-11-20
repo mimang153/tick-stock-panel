@@ -237,6 +237,13 @@ class Settings(BaseSettings):
     # Data — 桌面版按平台约定；源码使用项目根 data/；Docker 使用 /app/data。
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
     data_dir: Path = _user_data_root()
+    # 挖掘产物共享根 — 配置后 artifact/候选库落跨实例可见目录；未配置时沿用 data/ 兼容布局。
+    mining_artifact_root: Path | None = None
+    # 产物存储后端 — shared-root 用共享卷；s3 用 S3 兼容对象存储。
+    mining_artifact_store: Literal["shared-root", "s3"] = "shared-root"
+    mining_artifact_s3_bucket: str = ""
+    mining_artifact_s3_prefix: str = "mining-artifacts"
+    mining_artifact_s3_endpoint_url: str | None = None
 
     # ClickHouse 存储层 — 方案与包络见 ../../docs/v1.0.1/design/DES-001-clickhouse-storage-design.md §4.8/§4.9。
     # CK 由 docker compose 以 clickhouse/clickhouse-server:24.8.8-alpine 启动:
@@ -278,6 +285,10 @@ class Settings(BaseSettings):
     # CK 审计）；memory 文件版仅作离线/测试兼容。
     mining_store_backend: Literal["memory", "redis"] = "redis"
 
+    # uvicorn worker 数（Docker 由 API_WORKERS 注入，默认 2）。多 worker 下
+    # mining 文件版依赖进程内 flock，无法跨实例互斥，必须强制 redis 后端（DES-003 D-05）。
+    api_workers: int = 1
+
     # 模拟盘账户事务层（DES-005）— PostgreSQL 承载资金状态，事务写入组保证多 worker
     # 账目原子。由 pg_dev.sh 用宿主机镜像启动容器（库 tsp_dev / 用户 tsp）。
     # 源码直跑连 localhost:5432；容器内 compose 注入 PAPER_PG_URL_CONTAINER。
@@ -295,6 +306,19 @@ class Settings(BaseSettings):
     def _resolve_paths(self) -> Settings:  # noqa: C901 - C901: 分支为业务多阶段编排, 拆分会割裂上下文; 单测已覆盖
         """Docker 相对路径按应用目录解析；源码、桌面和绝对路径契约不变。"""
         self.data_dir = _resolve_data_dir(self.data_dir)
+        if self.mining_artifact_root is not None:
+            self.mining_artifact_root = _resolve_data_dir(self.mining_artifact_root)
+        if self.mining_store_backend == "redis" and self.mining_artifact_root is None:
+            raise ValueError("MINING_ARTIFACT_ROOT 必须在 MINING_STORE_BACKEND=redis 时配置")
+        if self.api_workers < 1:
+            raise ValueError("API_WORKERS must be >= 1")
+        # 多 worker 生产禁用 memory 文件版 mining：flock 是进程内锁，跨 worker 会重复执行。
+        if self.api_workers > 1 and self.mining_store_backend == "memory":
+            raise ValueError(
+                "MINING_STORE_BACKEND=memory 不允许多 worker（API_WORKERS>1），请改用 redis"
+            )
+        if self.mining_artifact_store == "s3" and not self.mining_artifact_s3_bucket:
+            raise ValueError("MINING_ARTIFACT_S3_BUCKET 必须在 MINING_ARTIFACT_STORE=s3 时配置")
         if self.backtest_matrix_cache_max_mb <= 0:
             raise ValueError("backtest_matrix_cache_max_mb must be positive")
         if self.backtest_matrix_cache_prewarm_years <= 0:

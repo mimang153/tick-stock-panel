@@ -128,6 +128,7 @@ def test_status_transitions_summary_and_artifact_registration(tmp_path: Path) ->
 
     store.create({}, "data-v1", run_id="artifacts")
     artifact = store.artifact_path("artifacts", "factors")
+    artifact.write_bytes(b"artifact")
     manifest = store.register_artifact("artifacts", "factors", artifact)
     assert artifact.name == "factors.parquet"
     assert manifest["artifacts"] == {"factors": "factors.parquet"}

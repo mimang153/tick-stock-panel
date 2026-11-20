@@ -21,8 +21,8 @@ import polars as pl
 from app.storage.clickhouse import ClickHouseClient
 
 # 版本号只在 DDL 语义变化时 +1；幂等建表本身覆盖"新增表"
-SCHEMA_VERSION = 2
-SCHEMA_NOTE = "v2: instruments 股本/交易规则列改为 Nullable(Float64)"
+SCHEMA_VERSION = 3
+SCHEMA_NOTE = "v3: 修补快照 30 天 / mining 审计 90 天 TTL（DES-002 §9 / DES-003 D-02）"
 
 _PROJECTION_SETTINGS = "SETTINGS deduplicate_merge_projection_mode = 'rebuild'"
 
@@ -392,7 +392,8 @@ ORDER BY (dataset, day, repair_id, symbol, id)""",
   updated_at     DateTime64(3) DEFAULT now64(3)
 ) ENGINE = MergeTree
 PARTITION BY toYYYYMM(day)
-ORDER BY (dataset, day, repair_id, symbol, id)""",
+ORDER BY (dataset, day, repair_id, symbol, id)
+TTL toDate(created_at) + INTERVAL 30 DAY""",
     "ck_enriched_generation": """CREATE TABLE IF NOT EXISTS {table} (
   id             UUID DEFAULT generateUUIDv4(),
   asset_type     LowCardinality(String),
@@ -400,6 +401,9 @@ ORDER BY (dataset, day, repair_id, symbol, id)""",
   state          LowCardinality(String),
   changed_from   Nullable(Date),
   heartbeat_at   DateTime64(3),
+  owner_id       LowCardinality(String) DEFAULT '',
+  fencing_token UInt64 DEFAULT 0,
+  lease_expires_at Nullable(DateTime64(3)),
   committed_at   Nullable(DateTime64(3)),
   created_by     LowCardinality(String),
   created_at     DateTime64(3) DEFAULT now64(3),
@@ -454,6 +458,7 @@ ORDER BY lease_id
 COMMENT '容量租约审计:记录acquire/release生命周期,Redis LimiterCounter丢失后按未释放租约重建'""",
     "ck_mining_run_audit": """CREATE TABLE IF NOT EXISTS {table} (
   id             UUID DEFAULT generateUUIDv4() COMMENT '行主键',
+  event_id       String COMMENT '审计事件唯一ID,用于outbox幂等',
   namespace      LowCardinality(String) COMMENT '命名空间:mining/guardian',
   run_id         String COMMENT '运行标识',
   from_status    LowCardinality(String) COMMENT '转换前状态',
@@ -466,8 +471,29 @@ COMMENT '容量租约审计:记录acquire/release生命周期,Redis LimiterCount
   updated_by     LowCardinality(String) COMMENT '最后更新者标识'
 ) ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY namespace
-ORDER BY (namespace, run_id, to_status, created_at)
+ORDER BY (namespace, run_id, event_id)
+# TTL 表达式先 toDate：CK 24.8+ 不接受高精度时间类型直接做 TTL（BAD_TTL_EXPRESSION）。
+# D-02：事件/审计保留 90 天，不小于协调态重建窗口。
+TTL toDate(created_at) + INTERVAL 90 DAY
 COMMENT 'mining运行审计:记录每次状态转换的快照,Redis状态机丢失后据此重建run'""",
+    "ck_mining_artifact": """CREATE TABLE IF NOT EXISTS {table} (
+  id             UUID DEFAULT generateUUIDv4() COMMENT '行主键',
+  namespace      LowCardinality(String) COMMENT '命名空间:mining/guardian',
+  run_id         String COMMENT '运行标识',
+  artifact_name  LowCardinality(String) COMMENT '产物名称',
+  content_addr   String COMMENT '内容寻址标识(sha256)',
+  uri            String COMMENT '跨实例可解析的产物URI',
+  row_count      UInt64 DEFAULT 0 COMMENT '产物行数',
+  size_bytes     UInt64 DEFAULT 0 COMMENT '产物字节数',
+  schema_version UInt32 DEFAULT 1 COMMENT '产物schema版本',
+  created_at     DateTime64(3) COMMENT '登记时间',
+  created_by     LowCardinality(String) COMMENT '登记者标识',
+  updated_at     DateTime64(3) DEFAULT now64(3) COMMENT '最后更新时间,兼作版本列',
+  updated_by     LowCardinality(String) COMMENT '最后更新者标识'
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY namespace
+ORDER BY (namespace, run_id, artifact_name)
+COMMENT 'mining产物元数据:内容寻址URI,产物字节不落CK'""",
 }
 
 # 建表顺序即 DDL 声明顺序（无外键依赖，保持稳定即可）
@@ -622,18 +648,6 @@ TABLE_READ_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 
 
-#: 联合视图：enriched 日表 ⋈ 标的维表（screener / 跨表查询共用，避免各自 join）
-# 两侧都 FINAL: ReplacingMergeTree 未合并的重复版本会让 join 放大行数
-_VIEW_DDL = (
-    "CREATE OR REPLACE VIEW {view} AS "
-    "SELECT e.*, i.name AS instrument_name, i.type AS instrument_type, "
-    "i.total_shares AS instrument_total_shares, i.float_shares AS instrument_float_shares, "
-    "i.limit_up AS instrument_limit_up, i.limit_down AS instrument_limit_down "
-    "FROM (SELECT * FROM {enriched} FINAL) AS e "
-    "LEFT JOIN (SELECT * FROM {instruments} FINAL) AS i ON e.symbol = i.symbol"
-)
-
-
 def build_statements(
     table_prefix: str = "",
     *,
@@ -651,15 +665,6 @@ def build_statements(
         if name in _PROJECTION_TABLES:
             statement = f"{statement}\n{_PROJECTION_SETTINGS}"
         statements.append(statement)
-    # 联合视图依赖 enriched + 维表，必须在两者建好之后创建
-    if tables is None or {"kline_daily_enriched", "instruments"} <= set(names):
-        statements.append(
-            _VIEW_DDL.format(
-                view=f"{table_prefix}v_screener_base",
-                enriched=f"{table_prefix}kline_daily_enriched",
-                instruments=f"{table_prefix}instruments",
-            )
-        )
     return statements
 
 
@@ -678,8 +683,31 @@ def _migration_v2_instruments_nullable(client: ClickHouseClient) -> None:
         )
 
 
+def _migration_v3_retention_ttl(client: ClickHouseClient) -> None:
+    """v2 → v3: 修补快照 30 天、mining 审计 90 天 TTL（DES-002 §9 / DES-003 D-02）。
+
+    ``CREATE TABLE IF NOT EXISTS`` 不会修改已存在表的 TTL，存量库必须显式 ALTER。
+    ensure_schema(tables=...) 只建传入的子集（如仅 instruments），迁移只 ALTER 实际存在的表。
+    TTL 表达式返回 Date，兼容 CK 24.8+ 的 BAD_TTL_EXPRESSION 约束。
+    """
+    for logical, days in (("ck_repair_snapshot", 30), ("ck_mining_run_audit", 90)):
+        existing = client.query(
+            "SELECT count() AS n FROM system.tables WHERE database = currentDatabase() "
+            "AND name = {name:String}",
+            {"name": client.table(logical)},
+        )
+        # 简化测试桩的 query 可能不返回 n 列（只记录语句、不连 CK）；此时照常发 ALTER。
+        if "n" in existing.columns and (existing.is_empty() or int(existing["n"][0]) == 0):
+            continue
+        client.execute(
+            f"ALTER TABLE {client.table(logical)} "
+            f"MODIFY TTL toDate(created_at) + INTERVAL {days} DAY"
+        )
+
+
 _MIGRATIONS: dict[int, Callable[[ClickHouseClient], None]] = {
     2: _migration_v2_instruments_nullable,
+    3: _migration_v3_retention_ttl,
 }
 
 

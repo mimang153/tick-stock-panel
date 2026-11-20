@@ -90,6 +90,7 @@ def _build_data_fingerprint_once(
     app_state: Any,
     request: dict[str, Any],
 ) -> dict[str, Any]:
+    """Split authoritative data inputs from implementation diagnostics once."""
     data_dir = Path(repo.store.data_dir)
     asset_type = str(request.get("asset_type") or "stock")
     enriched_root = (
@@ -98,13 +99,15 @@ def _build_data_fingerprint_once(
         else data_dir / f"kline_{asset_type}_enriched"
     )
     module_root = Path(__file__).resolve().parents[1]
-    components = {
+    data_components = {
         "version": FINGERPRINT_VERSION,
         "asset_type": asset_type,
         "generation": repo.get_matrix_data_generation(asset_type),
         "latest_enriched_date": _iso_or_none(repo.latest_enriched_date(asset_type)),
-        "enriched": _enriched_metadata(enriched_root),
         "instruments": _instrument_metadata(repo, asset_type),
+    }
+    implementation_components = {
+        "enriched": _enriched_metadata(enriched_root),
         "regime": _path_metadata(regime_path(data_dir), root=data_dir),
         "algorithm_version": MINING_ALGORITHM_VERSION,
         "methodology_version": FACTOR_METHODOLOGY_VERSION,
@@ -116,10 +119,16 @@ def _build_data_fingerprint_once(
         ),
         "factors": mining_factor_snapshot(request.get("factor_names") or []),
     }
-    payload = _canonical_json(components)
+    data_digest = hashlib.sha256(_canonical_json(data_components).encode("utf-8")).hexdigest()
+    implementation_digest = hashlib.sha256(
+        _canonical_json(implementation_components).encode("utf-8")
+    ).hexdigest()
     return {
-        **components,
-        "digest": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+        **data_components,
+        **implementation_components,
+        "data_digest": data_digest,
+        "implementation_digest": implementation_digest,
+        "digest": data_digest,
     }
 
 
@@ -409,6 +418,7 @@ def _content_metadata(path: Path | None, *, root: Path) -> dict[str, Any] | None
 
 
 def _implementation_metadata(module_root: Path) -> dict[str, Any]:
+    """Hash Python source bytes under a root without leaking absolute paths."""
     records = []
     for path in sorted(module_root.rglob("*.py"), key=lambda item: item.as_posix()):
         try:
@@ -428,6 +438,7 @@ def _implementation_metadata(module_root: Path) -> dict[str, Any]:
 
 
 def _relative_path(path: Path, root: Path) -> str:
+    """Return a stable relative path, falling back to the basename outside root."""
     try:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
@@ -435,10 +446,12 @@ def _relative_path(path: Path, root: Path) -> str:
 
 
 def _iso_or_none(value: date | None) -> str | None:
+    """Normalize optional dates for canonical fingerprint payloads."""
     return value.isoformat() if value is not None else None
 
 
 def _canonical_json(value: Any) -> str:
+    """Serialize fingerprint payloads with deterministic ordering and separators."""
     return json.dumps(
         value,
         ensure_ascii=False,

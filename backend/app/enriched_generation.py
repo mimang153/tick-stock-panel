@@ -421,6 +421,15 @@ def enriched_publication_incomplete(
             return False
         now = time.time()
         for row in publishing:
+            # 有租约时以 lease 到期为唯一判定；旧行缺字段才退回心跳超时。
+            expires = row.get("lease_expires_at")
+            if expires is not None:
+                try:
+                    if expires.timestamp() <= now:
+                        return True
+                except (AttributeError, ValueError):
+                    pass
+                continue
             heartbeat = row.get("heartbeat_at")
             if heartbeat is None:
                 continue

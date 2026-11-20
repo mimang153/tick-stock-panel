@@ -76,6 +76,7 @@ pnpm build
 ```
 
 2026-11-18 实测：当前环境未安装 `pnpm`，本轮未能执行，结果未验证。
+2026-11-20 补测：`corepack pnpm@9.10.0` 可用；因仓库 `frontend/node_modules` 属 root 且 sudo 不可用，在可写临时副本安装依赖并执行 `tsc -b && vite build` 成功（2923 modules transformed，仅 chunk-size/browserslist 警告）。原 `frontend/node_modules` 未改动。
 
 ## 影响
 
@@ -102,15 +103,15 @@ pnpm build
 | CH-01 | 高 | 是 | 全量测试受 CK 内存上限阻塞，结果不稳定 | 两轮全量分别为 179 / 554 errors；错误为 `MEMORY_LIMIT_EXCEEDED`，上限 3.20 GiB | 提高 CK 可用内存或隔离 fixture 并发；修复后连续跑三次，记录稳定清单 |
 | CH-02 | 高 | 是 | B4 `read_parquet/scan_parquet` 未归零 | 生产代码约 44/5/16/22 处相关调用 | 逐组判定迁移或保留；若裁剪范围，必须改写 REQ-002 B4 DoD |
 | CH-03 | 高 | 是 | B5 清理未完成 | `parquet.py` scan 函数仍在；DataStore 仍在；CK/Parquet 双写镜像约 46 处标记；测试侧 `DataStore(tmp_path)` 约 67 处 | 先定派生缓存 schema，再删本地读点和双写；测试按 D 类模式迁移 |
-| CH-04 | 中 | 是 | 三天观察未闭环 | DEP-002 记录观察进行中，日志止于 2026-11-18；要求 11-20 复查 | 检查 `data/ch_acceptance_observe.jsonl` 的跨日连续性与 uptime 回落，补结论 |
-| CH-05 | 中 | 是 | 回滚演练未执行 | DEP-002 记录无 `master` 基线、`git checkout` 风险；回滚耗时未实测 | 由项目方确认回滚基线，再做演练并记录重新同步耗时 |
-| CH-06 | 中 | 是 | S3/S4 未完整自动化；数据集矩阵未全量签字 | DEP-002 将 S3/S4 标为“现有测试背书”；矩阵仅 S2 的 3/4 有明确对照 | 补复权四方对照与 kill→重启→failed 场景；按 DEP-001 §5 补齐 13 类矩阵 |
+| CH-04（暂缓） | 中 | 否（本轮） | 三天观察未闭环 | 2026-11-20 用户决定本轮暂不做；日志仍为 351 行，末条 `11-18T01:35:15+08:00` | 本轮不纳入发布判定；如恢复观察再补 DEP-002 结论 |
+| CH-05（不纳入范围） | 中 | 否（本轮） | 回滚演练未执行 | 2026-11-20 用户决定本轮暂不考虑回滚问题 | 不作为本轮发布阻断；后续如需回滚能力再另行立项 |
+| CH-06（已闭环） | 中 | 否 | S3/S4 与矩阵验收 | 已补齐 `adjust` 双响应、`/api/adj-factor`、`/api/sync/status` 与进程级 kill→重启自动化；S3/S4 定向 32 passed，矩阵近似集合 + 场景 85 passed | 无；记录见 DEP-002 §追加 |
 | CH-07 | 中 | 是 | 页面级双栈对照未执行 | DEP-003 执行表为空，`执行用例数：__ / 12`；未见 `TC*` 截图或报告 | 按 DEP-003 执行 12 个用例，归档差异和截图 |
 | CH-08 | 中 | 是 | 满量性能标定未完成 | 分钟仅 370 行、财务表 0 行；未达 DEP-001 §9.1 的数据规模 | 积累真实数据后按同口径重测并回填阈值表 |
-| CH-09 | 中 | 否 | 前端构建未验证 | 本机无 `pnpm` | 在有 pnpm 的环境执行 `pnpm build`，记录结果 |
+| CH-09（已闭环） | 中 | 否 | 前端构建未验证 | 2026-11-20 用 `corepack pnpm@9.10.0` 在可写副本执行 `tsc -b && vite build` 成功，仅 chunk-size/browserslist 警告 | 无；部署环境复跑同一命令即可 |
 | CH-10 | 中 | 是 | 文档状态与真实状态不一致 | REQ-002 / DES-001 / DES-002 / DES-003 状态已回填（2026-11-19）；DEP-001“有条件通过”结论未变 | 已回填；剩余 DEP-002 结论与 CH-04~CH-08 验收结果待补（见 ISS-005） |
 | CH-11 | 低 | 否 | 健康端点路径不一致 | WBS T1.6 写 `/api/health`，代码实际注册 `/health`；`/api/health` 只在白名单出现 | 确认是否需加别名；若不需要，统一文档口径 |
-| CH-12（已确认） | 低 | 否 | `v_screener_base` 只有定义未见业务调用 | `store.screener_base()` 存在，但 `backend/app` 内无调用点 | 2026-11-20 PH-1 按分布式原则确认：从 B3 DoD 移除，PH-3 删除视图 DDL 与 store 方法（见 ISS-005 §7.1.3） |
+| CH-12（已闭环） | 低 | 否 | `v_screener_base` 只有定义未见业务调用 | 2026-11-20 已删除视图 DDL 与 `store.screener_base()`，5 处慢路径保留 | 无需数据迁移；已部署库如需清理残留视图由运维手工 DROP（见 ISS-005 §7.1.3） |
 | CH-13 | 低 | 否 | 历史对照报告存在未解释差异 | `backend/reports/cmp_b2_kline_daily_enriched.json` 仍为 `diff` / `ok=false` | 重新生成或标注为已解释的历史中间产物 |
 
 ### 处理进展（2026-11-18）
@@ -134,7 +135,7 @@ pnpm build
 - **Redis 缓存层已落地**：`CacheBackend` 增加 `RedisCacheBackend`（Arrow IPC/JSON、TTL、Redis generation 计数器）；`CACHE_BACKEND=redis` 可切换，Redis 由宿主机已有容器提供，本项目 compose 不新建服务。`pool:*` 与 `benchmark:momentum:v1` 已接入 CacheBackend，enriched generation bump 同步递增 Redis generation。部署检查用 `./redis-cache.sh check`。
 - **B5 主体完成**：daily/enriched 在显式 `storage` 下的在线读写已收敛为 CK-only（含修补与 live 路径），本地 parquet 仅保留离线兼容。派生缓存与 `repair_daily`/`minute_adjust` 离线工具仍保留本地 Parquet 路径。
 - **CH-10 部分完成**：本文和 REQ-002 已回填最新测试基线；DEP-001 的“有条件通过”结论未变，因为 CH-04~CH-08 仍未闭环。
-- **未处理**：CH-04~CH-08 需跨交易日观察、项目方确认回滚基线、人工执行页面对照和满量性能标定；CH-09 因本机无 `pnpm` 未验证；CH-12/CH-13 待产品/维护者决策。
+- **未处理**：CH-04 三天观察与 CH-05 回滚演练本轮暂缓/不纳入范围；CH-06 已补齐 S3/S4 严格口径自动化并闭环；CH-07 页面对照与 CH-08 满量性能仍待处理；CH-09 已闭环，CH-12 已闭环，CH-13 待维护者决策。
 
 ## 解决方案与建议顺序
 
@@ -152,8 +153,8 @@ pnpm build
 - 服务状态：ClickHouse 容器 healthy，`/ping` = `Ok`，生产/开发 compose config 均合法；`tsp_test` 已清空重建，`tsp` 恢复为 28 张正式表。
 - 定向验证：日K/enriched 修补、写入、generation、完整性 API/S9 与场景测试全绿；改动文件 Ruff 全绿，`git diff --check` 通过。
 - 全量验证：当前基线 `4898 passed / 13 skipped / 1 xfailed`，0 failed（四后端 conftest 锁 memory；历史 4820 为阶段实测，见 ISS-004 §1.1）。
-- 前端构建：仍未执行，原因是当前环境没有 `pnpm`。
-- 总体判断：REQ-002 **主体功能已实现且测试基线已恢复**，但验收条件仍未全部满足；CH-04~CH-09 处理完并同步文档后，才能改判为完成。
+- 前端构建：2026-11-20 已用 `corepack pnpm@9.10.0` 在可写临时副本完成 `tsc -b && vite build`（2923 modules transformed），仅非阻断警告；CH-09 闭环。
+- 总体判断：REQ-002 **主体功能已实现且测试基线已恢复**，但验收条件仍未全部满足；CH-04~CH-08 处理完并同步文档后，才能改判为完成。
 
 ## 待决事项
 
@@ -164,4 +165,4 @@ pnpm build
 - `market_level` 扩展是否支持 timeseries；如支持，需要为无 symbol 行设计 CK 存储。
 - 回滚演练使用哪个基线分支替代文档中的 `master`。
 - ~~`/api/health` 是否作为真实路由别名提供，还是仅修正文档~~ → **已处理**：`routes_api` 同时注册 `/health` 与 `/api/health`，`test_memory_guards` 参数化覆盖两个路径（CH-11）。
-- ~~`v_screener_base` 是否纳入后续 screener 慢路径，或从 B3 DoD 中移除~~ → **已确认**：从 B3 DoD 移除，PH-3 删除视图 DDL 与 store 方法（CH-12，ISS-005 §7.1.3）。
+- ~~`v_screener_base` 是否纳入后续 screener 慢路径，或从 B3 DoD 中移除~~ → **已闭环**：从 B3 DoD 移除，2026-11-20 已删除视图 DDL 与 store 方法（CH-12，ISS-005 §7.1.3）。

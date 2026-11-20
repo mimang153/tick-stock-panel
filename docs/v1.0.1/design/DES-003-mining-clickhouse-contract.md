@@ -1,11 +1,11 @@
 # mining CK 化契约设计（MN-01：run 状态 / 事件 / 摘要）
 
-> 文档类型：设计 | 编号：DES-003 | 状态：决策已按分布式原则确认并部分落地，MN-02/03 待处理 | 文档版本：v1.5 | 最后更新：2026-11-20
+> 文档类型：设计 | 编号：DES-003 | 状态：决策已按分布式原则确认并落地，CK artifact 表/对象存储适配待接入 | 文档版本：v1.6 | 最后更新：2026-11-20
 > 负责人：待分配 | 关联：ISS-004（MN-01~MN-05）、DES-002、DES-004（D-01 决策依据）、ISS-003 §7.5、REQ-002、ISS-005（未闭环项汇总）
 
 ## 0. 文档状态与边界（先读）
 
-**决策状态（2026-11-19，2026-11-20 PH-1 按分布式原则确认）**：D-01 已拍板方案 C 并落地——run 状态机权威在 Redis（`RedisMiningRunStore`，Lua 原子状态机），CK 承担审计与历史查询；跨实例取消经 `coordination.cancel_flags` 验证闭环（ISS-004 MN-01、DIST-04）。2026-11-20 PH-1 进一步确认：数据指纹拆为两层且实现指纹不进签名；D-02 事件 TTL 90 天且不小于重建窗口；D-03 内容寻址 + 跨实例可解析的共享 URI；D-04 候选库随 artifact 共享，不再保留本地独占副本；D-05 不新增 `CK_MINING` 独立开关且多 worker 强制 redis 后端。这不等于全文已实现：**MN-02（artifact 归属）/ MN-03（claim 与指纹）仍为明确待处理项**，本文定义的 CK 表/读写路径按“已确认 + 部分实现”理解，不得假定 artifact/claim 已迁移或已跨实例可见。
+**决策状态（2026-11-19，2026-11-20 PH-1 按分布式原则确认并落地）**：D-01 已落地方案 C——run 状态机权威在 Redis（`RedisMiningRunStore`，Lua 原子状态机），CK 承担审计与历史查询；跨实例取消经 `coordination.cancel_flags` 验证闭环。MN-03 已落地：数据指纹拆分两层且实现指纹不进 `run_signature`，签名声明与产物注册 Redis 原子化，Redis 状态转换与 CK 审计通过 outbox/barrier 闭环。MN-02 已落地共享产物根 `MINING_ARTIFACT_ROOT` + 内容哈希 + 共享 URI 元数据；`MINING_STORE_BACKEND=redis` 时未配置共享根会启动失败（fail-closed）。剩余：CK artifact 元数据表写入与真正对象存储适配器尚未接入，当前共享根可为共享卷或对象存储挂载点。
 
 范围（MN-01）：把 run 的 **manifest（状态机）、compact summary、事件流、周度 claim 与数据指纹** 的权威副本迁到 CK，使多实例可查询状态、事件不丢、claim 幂等。
 
@@ -209,7 +209,7 @@ COMMENT '挖掘产物登记表:每个run的四类结果产物的内容寻址元�
 ## 5. 读写路径与兼容策略
 
 - **在线路径**：`MiningJobManager` 的 `_store` 通过现有 `storage` 注入切换实现；不新增 `CK_MINING` 独立开关（D-05 已确认）。多 worker 部署强制 redis 后端；memory 文件版 + flock 仅作离线兼容，禁止运行时回退。无 storage 的离线工具保留 `MiningRunStore` 文件实现（同 DES-002 §3.2 兼容模式）。
-- **worker 子进程**：`mining_runtime.py` 的 `run_mining_runtime` 产出的 artifact 与候选库不得停留在 worker 本地；MN-02 必须写共享 URI（内容寻址存储或共享卷），主进程只登记共享 URI 与元数据。当前仍写本地 Parquet 的实现是待迁移缺口，不是可接受的分布式形态。
+- **worker 子进程**：`run_mining_runtime` 的 artifact/候选库路径由 `MINING_ARTIFACT_ROOT` 解析为共享根；`register_artifact` 原子登记 `content_addr / size_bytes / schema_version / uri`。redis 后端启动时强制要求共享根，禁止退回 worker 本地目录。
 - **前端**：API 层 `app/api/mining.py` 读取契约（字段名、排序、分页）保持不变，仅底层 store 换 CK；MN-05 再处理历史本地 run 的只读兼容。
 - **generation 联动**：run 依赖的 enriched/regime 数据 generation 变化应使进行中 run 可感知（与数据指纹配合），不额外引入新 generation 命名空间。
 

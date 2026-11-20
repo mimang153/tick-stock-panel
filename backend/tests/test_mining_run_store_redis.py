@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from app.services.mining_jobs import InvalidMiningStatusTransitionError
+from app.services.mining_jobs import InvalidMiningStatusTransitionError, MiningRunStore
 from app.services.mining_run_store_redis import RedisMiningRunStore
 
 
@@ -26,12 +26,47 @@ def store():
     namespace = "t" + uuid.uuid4().hex[:8]
     s = RedisMiningRunStore(Path("/tmp"), namespace=namespace)
     yield s
-    for kind in ("runs", "summary", "runindex"):
+    for kind in ("runs", "summary", "runindex", "signature"):
         client.delete(f"tickflow:mining:{kind}:{namespace}")
+    client.delete(f"tickflow:mining:audit:outbox:{namespace}")
+    client.srem("tickflow:mining:audit:outbox:index", namespace)
 
 
 def _rid() -> str:
     return "run" + uuid.uuid4().hex[:8]
+
+
+def test_read_falls_back_to_legacy_file_runs(tmp_path: Path) -> None:
+    """Redis 后端只读回退到迁移前写入本地文件的历史 run。"""
+    redis = pytest.importorskip("redis")
+    client = redis.Redis.from_url("redis://:123456@localhost:6379/0")
+    try:
+        client.ping()
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"真实 Redis 不可达: {exc}")
+    namespace = "t" + uuid.uuid4().hex[:8]
+    store = RedisMiningRunStore(tmp_path, namespace=namespace)
+    file_store = MiningRunStore(tmp_path, namespace=namespace)
+    run_id = "legacy-file-run"
+
+    manifest = file_store.create({"factor": "f1"}, "fp", run_id=run_id)
+    file_store.write_summary(run_id, {"candidate_count": 7})
+    file_store.append_event(run_id, "queued", {"source": "legacy"})
+
+    fetched = store.get(run_id)
+    assert fetched is not None and fetched["status"] == "queued"
+    assert store.read_summary(run_id) == {"candidate_count": 7}
+    assert [event["type"] for event in store.read_events(run_id)] == ["queued"]
+    assert any(run["run_id"] == run_id for run in store.list_runs())
+    found = store.find_by_signature(manifest["run_signature"])
+    assert found is not None and found["run_id"] == run_id
+
+    # 写路径不回退：历史文件 run 在 Redis 后端保持只读。
+    with pytest.raises(KeyError):
+        store.transition_status(run_id, "running")
+
+    for kind in ("runs", "summary", "runindex", "signature"):
+        client.delete(f"tickflow:mining:{kind}:{namespace}")
 
 
 def test_create_get_status_machine(store: RedisMiningRunStore) -> None:
@@ -82,9 +117,59 @@ def test_summary_and_artifact(store: RedisMiningRunStore) -> None:
     store.create({"factor": "f1"}, "fp", run_id=rid)
     store.write_summary(rid, {"selected": 5})
     assert store.read_summary(rid) == {"selected": 5}
+    store.artifact_path(rid, "factors").write_bytes(b"artifact")
     store.register_artifact(rid, "factors", "factors.parquet")
     after = store.get(rid)
     assert after is not None and after["artifacts"]["factors"] == "factors.parquet"
+    content = after["artifact_content"]["factors"]
+    assert content["uri"].startswith("file://")
+    assert content["uri"].endswith("/factors.parquet")
+    assert content["content_addr"].startswith("sha256:")
+    assert content["size_bytes"] == len(b"artifact")
+
+
+def test_artifact_path_uses_shared_root_when_configured(
+    store: RedisMiningRunStore,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "mining_artifact_root", tmp_path)
+    rid = _rid()
+    path = store.artifact_path(rid, "candidates")
+
+    assert path.parent == (tmp_path / store.namespace / rid).resolve()
+
+
+def test_concurrent_artifact_registration_keeps_all_names(store: RedisMiningRunStore) -> None:
+    import threading
+
+    rid = _rid()
+    store.create({"factor": "f1"}, "fp", run_id=rid)
+    names = ("factors", "candidates")
+    for name in names:
+        store.artifact_path(rid, name).write_bytes(name.encode())
+
+    errors: list[BaseException] = []
+
+    def register(name: str) -> None:
+        try:
+            store.register_artifact(rid, name)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=register, args=(name,)) for name in names]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors
+    manifest = store.get(rid)
+    assert manifest is not None
+    assert set(manifest["artifacts"]) == set(names)
+    assert set(manifest["artifact_content"]) == set(names)
 
 
 def test_list_and_find_by_signature(store: RedisMiningRunStore) -> None:
@@ -93,6 +178,20 @@ def test_list_and_find_by_signature(store: RedisMiningRunStore) -> None:
     assert any(r["run_id"] == rid for r in store.list_runs())
     found = store.find_by_signature(m["run_signature"])
     assert found is not None and found["run_id"] == rid
+
+
+def test_signature_claim_is_atomic_and_replaces_failed_run(store: RedisMiningRunStore) -> None:
+    signature = "dedup-signature"
+    first = _rid()
+    second = _rid()
+
+    assert store.claim_signature(signature, first) == first
+    assert store.claim_signature(signature, second) == first
+
+    store.create({"factor": "f1"}, "fp", run_id=first)
+    store.transition_status(first, "running")
+    store.transition_status(first, "failed")
+    assert store.claim_signature(signature, second) == second
 
 
 def test_concurrent_transitions_only_one_wins(store: RedisMiningRunStore) -> None:

@@ -222,25 +222,3 @@ class ClickHouseMarketDataMixin:
             params,
         )
         return df["d"].to_list()
-
-    # ── 联合视图（T3.7）────────────────────────────────────────
-    def screener_base(
-        self,
-        day: date,
-        *,
-        symbols: Sequence[str] | None = None,
-    ) -> pl.DataFrame:
-        """单日 enriched ⋈ 标的维表宽表（CK 视图 ``v_screener_base``）。
-
-        省掉调用方从两表各读一次再内存 join；维表缺失时字段为 null，不丢行。
-        """
-        conditions = ["e.date = {day:Date}"]
-        params: dict[str, object] = {"day": day}
-        if symbols is not None:
-            conditions.append("e.symbol IN {syms:Array(String)}")
-            params["syms"] = list(symbols)
-        return self._client.query(
-            f"SELECT * FROM {self._client.table('v_screener_base')} AS e "
-            f"WHERE {' AND '.join(conditions)}",
-            params,
-        )

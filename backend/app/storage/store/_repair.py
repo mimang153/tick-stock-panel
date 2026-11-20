@@ -9,6 +9,13 @@ import polars as pl
 
 from app.storage.protocol import DAILY_TABLES
 
+# 修补单状态机（DES-002 §9 CAS）。begin_repair 直接写 started，不经 set_repair_status；
+# rollback 允许从 started（测试/手工）或 committed 发起；failed/rollback 为终态。
+_REPAIR_STATUS_TRANSITIONS: dict[str, frozenset[str]] = {
+    "started": frozenset({"committed", "failed", "rollback"}),
+    "committed": frozenset({"rollback"}),
+}
+
 
 class ClickHouseRepairMixin:
     """数据修复快照与审计。"""
@@ -154,8 +161,26 @@ class ClickHouseRepairMixin:
             ],
         )
 
+    def read_repair_status(self, repair_id: str) -> str | None:
+        """读取修补单最新状态（MergeTree 追加日志按 updated_at 取最后一条）。"""
+        df = self._client.query(
+            f"SELECT status FROM {self._table('ck_repair_audit')} "
+            "WHERE repair_id = {repair_id:String} AND change_type IN ('begin', 'status') "
+            "ORDER BY updated_at DESC LIMIT 1",
+            {"repair_id": repair_id},
+        )
+        return str(df["status"][0]) if not df.is_empty() else None
+
     def set_repair_status(self, repair_id: str, status: str, actor: str) -> None:
-        """更新修复任务状态。"""
+        """更新修复任务状态。
+
+        CAS 语义：按 repair_id 读最新状态并校验流转合法，终态不可再次写入，
+        防止跨实例/迟到的状态更新覆盖已结束的修补单（DES-002 §9）。
+        """
+        current = self.read_repair_status(repair_id)
+        allowed = _REPAIR_STATUS_TRANSITIONS.get(current or "", frozenset())
+        if status not in allowed:
+            raise ValueError(f"非法修补状态流转: {current!r} -> {status!r}")
         now = datetime.now()
         self._client.insert_rows(
             self._table("ck_repair_audit"),

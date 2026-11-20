@@ -49,6 +49,7 @@ EXPECTED_TABLES = {
     "ck_coord_cancel_request",
     "ck_coord_limiter_lease",
     "ck_mining_run_audit",
+    "ck_mining_artifact",
     "backtest_runs",
     "backtest_trades",
     "sync_state",
@@ -78,12 +79,8 @@ class _FakeClient:
 
 
 def _table_statements(prefix: str = "t_ab12cd34_") -> list[str]:
-    """只取建表 DDL：build_statements 末尾还会追加联合视图（CREATE OR REPLACE VIEW）。"""
+    """只取建表 DDL；联合视图已按 CH-12 移除。"""
     return [s for s in schema.build_statements(prefix) if s.startswith("CREATE TABLE")]
-
-
-def _view_statements(prefix: str = "t_ab12cd34_") -> list[str]:
-    return [s for s in schema.build_statements(prefix) if s.startswith("CREATE OR REPLACE VIEW")]
 
 
 def test_schema_covers_design_tables() -> None:
@@ -93,13 +90,6 @@ def test_schema_covers_design_tables() -> None:
 def test_statements_are_idempotent_and_safe() -> None:
     for statement in _table_statements():
         assert statement.startswith("CREATE TABLE IF NOT EXISTS t_ab12cd34_"), statement
-        upper = statement.upper()
-        assert "DROP " not in upper
-        assert "SYSTEM " not in upper
-        assert "CREATE DATABASE" not in upper
-    # 联合视图必须可重复执行（CREATE OR REPLACE），且同样不含破坏性语句
-    for statement in _view_statements():
-        assert statement.startswith("CREATE OR REPLACE VIEW t_ab12cd34_"), statement
         upper = statement.upper()
         assert "DROP " not in upper
         assert "SYSTEM " not in upper
@@ -199,10 +189,8 @@ def test_ensure_schema_creates_tables_and_records_version() -> None:
 
     assert version == schema.SCHEMA_VERSION
     tables = [s for s in client.statements if s.startswith("CREATE TABLE")]
-    views = [s for s in client.statements if s.startswith("CREATE OR REPLACE VIEW")]
     assert len(tables) == len(schema.TABLE_NAMES)
-    # 联合视图在 enriched 与 instruments 都建好后追加
-    assert len(views) == len(_view_statements())
+    assert not [s for s in client.statements if s.startswith("CREATE OR REPLACE VIEW")]
     # 版本登记只写一行
     assert len(client.inserted) == 1
     table, df = client.inserted[0]

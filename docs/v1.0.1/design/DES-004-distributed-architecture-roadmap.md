@@ -100,7 +100,7 @@
 | SSE 事件 | Redis Pub/Sub | 否 | 强一致（推送） | RC-07 已实现 |
 | 取消 / 限流 / 任务状态 | Redis（权威）+ CK 审计 | AOF + CK | 强一致 | RC-08 已实现；CK 审计与重建 2026-11-19 已实现（§2.3 方案 B） |
 | mining run 状态 / 事件 / 摘要 | Redis（权威，Lua 原子）+ CK 审计 | AOF + CK | 强一致 | 方案 C 已实现 2026-11-19（`RedisMiningRunStore` + `mining_audit`）；memory 文件版仅离线兼容，禁止多 worker 生产回退 |
-| mining 产物 artifact | 内容寻址 + 共享 URI，CK 元数据（MN-02 待落地） | 是 | 最终一致 | 2026-11-20 PH-1 确认：`content_addr` 必须跨实例可解析，不能是本地相对路径 |
+| mining 产物 artifact | 内容寻址 + 共享 URI（`MINING_ARTIFACT_ROOT`） | 是 | 最终一致 | 共享根/内容哈希/共享 URI 元数据已落地；redis 后端未配置共享根时启动失败；CK artifact 表与对象存储适配器待接入 |
 | 模拟盘账户台账 | PostgreSQL 事务层（DES-005，已实现） | 否 | 可重放 | 2026-11-19 决策修订并同日落地：引入 PG（6 表 + 事务 + account 行锁）支持多 worker 写，原"保留单写者"已推翻；账户项不再是 S4 前置，其余前置见 DES-005、ISS-004 DIST-06/DIST-05 |
 | 挖掘锁 | 方案 C：无锁（Redis Lua 串行化）/ memory 文件版：本地 flock | 否 | 强一致 | 2026-11-19：redis 模式 flock 出局；memory 文件版仅离线兼容，禁止多 worker 生产回退 |
 
@@ -112,7 +112,7 @@
 | --- | --- | --- |
 | S0 规划冻结 | 本文评审；DES-003 D-01 拍板；RC-02 AOF 决策修订 | 本文与 DES-003 评审通过 |
 | S1 基础设施补齐（已完成 2026-11-19） | Redis 开 AOF（`redis-cache.sh` + 部署文档）；三张 CK 协调审计表 + `coordination_audit` 重建流程；启动钩子 | 定向 6 passed + 回归 80 passed；pre-commit 全绿；全量回归待后续批次 |
-| S2 mining 分布式化（状态机 + 取消协调 + flock 出局 + 历史兼容验证完成 2026-11-19） | 已实现 `RedisMiningRunStore`（Lua 原子状态机 + 事件/摘要/claim，工厂 `get_run_store` 按 `mining_store_backend` 切换）+ `mining_audit`（CK 审计 + 重建）；取消事件经 `_CoordinatedCancelEvent.is_set()` 叠加 `coordination.cancel_flags` 跨 worker 传播，`main.lifespan`/`ensure_mining_lock` 在 redis 模式下不再抢 flock（DIST-03/MN-04/方案 C 路径）；MN-05 历史 run 读取归一化 + API 投影已验证（残留缺口登记待处理）；**待完成**：MN-02 产物共享 URI + 去重/产物注册原子化 + 审计 outbox/barrier | 状态机 7 + 审计 3 + 跨实例取消 5 + 历史兼容 5 + mining 相关回归 77 passed；memory 文件版 flock 仅离线兼容，禁止多 worker 生产回退 |
+| S2 mining 分布式化（状态机 + 取消协调 + flock 出局 + 历史兼容验证完成 2026-11-19） | 已实现 `RedisMiningRunStore`（Lua 原子状态机 + 事件/摘要/claim，工厂 `get_run_store` 按 `mining_store_backend` 切换）+ `mining_audit`（CK 审计 + 重建）；取消事件经 `_CoordinatedCancelEvent.is_set()` 叠加 `coordination.cancel_flags` 跨 worker 传播，`main.lifespan`/`ensure_mining_lock` 在 redis 模式下不再抢 flock（DIST-03/MN-04/方案 C 路径）；MN-05 历史 run 读取归一化 + API 投影已验证（残留缺口登记待处理）；MN-02 共享根/内容哈希/共享 URI 元数据、去重与产物注册原子化、审计 outbox/barrier 已于 2026-11-20 落地；**待完成**：CK artifact 表写入与对象存储适配器 | 状态机 7 + 审计 3 + 跨实例取消 5 + 历史兼容 5 + mining 相关回归 77 passed；memory 文件版 flock 仅离线兼容，禁止多 worker 生产回退 |
 | S3 模拟盘账户（决策修订 2026-11-19，**已实现**） | ~~保留单写者~~ → **引入 PostgreSQL 事务层**：账户写入组是真实 OLTP 事务，多 worker 并发写会账目分叉（P0）；选 PG 事务 + account 行锁保证原子，6 张表直接建库（无历史数据、无迁移负担），CK 审计非强制，NAV/auto_rules 一并建表，前端零改动。库表遵循 `tsp-rule/pgsql.mdc`；同日完成 5 个 paper 模块全量迁移 + 12 个测试重写（见 [DES-005](DES-005-paper-account-transaction-store.md) §13） | 已实现；账户项不再是 S4 前置 |
 | S4 API 多 worker（**已解锁 2026-11-19**） | 账户 PG 事务层 + 四后端默认 redis（cache/SSE/coordination/mining）+ `coordination.once()` 启动钩子单飞 + Dockerfile `API_WORKERS`（默认 2）；成交重算移入 account 行锁内避免旧快照覆盖。服务对象仍挂所有 worker 的 `app.state`，非 leader 为「未启动」状态 | `test_coordination_once` + `test_paper_pg::test_concurrent_fills_cash_not_overwritten`（真实多进程）+ `test_paper_multiworker`（两 API 实例）全绿；全量回归通过；`deployment.md` 单 worker 约束已解除。已登记取舍：RC-06 各 worker 本地刷新；memory 文件版 mining 的 flock 仅离线兼容，禁止多 worker 生产回退 |
 | S5 跨主机评估（可选） | 若需要跨主机，锁换 Redlock/etcd；产物/定义/staging/矩阵工作区改共享存储或对象存储；generation/repair 用 fencing token | 独立立项，不在本规划实施范围 |

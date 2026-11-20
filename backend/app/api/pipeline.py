@@ -26,6 +26,45 @@ _background_tasks: set[asyncio.Task] = set()
 
 logger = logging.getLogger(__name__)
 
+
+class _NoopSyncState:
+    """无存储时的空实现，保持任务路径无分支。"""
+
+    def mark_running(self) -> None:
+        return None
+
+    def mark_ok(self) -> None:
+        return None
+
+    def mark_failed(self, error: str) -> None:
+        return None
+
+
+class _TaskSyncState:
+    """把固定 task 绑定到 SyncStateStore，减少调用侧分支。"""
+
+    def __init__(self, state, task: str) -> None:
+        self._state = state
+        self._task = task
+
+    def mark_running(self) -> None:
+        self._state.mark_running(self._task)
+
+    def mark_ok(self) -> None:
+        self._state.mark_ok(self._task)
+
+    def mark_failed(self, error: str) -> None:
+        self._state.mark_failed(self._task, error)
+
+
+def _sync_state_for(task: str) -> _NoopSyncState | _TaskSyncState:
+    """取得任务状态写入器；未接 CK 时返回空实现。"""
+    from app.storage.runtime import get_storage
+
+    state = getattr(get_storage(), "sync_state", None)
+    return _TaskSyncState(state, task) if state is not None else _NoopSyncState()
+
+
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
 
@@ -52,7 +91,7 @@ async def trigger_pipeline_job(repo, capset, quote_service=None) -> dict:
     )
 
 
-async def _submit_job(repo, quote_service, make_run) -> dict:
+async def _submit_job(repo, quote_service, make_run, *, sync_task: str = "kline_sync") -> dict:
     """任务化执行公共机制: 单飞 create → 重任务槽 → 行情暂停 → 缓存失效。
 
     make_run(progress) 返回实际执行闭包(阻塞 IO + CPU, 在 executor 里跑)。
@@ -75,11 +114,16 @@ async def _submit_job(repo, quote_service, make_run) -> dict:
 
     run = make_run(progress)
 
+    sync = _sync_state_for(sync_task)
+    sync.mark_running()
+
     # 在 executor 里跑同步任务(pipeline 内部都是阻塞 IO + CPU)
     async def task() -> None:
         # 重任务执行槽: 防僵尸并发(reap 后线程仍活时新任务不得并行写 parquet)
         if not try_acquire_run_slot(job_id):
-            job_store.fail(job_id, "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试")
+            message = "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试"
+            job_store.fail(job_id, message)
+            sync.mark_failed(message)
             return
         # 任务运行期间暂停实时行情取数, 防止覆写同一批 parquet 竞态
         qs = quote_service
@@ -99,14 +143,17 @@ async def _submit_job(repo, quote_service, make_run) -> dict:
                 _long_task_executor, run_with_capacity, job_id, _run
             )
             job_store.succeed(job_id, result)
+            sync.mark_ok()
             invalidate_storage_cache()
         except JobCancelledError:
             # 已被 reap/手动取消终止: job 状态已由 terminate() 写为 failed,
             # 拉取线程在分块回调处自行退出, 这里无需(也无法)再写状态。
             logger.warning("pipeline job %s cancelled", job_id)
+            sync.mark_failed("任务已取消")
         except Exception as e:
             logger.exception("pipeline job failed")
             job_store.fail(job_id, str(e))
+            sync.mark_failed(str(e))
             invalidate_storage_cache()
         finally:
             release_run_slot(job_id)
@@ -140,6 +187,7 @@ async def run_adj_factor_now(request: Request) -> dict:
         lambda progress: (
             lambda: daily_pipeline.run_adj_factor_sync(repo, capset, on_progress=progress)
         ),
+        sync_task="adj_factor_sync",
     )
 
 

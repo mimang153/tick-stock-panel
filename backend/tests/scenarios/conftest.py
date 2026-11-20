@@ -63,11 +63,13 @@ def scenario_app(ck_runtime, tmp_path, monkeypatch):
 
     from app.api import data as data_api
     from app.api import kline as kline_api
+    from app.api import routes as routes_api
     from app.api import watchlist as watchlist_api
 
     app = FastAPI()
     app.include_router(data_api.router)
     app.include_router(kline_api.router)
+    app.include_router(routes_api.router)
     app.include_router(watchlist_api.router)
     app.state.repo = repo
     app.state.capabilities = SimpleNamespace()

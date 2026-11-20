@@ -220,7 +220,12 @@ def repair_integrity_issues(repo, capset, issues, *, backup_dir: Path, on_progre
 
     root = Path(repo.store.data_dir)
     targets = plan_daily_repair(issues)
+    # 私有 staging：目录名取本次 backup_id，并写入 owner 标记；仅持有者清理，
+    # 防止同名/重试的其它 worker 误删正在使用的暂存数据（DES-002 §9）。
     staging = root / ".daily_repair_staging" / backup_dir.name
+    owner_marker = staging / ".owner"
+    staging.mkdir(parents=True, exist_ok=True)
+    owner_marker.write_text(backup_dir.name, encoding="utf-8")
     removals = {}
 
     def emit(stage, pct, message, *, stage_pct=0):
@@ -248,7 +253,12 @@ def repair_integrity_issues(repo, capset, issues, *, backup_dir: Path, on_progre
             daily_health.complete(root, asset, start=day, symbols=None, days=handled_days[asset])
         return {"repaired_partitions": len(targets)}
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        # 只清理本人标记且未被人替换的 staging；他人占用的目录保持不动。
+        try:
+            if owner_marker.read_text(encoding="utf-8") == backup_dir.name:
+                shutil.rmtree(staging, ignore_errors=True)
+        except OSError:
+            logger.warning("修补暂存目录 owner 标记不可读，跳过清理: %s", staging)
 
 
 def _refresh_repair_dependents(repo, entries: list[dict], assets: set[str], emit) -> None:

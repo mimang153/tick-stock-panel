@@ -107,7 +107,7 @@ CLICKHOUSE_PASSWORD=tsp123456
 ## 数据
 
 ```ini
-DATA_DIR=./data       # Parquet / DuckDB 数据存储目录
+DATA_DIR=./data       # 本地数据/临时目录；CK 为权威读源，Parquet/DuckDB 仅作离线兼容或可重建缓存
 ```
 
 整个 `data/` 目录都不纳入 git —— 行情 K线、财务、自选、回测、监控记录,乃至概念/行业扩展数据,全部是程序运行时生成/拉取的用户数据。

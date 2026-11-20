@@ -10,7 +10,7 @@ import pytest
 
 from app.jobs import daily_pipeline
 from app.services import mining_schedule, preferences
-from app.services.mining_jobs import MiningRunStore
+from app.services.mining_jobs import MiningRunStore, compute_run_signature
 
 
 class FakeRepo:
@@ -157,30 +157,25 @@ def test_implementation_metadata_is_recursive_content_based_and_root_independent
     assert first["digest"] != changed["digest"]
 
 
-def test_fingerprint_covers_result_implementation_digest(
+def test_implementation_digest_changes_without_authoritative_digest(
     tmp_path,
     monkeypatch,
 ) -> None:
     repo = FakeRepo(tmp_path)
     state = SimpleNamespace(strategy_engine=None)
-    first = mining_schedule.build_data_fingerprint(
-        repo,
-        state,
-        {"asset_type": "stock", "strategy_ids": []},
-    )
+    request = {"asset_type": "stock", "strategy_ids": []}
+    first = mining_schedule.build_data_fingerprint(repo, state, request)
     monkeypatch.setattr(
         mining_schedule,
         "_implementation_metadata",
         lambda _root: {"file_count": 1, "digest": "changed-runtime"},
     )
-    second = mining_schedule.build_data_fingerprint(
-        repo,
-        state,
-        {"asset_type": "stock", "strategy_ids": []},
-    )
+    second = mining_schedule.build_data_fingerprint(repo, state, request)
 
     assert first["implementation"] != second["implementation"]
-    assert first["digest"] != second["digest"]
+    assert first["implementation_digest"] != second["implementation_digest"]
+    assert first["digest"] == second["digest"]
+    assert first["data_digest"] == second["data_digest"]
 
 
 def test_selected_strategy_metadata_changes_with_same_size_source_edit(tmp_path) -> None:
@@ -207,7 +202,7 @@ def test_selected_strategy_metadata_changes_with_same_size_source_edit(tmp_path)
     assert first[0]["source_tree"]["digest"] != second[0]["source_tree"]["digest"]
 
 
-def test_fingerprint_changes_when_a_nested_custom_factor_changes(tmp_path):
+def test_factor_definition_change_only_moves_implementation_digest(tmp_path):
     from app.factors.registry import isolated_registry
     from app.factors.store import register_definition
 
@@ -226,7 +221,27 @@ def test_fingerprint_changes_when_a_nested_custom_factor_changes(tmp_path):
             {"id": "uf_child", "label": "子因子", "formula": "open", "kind": "custom", "version": 2}
         )
         second = mining_schedule.build_data_fingerprint(repo, state, request)
-        assert first["digest"] != second["digest"]
+
+    assert first["implementation_digest"] != second["implementation_digest"]
+    assert first["digest"] == second["digest"]
+    assert compute_run_signature(request, first) == compute_run_signature(request, second)
+
+
+def test_run_signature_follows_only_authoritative_digest(tmp_path) -> None:
+    request = {"asset_type": "stock", "strategy_ids": []}
+    fingerprint = {
+        "digest": "data-digest",
+        "implementation_digest": "implementation-digest",
+    }
+    changed_implementation = {**fingerprint, "implementation_digest": "changed"}
+    changed_data = {**fingerprint, "digest": "changed"}
+
+    assert compute_run_signature(request, fingerprint) == compute_run_signature(
+        request, changed_implementation
+    )
+    assert compute_run_signature(request, fingerprint) != compute_run_signature(
+        request, changed_data
+    )
 
 
 def test_fingerprint_rejects_continuously_changing_generation(

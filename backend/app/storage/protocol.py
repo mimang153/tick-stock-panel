@@ -186,7 +186,11 @@ class StorageProtocol(Protocol):
         ...
 
     def set_repair_status(self, repair_id: str, status: str, actor: str) -> None:
-        """更新修补单状态（started/committed/failed）。"""
+        """更新修补单状态（committed/failed/rollback），带 CAS 流转校验。"""
+        ...
+
+    def read_repair_status(self, repair_id: str) -> str | None:
+        """读取修补单最新状态，供 CAS 与审计使用。"""
         ...
 
     def read_repair_snapshot(self, repair_id: str) -> pl.DataFrame:
@@ -205,8 +209,49 @@ class StorageProtocol(Protocol):
         """刷新 generation 心跳。"""
         ...
 
+    def begin_generation_leased(
+        self,
+        asset_type: str,
+        actor: str,
+        changed_from: date | None,
+        owner_id: str,
+        lease_seconds: int = 600,
+    ) -> tuple[str, int]:
+        """抢占 generation 租约，返回 generation id 与 fencing token。"""
+        ...
+
+    def heartbeat_generation_leased(
+        self,
+        asset_type: str,
+        generation_id: str,
+        owner_id: str,
+        fencing_token: int,
+    ) -> None:
+        """仅租约持有者刷新心跳。"""
+        ...
+
     def commit_generation(self, asset_type: str, generation_id: str, actor: str) -> None:
         """将 generation 标记为 ready。"""
+        ...
+
+    def commit_generation_leased(
+        self,
+        asset_type: str,
+        generation_id: str,
+        owner_id: str,
+        fencing_token: int,
+    ) -> None:
+        """仅租约持有者提交 generation。"""
+        ...
+
+    def fail_generation_leased(
+        self,
+        asset_type: str,
+        generation_id: str,
+        owner_id: str,
+        fencing_token: int,
+    ) -> None:
+        """仅租约持有者失败 generation。"""
         ...
 
     def fail_generation(self, asset_type: str, generation_id: str, actor: str) -> None:

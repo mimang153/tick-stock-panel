@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import uuid
+from typing import Any
+
 import app.indicators.pipeline as _root
 
 
@@ -183,6 +186,80 @@ def _validate_repair_batch(
     )
 
 
+def _begin_generation(
+    store: Any,
+    asset_type: str,
+    changed_from: Any,
+) -> tuple[str | None, str | None, int | None]:
+    """Open a CK generation with an owner and fencing token when supported."""
+    owner_id = uuid.uuid4().hex
+    leased = getattr(store, "begin_generation_leased", None)
+    if leased is not None:
+        generation_id, token = leased(asset_type, "system", changed_from, owner_id)
+        return generation_id, owner_id, token
+    legacy = getattr(store, "begin_generation", None)
+    if legacy is None:
+        return None, None, None
+    return legacy(asset_type, "system", changed_from), None, None
+
+
+def _finish_generation(
+    store: Any,
+    asset_type: str,
+    generation_id: str | None,
+    owner_id: str | None,
+    token: int | None,
+    method: str,
+) -> None:
+    """Commit or fail a generation through the leased API when available."""
+    if generation_id is None or store is None:
+        return
+    impl = getattr(store, f"{method}_generation_leased", None)
+    if impl is not None and owner_id is not None and token is not None:
+        impl(asset_type, generation_id, owner_id, token)
+        return
+    legacy = getattr(store, f"{method}_generation", None)
+    if legacy is not None:
+        legacy(asset_type, generation_id, "system")
+
+
+def _heartbeat_generation(
+    store: Any,
+    asset_type: str,
+    generation_id: str | None,
+    owner_id: str | None,
+    token: int | None,
+) -> None:
+    """Renew the CK generation lease through the leased API when available."""
+    if generation_id is None or store is None:
+        return
+    leased = getattr(store, "heartbeat_generation_leased", None)
+    if leased is not None and owner_id is not None and token is not None:
+        leased(asset_type, generation_id, owner_id, token)
+        return
+    legacy = getattr(store, "heartbeat_generation", None)
+    if legacy is not None:
+        legacy(asset_type, generation_id, "system")
+
+
+def _progress_with_heartbeat(
+    store: Any,
+    asset_type: str,
+    generation_id: str | None,
+    owner_id: str | None,
+    token: int | None,
+    callback: Any,
+) -> Any:
+    """Wrap progress callback so long CK pipelines renew their lease."""
+
+    def wrapped(done: int, total: int) -> None:
+        _heartbeat_generation(store, asset_type, generation_id, owner_id, token)
+        if callback is not None:
+            callback(done, total)
+
+    return wrapped
+
+
 def recompute_daily_symbols(  # func-length-allow: DES-002 已内联 CK generation 生命周期，拆分会改变发布顺序
     repo,
     asset_type: str,
@@ -235,9 +312,8 @@ def recompute_daily_symbols(  # func-length-allow: DES-002 已内联 CK generati
         claim_wait_s=_root._PUBLICATION_CLAIM_WAIT_S,
         purpose="daily_repair",
     )
-    begin_generation = getattr(generation_store, "begin_generation", None)
-    generation_id = (
-        begin_generation(asset_type, "system", start) if begin_generation is not None else None
+    generation_id, generation_owner, generation_token = _begin_generation(
+        generation_store, asset_type, start
     )
     written = 0
     total = (len(selected) + batch_size - 1) // batch_size
@@ -267,16 +343,24 @@ def recompute_daily_symbols(  # func-length-allow: DES-002 已内联 CK generati
                 asset_type, output, start=start, symbols=batch, publication=publication
             )
             publication.heartbeat()
-            if generation_id is not None and generation_store is not None:
-                generation_store.heartbeat_generation(asset_type, generation_id, "system")
+            _heartbeat_generation(
+                generation_store, asset_type, generation_id, generation_owner, generation_token
+            )
             if on_batch_done:
                 on_batch_done(offset // batch_size + 1, total)
         publication.commit()
-        if generation_id is not None and generation_store is not None:
-            generation_store.commit_generation(asset_type, generation_id, "system")
+        _finish_generation(
+            generation_store,
+            asset_type,
+            generation_id,
+            generation_owner,
+            generation_token,
+            "commit",
+        )
     except BaseException:
-        if generation_id is not None and generation_store is not None:
-            generation_store.fail_generation(asset_type, generation_id, "system")
+        _finish_generation(
+            generation_store, asset_type, generation_id, generation_owner, generation_token, "fail"
+        )
         publication.abandon()
         raise
     enriched_dirname(asset_type)
@@ -314,22 +398,25 @@ def run_pipeline(
         claim_wait_s=_root._PUBLICATION_CLAIM_WAIT_S,
     )
     ck_store = runtime.store if runtime is not None else None
-    generation_id = (
-        ck_store.begin_generation("stock", "system", None) if ck_store is not None else None
+    generation_id, generation_owner, generation_token = _begin_generation(ck_store, "stock", None)
+    progress = _progress_with_heartbeat(
+        ck_store, "stock", generation_id, generation_owner, generation_token, on_batch_done
     )
     try:
         result = _root._run_pipeline_impl(
             data_dir=data_dir,
             symbols=symbols,
             new_dates_only=new_dates_only,
-            on_batch_done=on_batch_done,
+            on_batch_done=progress,
             publication=publication,
         )
-        if generation_id is not None and ck_store is not None:
-            ck_store.commit_generation("stock", generation_id, "system")
+        _finish_generation(
+            ck_store, "stock", generation_id, generation_owner, generation_token, "commit"
+        )
         return result
     except BaseException:
-        if generation_id is not None and ck_store is not None:
-            ck_store.fail_generation("stock", generation_id, "system")
+        _finish_generation(
+            ck_store, "stock", generation_id, generation_owner, generation_token, "fail"
+        )
         publication.abandon()
         raise

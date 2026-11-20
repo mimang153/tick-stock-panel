@@ -6,7 +6,7 @@ run manifest / summary / events 存 Redis，状态转换用 Lua 在 Redis 端原
 flock 不再是 mining 状态机的参与者。
 
 接口与 ``MiningRunStore`` 完全兼容（依赖注入替换），文件版保留作离线兼容。
-CK 审计由 ``mining_audit`` 在转换后落表，本模块只负责 Redis 权威态。
+审计事件与状态转换在同一 Lua 中写入 Redis outbox，由 ``mining_audit`` 幂等落 CK。
 
 数据布局（键前缀 ``{coordination_redis_prefix}``）：
 - Hash ``runs:<ns>``: field=run_id → manifest JSON（含 artifacts）
@@ -19,6 +19,7 @@ CK 审计由 ``mining_audit`` 在转换后落表，本模块只负责 Redis 权�
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
@@ -26,6 +27,7 @@ from typing import Any, cast
 
 from app.services.mining_jobs import (
     _ALLOWED_TRANSITIONS,
+    _LEGACY_READ_RUN_ID_PATTERN,
     _NAMESPACE_PATTERN,
     _RUN_ID_PATTERN,
     ACTIVE_RUN_STATUSES,
@@ -33,17 +35,25 @@ from app.services.mining_jobs import (
     MAX_EVENT_PAYLOAD_BYTES,
     MAX_EVENTS,
     RUN_STATUSES,
+    SUCCESS_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
     InvalidMiningStatusTransitionError,
+    MiningRunStore,
     MiningRunValidationError,
+    _artifact_content_metadata,
+    _manifest_sort_key,
     _now_iso,
     canonicalize_request,
     compute_run_signature,
 )
 
-# KEYS[1]=runs hash; ARGV[1]=run_id; ARGV[2]=target status;
+logger = logging.getLogger(__name__)
+
+# KEYS[1]=runs hash; KEYS[2]=audit outbox list; KEYS[3]=outbox namespace index;
+# ARGV[1]=run_id; ARGV[2]=target status;
 # ARGV[3]=allowed 前驱集合(JSON array); ARGV[4]=now iso;
-# ARGV[5]=error or ''; ARGV[6]=terminal 状态集合(JSON array)
+# ARGV[5]=error or ''; ARGV[6]=terminal 状态集合(JSON array);
+# ARGV[7]=event_id; ARGV[8]=namespace; ARGV[9]=previous status
 _TRANSITION_LUA = """
 local raw = redis.call('HGET', KEYS[1], ARGV[1])
 if not raw then return redis.error_reply('run not found: ' .. ARGV[1]) end
@@ -63,6 +73,55 @@ if ARGV[2] == 'cancelling' then manifest['cancellation_requested_at'] = ARGV[4] 
 local terminal = cjson.decode(ARGV[6])
 for _, s in ipairs(terminal) do if s == ARGV[2] then manifest['finished_at'] = ARGV[4] end end
 if ARGV[5] ~= '' then manifest['error'] = ARGV[5] end
+local encoded = cjson.encode(manifest)
+local event = cjson.encode({
+  event_id = ARGV[7],
+  namespace = ARGV[8],
+  run_id = ARGV[1],
+  from_status = ARGV[9],
+  to_status = ARGV[2],
+  manifest = cjson.decode(encoded),
+  error = (ARGV[5] == '' and cjson.null or ARGV[5]),
+  created_at = ARGV[4]
+})
+redis.call('HSET', KEYS[1], ARGV[1], encoded)
+redis.call('RPUSH', KEYS[2], event)
+redis.call('SADD', KEYS[3], ARGV[8])
+return encoded
+"""
+
+# KEYS[1]=signature hash; KEYS[2]=runs hash;
+# ARGV[1]=signature; ARGV[2]=proposed run_id; ARGV[3]=reusable statuses (JSON array)
+_CLAIM_SIGNATURE_LUA = """
+local existing = redis.call('HGET', KEYS[1], ARGV[1])
+local reusable = cjson.decode(ARGV[3])
+if existing then
+  local raw = redis.call('HGET', KEYS[2], existing)
+  if not raw then return existing end
+  local manifest = cjson.decode(raw)
+  for _, s in ipairs(reusable) do
+    if manifest['status'] == s then return existing end
+  end
+  redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+  return ARGV[2]
+end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+return ARGV[2]
+"""
+
+# KEYS[1]=runs hash; ARGV[1]=run_id; ARGV[2]=artifact name;
+# ARGV[3]=artifact URI; ARGV[4]=content metadata JSON; ARGV[5]=updated_at
+_REGISTER_ARTIFACT_LUA = """
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+if not raw then return redis.error_reply('run not found: ' .. ARGV[1]) end
+local manifest = cjson.decode(raw)
+local artifacts = manifest['artifacts'] or {}
+artifacts[ARGV[2]] = ARGV[3]
+manifest['artifacts'] = artifacts
+local content = manifest['artifact_content'] or {}
+content[ARGV[2]] = cjson.decode(ARGV[4])
+manifest['artifact_content'] = content
+manifest['updated_at'] = ARGV[5]
 local encoded = cjson.encode(manifest)
 redis.call('HSET', KEYS[1], ARGV[1], encoded)
 return encoded
@@ -93,13 +152,21 @@ class RedisMiningRunStore:
     def __init__(self, data_dir: Path | str | None = None, *, namespace: str = "mining") -> None:
         if not _NAMESPACE_PATTERN.fullmatch(namespace):
             raise MiningRunValidationError(f"unsupported run store namespace: {namespace!r}")
+        from app.config import settings
+
         self.namespace = namespace
+        self.data_dir = Path(data_dir) if data_dir is not None else Path(settings.data_dir)
         self._client = _redis_client()
         # 独立命名空间，避免被 `redis-cache.sh flush`（清 tickflow:cache:*）误删 run 状态。
         prefix = "tickflow:mining"
         self._runs_key = f"{prefix}:runs:{namespace}"
         self._summary_key = f"{prefix}:summary:{namespace}"
         self._index_key = f"{prefix}:runindex:{namespace}"
+        self._signature_key = f"{prefix}:signature:{namespace}"
+        from app.services import mining_audit
+
+        self._audit_outbox_key = mining_audit.outbox_key(namespace)
+        self._audit_index_key = mining_audit._OUTBOX_INDEX
 
     def _events_key(self, run_id: str) -> str:
         return f"{self._runs_key}:events:{run_id}"
@@ -111,6 +178,16 @@ class RedisMiningRunStore:
         if not isinstance(run_id, str) or not _RUN_ID_PATTERN.fullmatch(run_id):
             raise MiningRunValidationError(f"invalid run id: {run_id!r}")
         return run_id
+
+    def _legacy_validate_run_id(self, run_id: str) -> str:
+        """Read-only validation tolerating legacy directory names on the file fallback."""
+        if not isinstance(run_id, str) or not _LEGACY_READ_RUN_ID_PATTERN.fullmatch(run_id):
+            raise MiningRunValidationError(f"invalid run id: {run_id!r}")
+        return run_id
+
+    def _file_store(self) -> MiningRunStore:
+        """Return the file backend for runs written before Redis was authoritative."""
+        return MiningRunStore(self.data_dir, namespace=self.namespace)
 
     def _manifest(self, run_id: str) -> dict[str, Any] | None:
         raw = self._client.hget(self._runs_key, run_id)
@@ -144,6 +221,7 @@ class RedisMiningRunStore:
         pipe = self._client.pipeline()
         pipe.hsetnx(self._runs_key, safe_id, json.dumps(manifest, default=str))
         pipe.hsetnx(self._summary_key, safe_id, "{}")
+        pipe.hsetnx(self._signature_key, manifest["run_signature"], safe_id)
         pipe.sadd(self._index_key, safe_id)
         created = pipe.execute()[0]
         if not created:
@@ -151,7 +229,11 @@ class RedisMiningRunStore:
         return manifest
 
     def get(self, run_id: str) -> dict[str, Any] | None:
-        return self._manifest(self._validate_run_id(run_id))
+        safe_id = self._legacy_validate_run_id(run_id)
+        manifest = self._manifest(safe_id)
+        if manifest is not None:
+            return manifest
+        return self._file_store().get(safe_id)
 
     def transition_status(
         self,
@@ -172,17 +254,23 @@ class RedisMiningRunStore:
             raise InvalidMiningStatusTransitionError(
                 f"cannot transition from {current['status']} to {status}"
             )
+        event_id = uuid.uuid4().hex
         try:
             raw = self._client.eval(
                 _TRANSITION_LUA,
-                1,
+                3,
                 self._runs_key,
+                self._audit_outbox_key,
+                self._audit_index_key,
                 safe_id,
                 status,
                 json.dumps(sorted(_ALLOWED_TRANSITIONS[current["status"]])),
                 _now_iso(),
                 "" if error is None else str(error),
                 json.dumps(sorted(TERMINAL_RUN_STATUSES)),
+                event_id,
+                self.namespace,
+                current["status"],
             )
         except Exception as exc:
             if "invalid transition" in str(exc):
@@ -191,10 +279,10 @@ class RedisMiningRunStore:
         manifest = cast(dict[str, Any], json.loads(raw))
         from app.services import mining_audit
 
-        if mining_audit.enabled():
-            mining_audit.record_transition(
-                self.namespace, safe_id, current["status"], status, manifest, error
-            )
+        try:
+            mining_audit.flush(self.namespace)
+        except Exception as exc:  # noqa: BLE001 - CK 审计失败不能阻断已提交的 Redis 状态
+            logger.warning("mining 审计 outbox 延迟写入: %s", exc)
         return manifest
 
     def write_summary(self, run_id: str, summary: Mapping[str, Any]) -> dict[str, Any]:
@@ -208,20 +296,33 @@ class RedisMiningRunStore:
         return clean
 
     def read_summary(self, run_id: str) -> dict[str, Any]:
-        safe_id = self._validate_run_id(run_id)
+        safe_id = self._legacy_validate_run_id(run_id)
         if self._manifest(safe_id) is None:
-            raise KeyError(safe_id)
+            return self._file_store().read_summary(safe_id)
         raw = self._client.hget(self._summary_key, safe_id)
         return cast(dict[str, Any], json.loads(raw)) if raw is not None else {}
 
     def _run_dir(self, run_id: str) -> Path:
+        return self.data_dir / "research" / self.namespace / "runs" / run_id
+
+    def _artifact_root(self, run_id: str) -> Path:
         from app.config import settings
 
-        return Path(settings.data_dir) / "research" / self.namespace / "runs" / run_id
+        root = (
+            self._run_dir(run_id)
+            if settings.mining_artifact_root is None
+            else settings.mining_artifact_root / self.namespace / self._validate_run_id(run_id)
+        )
+        resolved = root.resolve()
+        if settings.mining_artifact_root is not None and not resolved.is_relative_to(
+            settings.mining_artifact_root.resolve()
+        ):
+            raise MiningRunValidationError("artifact root escapes configured mining root")
+        return resolved
 
     def _safe_artifact_path(self, run_id: str, path: Path) -> Path:
-        candidate = (self._run_dir(run_id) / path).resolve()
-        root = self._run_dir(run_id).resolve()
+        root = self._artifact_root(run_id)
+        candidate = (root / path).resolve()
         if candidate != root and root not in candidate.parents:
             raise MiningRunValidationError("artifact path escapes run directory")
         return candidate
@@ -230,6 +331,7 @@ class RedisMiningRunStore:
         safe_id = self._validate_run_id(run_id)
         if name not in ARTIFACT_NAMES:
             raise MiningRunValidationError(f"unsupported artifact: {name!r}")
+        self._artifact_root(safe_id).mkdir(parents=True, exist_ok=True)
         return self._safe_artifact_path(safe_id, Path(f"{name}.parquet"))
 
     def register_artifact(
@@ -246,15 +348,26 @@ class RedisMiningRunStore:
         )
         if artifact_path.suffix.lower() != ".parquet":
             raise MiningRunValidationError("mining artifacts must use the .parquet suffix")
-        relative_path = artifact_path.relative_to(self._run_dir(safe_id)).as_posix()
-        manifest = self._manifest(safe_id)
-        if manifest is None:
-            raise KeyError(safe_id)
-        artifacts = dict(manifest.get("artifacts") or {})
-        artifacts[name] = relative_path
-        manifest["artifacts"] = artifacts
-        manifest["updated_at"] = _now_iso()
-        self._client.hset(self._runs_key, safe_id, json.dumps(manifest, default=str))
+        relative_path = artifact_path.relative_to(self._artifact_root(safe_id)).as_posix()
+        from app.services.mining_artifact import record_artifact
+        from app.storage.artifact_store import store_artifact_uri
+
+        content = {
+            **_artifact_content_metadata(artifact_path),
+            "uri": store_artifact_uri(artifact_path, self.namespace, safe_id, name),
+        }
+        raw = self._client.eval(
+            _REGISTER_ARTIFACT_LUA,
+            1,
+            self._runs_key,
+            safe_id,
+            name,
+            relative_path,
+            json.dumps(content, default=str),
+            _now_iso(),
+        )
+        manifest = cast(dict[str, Any], json.loads(raw))
+        record_artifact(self.namespace, safe_id, name, content)
         return manifest
 
     def append_event(
@@ -296,11 +409,11 @@ class RedisMiningRunStore:
         return event
 
     def read_events(self, run_id: str, after_id: int = 0) -> list[dict[str, Any]]:
-        safe_id = self._validate_run_id(run_id)
+        safe_id = self._legacy_validate_run_id(run_id)
         if not isinstance(after_id, int) or after_id < 0:
             raise MiningRunValidationError("after_id must be a non-negative int")
         if self._manifest(safe_id) is None:
-            raise KeyError(safe_id)
+            return self._file_store().read_events(safe_id, after_id=after_id)
         raw_events = self._client.lrange(self._events_key(safe_id), 0, -1)
         events = [json.loads(raw) for raw in raw_events]
         return [event for event in events if event.get("id", 0) > after_id][-MAX_EVENTS:]
@@ -318,12 +431,33 @@ class RedisMiningRunStore:
             raise MiningRunValidationError("statuses contains an unsupported mining run status")
         ids = self._client.smembers(self._index_key)
         runs = [m for rid in ids if (m := self._manifest(rid.decode())) is not None]
+        # Redis 迁移前的本地 run 在只读路径合并进来，同名 run 以 Redis 为准。
+        seen = {m["run_id"] for m in runs}
+        for manifest in self._file_store().list_runs(limit=limit, statuses=statuses):
+            if manifest["run_id"] not in seen:
+                runs.append(manifest)
+                seen.add(manifest["run_id"])
         if allowed is not None:
             runs = [m for m in runs if m.get("status") in allowed]
-        from app.services.mining_jobs import _manifest_sort_key
-
         runs.sort(key=_manifest_sort_key, reverse=True)
         return runs[:limit]
+
+    def claim_signature(self, run_signature: str, run_id: str) -> str:
+        """Atomically claim a reusable signature or return its existing run id."""
+        if not isinstance(run_signature, str) or not run_signature:
+            raise MiningRunValidationError("run_signature must not be empty")
+        safe_id = self._validate_run_id(run_id)
+        reusable = sorted(ACTIVE_RUN_STATUSES | SUCCESS_RUN_STATUSES)
+        claimed = self._client.eval(
+            _CLAIM_SIGNATURE_LUA,
+            2,
+            self._signature_key,
+            self._runs_key,
+            run_signature,
+            safe_id,
+            json.dumps(reusable),
+        )
+        return claimed.decode() if isinstance(claimed, bytes) else str(claimed)
 
     def find_by_signature(
         self,
@@ -336,22 +470,26 @@ class RedisMiningRunStore:
         allowed = None if statuses is None else set(statuses)
         if allowed is not None and not allowed <= RUN_STATUSES:
             raise MiningRunValidationError("statuses contains an unsupported mining run status")
-        from app.services.mining_jobs import _manifest_sort_key
-
         ids = self._client.smembers(self._index_key)
-        matches = [
-            m
+        matches = {
+            m["run_id"]: m
             for rid in ids
             if (m := self._manifest(rid.decode())) is not None
             and m.get("run_signature") == run_signature
             and (allowed is None or m.get("status") in allowed)
-        ]
-        return max(matches, key=_manifest_sort_key, default=None)
+        }
+        file_match = self._file_store().find_by_signature(run_signature, statuses=statuses)
+        if file_match is not None and file_match["run_id"] not in matches:
+            matches[file_match["run_id"]] = file_match
+        return max(matches.values(), key=_manifest_sort_key, default=None)
 
     def recover_interrupted(self) -> list[str]:
         recovered: list[str] = []
-        for manifest in self.list_runs(limit=10000):
-            if manifest.get("status") in ACTIVE_RUN_STATUSES:
-                self.transition_status(manifest["run_id"], "interrupted")
-                recovered.append(manifest["run_id"])
+        # 只读回退的历史文件 run 不参与 Redis 状态机恢复，避免在只读副本上写状态。
+        for rid in self._client.smembers(self._index_key):
+            run_id = rid.decode() if isinstance(rid, bytes) else str(rid)
+            manifest = self._manifest(run_id)
+            if manifest is not None and manifest.get("status") in ACTIVE_RUN_STATUSES:
+                self.transition_status(run_id, "interrupted")
+                recovered.append(run_id)
         return recovered

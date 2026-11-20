@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 
 from app import __version__
 from app.storage.runtime import cache_health, storage_health
@@ -111,4 +112,44 @@ def redetect(request: Request) -> dict:
     return {
         "label": tier_label(),
         "capabilities": capset.to_dict(),
+    }
+
+
+@router.get("/api/adj-factor")
+def adj_factor(
+    symbol: str = Query(..., description="标的代码"),
+    start_date: str | None = Query(None, description="起始日期 YYYY-MM-DD"),
+    end_date: str | None = Query(None, description="截止日期 YYYY-MM-DD"),
+    etf: bool = Query(False, description="是否读取 ETF 因子表"),
+) -> dict:
+    """读取除权因子，供 S3 前复权口径逐行对账。"""
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is None:
+        return {"symbol": symbol, "rows": []}
+    rows = runtime.store.read_adj_factor(
+        symbols=[symbol],
+        start=date.fromisoformat(start_date) if start_date else None,
+        end=date.fromisoformat(end_date) if end_date else None,
+        etf=etf,
+    )
+    return {"symbol": symbol, "rows": rows.to_dicts()}
+
+
+@router.get("/api/sync/status")
+def sync_status(
+    task: str = Query("kline_sync", description="同步任务名"),
+) -> dict:
+    """读取 CK sync_state，暴露中断恢复后的失败状态给运维与验收。"""
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    state = runtime.sync_state.get(task) if runtime is not None else None
+    return {
+        "task": task,
+        "status": state.status if state is not None else "unknown",
+        "error": state.last_error if state is not None else None,
+        "last_error": state.last_error if state is not None else None,
+        "last_ok_at": state.last_ok_at if state is not None else None,
     }

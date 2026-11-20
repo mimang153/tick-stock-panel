@@ -7,6 +7,7 @@ Events are appended to a bounded log for progress polling.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -53,6 +54,8 @@ MAX_EVENTS = 256
 MAX_EVENT_PAYLOAD_BYTES = 16 * 1024
 _SCHEMA_VERSION = 1
 _RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+# 历史 run 目录名可能含点号等字符；只读路径放宽到显式白名单，写路径仍用严格 pattern。
+_LEGACY_READ_RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _NAMESPACE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _STORE_LOCK = threading.RLock()
 
@@ -115,12 +118,17 @@ def canonicalize_request(request: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def compute_run_signature(request: Mapping[str, Any], data_fingerprint: Any) -> str:
-    """Hash every request dimension and the data fingerprint using BLAKE2b."""
+    """Hash the request and only the authoritative data digest using BLAKE2b."""
     import hashlib
 
+    fingerprint_input = (
+        data_fingerprint["digest"]
+        if isinstance(data_fingerprint, Mapping) and "digest" in data_fingerprint
+        else data_fingerprint
+    )
     signature_input = {
         "request": canonicalize_request(request),
-        "data_fingerprint": _canonicalize_json_value(data_fingerprint),
+        "data_fingerprint": _canonicalize_json_value(fingerprint_input),
     }
     payload = json.dumps(
         signature_input,
@@ -130,6 +138,24 @@ def compute_run_signature(request: Mapping[str, Any], data_fingerprint: Any) -> 
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
+
+
+def _artifact_content_metadata(path: Path) -> dict[str, Any]:
+    """Return content address and byte size for one mining artifact."""
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+    except OSError as exc:
+        raise MiningRunValidationError(f"artifact file unreadable: {path.name}") from exc
+    return {
+        "content_addr": f"sha256:{digest.hexdigest()}",
+        "size_bytes": size,
+        "schema_version": 1,
+    }
 
 
 class MiningRunStore:
@@ -142,6 +168,7 @@ class MiningRunStore:
             data_dir = settings.data_dir
         if not _NAMESPACE_PATTERN.fullmatch(namespace):
             raise MiningRunValidationError(f"unsupported run store namespace: {namespace!r}")
+        self.namespace = namespace
         self.runs_root = (Path(data_dir).resolve() / "research" / namespace / "runs").resolve()
         self.runs_root.mkdir(parents=True, exist_ok=True)
 
@@ -184,10 +211,10 @@ class MiningRunStore:
 
     def get(self, run_id: str) -> dict[str, Any] | None:
         """Read a manifest, filling defaults for manifests written by older versions."""
-        safe_run_id = self._validate_run_id(run_id)
+        safe_run_id = self._legacy_read_run_id(run_id)
         with _STORE_LOCK:
             return self._read_manifest_path(
-                self._run_dir(safe_run_id) / "manifest.json", safe_run_id
+                self._legacy_run_dir(safe_run_id) / "manifest.json", safe_run_id
             )
 
     def transition_status(
@@ -217,21 +244,25 @@ class MiningRunStore:
         return clean_summary
 
     def read_summary(self, run_id: str) -> dict[str, Any]:
-        safe_run_id = self._validate_run_id(run_id)
+        safe_run_id = self._legacy_read_run_id(run_id)
         with _STORE_LOCK:
-            self._required_manifest(safe_run_id)
-            path = self._run_dir(safe_run_id) / "summary.json"
+            self._required_manifest_for_read(safe_run_id)
+            path = self._legacy_run_dir(safe_run_id) / "summary.json"
             if not path.exists():
                 return {}
-            value = _read_json(path)
+            try:
+                value = _read_json(path)
+            except MiningRunStoreError:
+                return {}
             if not isinstance(value, dict):
-                raise MiningRunStoreError(f"invalid summary for run {safe_run_id}")
+                return {}
             return value
 
     def artifact_path(self, run_id: str, name: ArtifactName) -> Path:
         """Return the safe default Parquet path for an artifact."""
         safe_run_id = self._validate_run_id(run_id)
         self._validate_artifact_name(name)
+        self._artifact_root(safe_run_id).mkdir(parents=True, exist_ok=True)
         return self._safe_artifact_path(safe_run_id, Path(f"{name}.parquet"))
 
     def register_artifact(
@@ -249,15 +280,27 @@ class MiningRunStore:
         )
         if artifact_path.suffix.lower() != ".parquet":
             raise MiningRunValidationError("mining artifacts must use the .parquet suffix")
+        artifact_root = self._artifact_root(safe_run_id)
+        relative_path = artifact_path.relative_to(artifact_root).as_posix()
+        from app.services.mining_artifact import record_artifact
+        from app.storage.artifact_store import store_artifact_uri
+
+        content = {
+            **_artifact_content_metadata(artifact_path),
+            "uri": store_artifact_uri(artifact_path, self.namespace, safe_run_id, name),
+        }
         run_dir = self._run_dir(safe_run_id)
-        relative_path = artifact_path.relative_to(run_dir).as_posix()
         with _STORE_LOCK:
             manifest = self._required_manifest(safe_run_id)
             artifacts = dict(manifest.get("artifacts") or {})
             artifacts[name] = relative_path
             manifest["artifacts"] = artifacts
+            content_map = dict(manifest.get("artifact_content") or {})
+            content_map[name] = content
+            manifest["artifact_content"] = content_map
             manifest["updated_at"] = _now_iso()
             _atomic_write_json(run_dir / "manifest.json", manifest)
+        record_artifact(self.namespace, safe_run_id, name, content)
         return manifest
 
     def append_event(
@@ -313,10 +356,12 @@ class MiningRunStore:
         """Read retained events whose monotonically increasing ID is greater than ``after_id``."""
         if isinstance(after_id, bool) or not isinstance(after_id, int) or after_id < 0:
             raise MiningRunValidationError("after_id must be a non-negative integer")
-        safe_run_id = self._validate_run_id(run_id)
+        safe_run_id = self._legacy_read_run_id(run_id)
         with _STORE_LOCK:
-            self._required_manifest(safe_run_id)
-            events = self._read_events_path(self._run_dir(safe_run_id) / "events.jsonl")
+            self._required_manifest_for_read(safe_run_id)
+            events = self._read_events_path(
+                self._legacy_run_dir(safe_run_id) / "events.jsonl", strict=False
+            )
         return [event for event in events if event["id"] > after_id]
 
     def list_runs(
@@ -339,11 +384,11 @@ class MiningRunStore:
         manifests: list[dict[str, Any]] = []
         for path in paths:
             run_id = path.parent.name
-            if not _RUN_ID_PATTERN.fullmatch(run_id):
+            if not _LEGACY_READ_RUN_ID_PATTERN.fullmatch(run_id):
                 continue
             try:
                 manifest = self._read_manifest_path(
-                    self._run_dir(run_id) / "manifest.json",
+                    self._legacy_run_dir(run_id) / "manifest.json",
                     run_id,
                 )
             except MiningRunStoreError:
@@ -378,10 +423,10 @@ class MiningRunStore:
         matches: list[dict[str, Any]] = []
         for path in paths:
             run_id = path.parent.name
-            if not _RUN_ID_PATTERN.fullmatch(run_id):
+            if not _LEGACY_READ_RUN_ID_PATTERN.fullmatch(run_id):
                 continue
             try:
-                manifest_path = self._run_dir(run_id) / "manifest.json"
+                manifest_path = self._legacy_run_dir(run_id) / "manifest.json"
                 manifest = self._read_manifest_path(manifest_path, run_id)
             except MiningRunStoreError:
                 continue
@@ -391,6 +436,18 @@ class MiningRunStore:
                 continue
             matches.append(manifest)
         return max(matches, key=_manifest_sort_key, default=None)
+
+    def claim_signature(self, run_signature: str, run_id: str) -> str:
+        """Return a reusable run id for the signature (file backend compatibility)."""
+        if not isinstance(run_signature, str) or not run_signature:
+            raise MiningRunValidationError("run_signature must not be empty")
+        safe_id = self._validate_run_id(run_id)
+        with _STORE_LOCK:
+            existing = self.find_by_signature(
+                run_signature,
+                statuses=cast(Any, ACTIVE_RUN_STATUSES | SUCCESS_RUN_STATUSES),
+            )
+            return existing["run_id"] if existing is not None else safe_id
 
     def recover_interrupted(self) -> int:
         """Mark runs without a live in-process worker as interrupted at startup."""
@@ -457,15 +514,27 @@ class MiningRunStore:
             raise KeyError(run_id)
         return manifest
 
+    def _required_manifest_for_read(self, run_id: str) -> dict[str, Any]:
+        manifest = self._read_manifest_path(self._legacy_run_dir(run_id) / "manifest.json", run_id)
+        if manifest is None:
+            raise KeyError(run_id)
+        return manifest
+
     def _read_manifest_path(self, path: Path, run_id: str) -> dict[str, Any] | None:
         if not path.exists():
             return None
         value = _read_json(path)
         if not isinstance(value, dict):
             raise MiningRunStoreError(f"invalid manifest for run {run_id}")
-        return self._normalize_manifest(value, run_id)
+        return self._normalize_manifest(value, run_id, mtime=path.stat().st_mtime)
 
-    def _normalize_manifest(self, value: dict[str, Any], run_id: str) -> dict[str, Any]:
+    def _normalize_manifest(
+        self,
+        value: dict[str, Any],
+        run_id: str,
+        *,
+        mtime: float | None = None,
+    ) -> dict[str, Any]:
         status = value.get("status", "queued")
         if status not in RUN_STATUSES:
             raise MiningRunStoreError(f"invalid status in manifest for run {run_id}")
@@ -478,7 +547,7 @@ class MiningRunStore:
         artifacts_value = value.get("artifacts")
         raw_artifacts = artifacts_value if isinstance(artifacts_value, dict) else {}
         artifacts: dict[str, str] = {}
-        run_dir = self._run_dir(run_id)
+        artifact_root = self._artifact_root(run_id)
         for name, raw_path in raw_artifacts.items():
             if name not in ARTIFACT_NAMES or not isinstance(raw_path, str):
                 continue
@@ -487,7 +556,24 @@ class MiningRunStore:
             except MiningRunValidationError:
                 continue
             if safe_path.suffix.lower() == ".parquet":
-                artifacts[name] = safe_path.relative_to(run_dir).as_posix()
+                artifacts[name] = safe_path.relative_to(artifact_root).as_posix()
+        # 老 run 可能没有 artifacts 注册表：标准文件仍在 run 目录下，读取时推断注册。
+        if not raw_artifacts:
+            for name in ARTIFACT_NAMES:
+                candidate = self._safe_artifact_path(run_id, Path(f"{name}.parquet"))
+                if candidate.exists():
+                    artifacts[name] = candidate.relative_to(artifact_root).as_posix()
+        content_value = value.get("artifact_content")
+        artifact_content = content_value if isinstance(content_value, dict) else {}
+        manifest_run_id = value.get("run_id")
+        legacy_run_id = (
+            manifest_run_id
+            if isinstance(manifest_run_id, str) and manifest_run_id and manifest_run_id != run_id
+            else None
+        )
+        inferred_time = (
+            datetime.fromtimestamp(mtime, UTC).isoformat() if mtime is not None else None
+        )
         normalized = dict(value)
         normalized.update(
             {
@@ -498,24 +584,32 @@ class MiningRunStore:
                 "data_fingerprint": data_fingerprint,
                 "run_signature": signature,
                 "artifacts": artifacts,
-                "created_at": value.get("created_at"),
-                "updated_at": value.get("updated_at") or value.get("created_at"),
+                "created_at": value.get("created_at") or inferred_time,
+                "updated_at": value.get("updated_at") or value.get("created_at") or inferred_time,
                 "started_at": value.get("started_at"),
                 "finished_at": value.get("finished_at"),
                 "cancellation_requested_at": value.get("cancellation_requested_at"),
                 "error": value.get("error"),
             }
         )
+        # 兼容字段仅在历史 run 实际携带/别名时补齐，避免给新格式 manifest 加冗余键。
+        if legacy_run_id or "legacy_run_id" in value:
+            normalized["legacy_run_id"] = legacy_run_id or value.get("legacy_run_id")
+        if "artifact_content" in value:
+            normalized["artifact_content"] = artifact_content
         return normalized
 
     @staticmethod
-    def _read_events_path(path: Path) -> list[dict[str, Any]]:
+    def _read_events_path(path: Path, *, strict: bool = True) -> list[dict[str, Any]]:
+        """Read events; strict=True fails closed for writers, False degrades for readers."""
         if not path.exists():
             return []
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeError) as exc:
-            raise MiningRunStoreError(f"failed to read events file: {path}") from exc
+            if strict:
+                raise MiningRunStoreError(f"failed to read events file: {path}") from exc
+            return []
         events: list[dict[str, Any]] = []
         for line in lines:
             if not line.strip():
@@ -523,16 +617,22 @@ class MiningRunStore:
             try:
                 event = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise MiningRunStoreError(f"invalid events file: {path}") from exc
+                if strict:
+                    raise MiningRunStoreError(f"invalid events file: {path}") from exc
+                continue
             if (
                 not isinstance(event, dict)
                 or isinstance(event.get("id"), bool)
                 or not isinstance(event.get("id"), int)
                 or event["id"] <= 0
             ):
-                raise MiningRunStoreError(f"invalid event record: {path}")
+                if strict:
+                    raise MiningRunStoreError(f"invalid event record: {path}")
+                continue
             if events and event["id"] <= events[-1]["id"]:
-                raise MiningRunStoreError(f"non-monotonic event IDs: {path}")
+                if strict:
+                    raise MiningRunStoreError(f"non-monotonic event IDs: {path}")
+                continue
             events.append(event)
         return events[-MAX_EVENTS:]
 
@@ -543,17 +643,46 @@ class MiningRunStore:
             raise MiningRunValidationError("run path escapes mining runs root")
         return candidate
 
+    def _legacy_run_dir(self, run_id: str) -> Path:
+        """Read-only directory resolution that tolerates legacy run-id characters."""
+        candidate = (self.runs_root / self._legacy_read_run_id(run_id)).resolve()
+        if not candidate.is_relative_to(self.runs_root):
+            raise MiningRunValidationError("run path escapes mining runs root")
+        return candidate
+
+    def _artifact_root(self, run_id: str) -> Path:
+        from app.config import settings
+
+        safe_run_id = self._legacy_read_run_id(run_id)
+        root = (
+            self.runs_root / safe_run_id
+            if settings.mining_artifact_root is None
+            else settings.mining_artifact_root / self.namespace / safe_run_id
+        )
+        candidate = root.resolve()
+        if settings.mining_artifact_root is not None and not candidate.is_relative_to(
+            settings.mining_artifact_root.resolve()
+        ):
+            raise MiningRunValidationError("artifact root escapes configured mining root")
+        return candidate
+
     def _safe_artifact_path(self, run_id: str, path: Path) -> Path:
-        run_dir = self._run_dir(run_id)
-        candidate = path if path.is_absolute() else run_dir / path
+        root = self._artifact_root(run_id)
+        candidate = path if path.is_absolute() else root / path
         resolved = candidate.resolve()
-        if not resolved.is_relative_to(run_dir):
+        if not resolved.is_relative_to(root):
             raise MiningRunValidationError("artifact path escapes its mining run directory")
         return resolved
 
     @staticmethod
     def _validate_run_id(run_id: str) -> str:
         if not isinstance(run_id, str) or not _RUN_ID_PATTERN.fullmatch(run_id):
+            raise MiningRunValidationError("run_id contains unsafe characters")
+        return run_id
+
+    @staticmethod
+    def _legacy_read_run_id(run_id: str) -> str:
+        if not isinstance(run_id, str) or not _LEGACY_READ_RUN_ID_PATTERN.fullmatch(run_id):
             raise MiningRunValidationError("run_id contains unsafe characters")
         return run_id
 

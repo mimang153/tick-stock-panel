@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
+from contextlib import contextmanager
 from typing import Any, Protocol
 
 from app.config import settings
@@ -17,6 +19,12 @@ _REGISTER_TTL_S = 3600  # job 注册租约，覆盖最长任务 1800s
 _CANCEL_TTL_S = 1800
 _COUNTER_TTL_S = 3600  # 进程崩溃后计数兜底回收
 _MAX_CAS_RETRIES = 16  # WATCH 冲突重试上限，避免异常 client 导致死循环
+_RELEASE_LOCK_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
 
 
 class CoordinationUnavailableError(RuntimeError):
@@ -274,6 +282,7 @@ class Coordination:
         self._once_client: Any | None = None
         self._once_prefix = ""
         self._memory_once: set[str] = set()
+        self._memory_locks: dict[str, bytes] = {}
         if settings.coordination_backend != "redis":
             return
         import redis
@@ -311,6 +320,43 @@ class Coordination:
             )
         except Exception as exc:
             raise CoordinationUnavailableError(f"once 标记 {key}", exc) from exc
+
+    def acquire_lock(self, key: str, ttl_s: int = 600) -> bytes | None:
+        """获取可释放的跨实例租约；返回 token 表示当前调用者持有。"""
+        token = uuid.uuid4().hex.encode()
+        if self._once_client is None:
+            if key in self._memory_locks:
+                return None
+            self._memory_locks[key] = token
+            return token
+        lock_key = f"{self._once_prefix}lock:{key}"
+        try:
+            acquired = self._once_client.set(lock_key, token, nx=True, px=ttl_s * 1000)
+        except Exception as exc:
+            raise CoordinationUnavailableError(f"获取租约 {key}", exc) from exc
+        return token if acquired else None
+
+    def release_lock(self, key: str, token: bytes | None) -> None:
+        """释放自己持有的租约，避免误删其他实例的锁。"""
+        if token is None:
+            return
+        if self._once_client is None:
+            self._memory_locks.pop(key, None)
+            return
+        lock_key = f"{self._once_prefix}lock:{key}"
+        try:
+            self._once_client.eval(_RELEASE_LOCK_LUA, 1, lock_key, token)
+        except Exception as exc:
+            raise CoordinationUnavailableError(f"释放租约 {key}", exc) from exc
+
+    @contextmanager
+    def lock(self, key: str, ttl_s: int = 600):
+        """上下文形式获取并自动释放租约；yield 是否获得执行权。"""
+        token = self.acquire_lock(key, ttl_s)
+        try:
+            yield token is not None
+        finally:
+            self.release_lock(key, token)
 
 
 coordination = Coordination()

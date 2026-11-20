@@ -74,11 +74,7 @@ def _cache_backend() -> Any | None:
 
 
 def _read_pool_from_cache(cache: Any, key: str) -> list[str] | None:
-    try:
-        payload = cache.get_json(key)
-    except Exception as exc:  # noqa: BLE001 - 缓存不可用时回退本地 parquet
-        logger.warning("读取标的池缓存失败(%s): %s", key, exc)
-        return None
+    payload = cache.get_json(key)
     if not isinstance(payload, dict) or not isinstance(payload.get("symbols"), list):
         return None
     return [str(symbol) for symbol in payload["symbols"]]
@@ -103,18 +99,28 @@ def get_pool(pool_id: PoolId, refresh: bool = False) -> list[str]:
 
     backend = _cache_backend()
     key = _pool_cache_key(pool_id)
-    if not refresh and backend is not None:
-        symbols = _read_pool_from_cache(backend, key)
-        if symbols is not None:
-            return symbols
+    cache_ok = backend is not None
+    if cache_ok and not refresh:
+        try:
+            symbols = _read_pool_from_cache(backend, key)
+        except Exception as exc:  # noqa: BLE001 - 缓存故障时降级到本地 parquet 离线回退
+            logger.warning("读取标的池缓存失败(%s): %s", key, exc)
+            cache_ok = False
+        else:
+            if symbols is not None:
+                return symbols
 
+    if cache_ok:
+        symbols = _fetch_pool(pool_id)
+        if symbols:
+            _write_pool_to_cache(backend, key, symbols)
+        return symbols
+
+    # 本地 parquet 仅作 CacheBackend 不可用时的离线回退，不再无条件双写。
     cache = _pool_cache_path(pool_id)
     if cache.exists() and not refresh:
         df = pl.read_parquet(cache)
-        symbols = df["symbol"].to_list()
-        if backend is not None:
-            _write_pool_to_cache(backend, key, symbols)
-        return symbols
+        return df["symbol"].to_list()
 
     symbols = _fetch_pool(pool_id)
     if symbols:
@@ -126,8 +132,6 @@ def get_pool(pool_id: PoolId, refresh: bool = False) -> list[str]:
             pl.DataFrame({"symbol": symbols, "as_of": [date.today()] * len(symbols)}),
             cache,
         )
-        if backend is not None:
-            _write_pool_to_cache(backend, key, symbols)
     return symbols
 
 
@@ -203,18 +207,3 @@ def _load_watchlist() -> list[str]:
     if df.is_empty() or "symbol" not in df.columns:
         return []
     return df["symbol"].to_list()
-
-
-# 兜底:Free 用户/无 API 时给一个小型可用集合,让 UI 不至于空白
-DEMO_SYMBOLS = [
-    "600000.SH",  # 浦发银行
-    "600036.SH",  # 招商银行
-    "600519.SH",  # 贵州茅台
-    "601318.SH",  # 中国平安
-    "601398.SH",  # 工商银行
-    "000001.SZ",  # 平安银行
-    "000333.SZ",  # 美的集团
-    "000651.SZ",  # 格力电器
-    "000858.SZ",  # 五粮液
-    "002594.SZ",  # 比亚迪
-]

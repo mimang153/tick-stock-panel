@@ -24,6 +24,20 @@ def test_once_memory_single_shot(monkeypatch) -> None:
     assert coord.once(f"{key}_other") is True
 
 
+def test_lock_memory_can_be_released(monkeypatch) -> None:
+    """memory 模式的租约释放后可再次获取。"""
+    monkeypatch.setattr(settings, "coordination_backend", "memory")
+    from app.services.coordination import Coordination
+
+    coord = Coordination()
+    key = f"repair:stock:{uuid.uuid4().hex}"
+    token = coord.acquire_lock(key)
+    assert token is not None
+    assert coord.acquire_lock(key) is None
+    coord.release_lock(key, token)
+    assert coord.acquire_lock(key) is not None
+
+
 def test_once_redis_cross_worker(monkeypatch) -> None:
     """redis（多 worker）：两个独立实例的协调层只有一个能拿到执行权。"""
     pytest.importorskip("redis")
@@ -46,3 +60,33 @@ def test_once_redis_cross_worker(monkeypatch) -> None:
     finally:
         assert first._once_client is not None
         first._once_client.delete(first._once_prefix + key)
+
+
+def test_lock_redis_cross_worker_release(monkeypatch) -> None:
+    """redis 模式租约可跨实例互斥，并由持有者安全释放。"""
+    pytest.importorskip("redis")
+    monkeypatch.setattr(settings, "coordination_backend", "redis")
+    monkeypatch.setattr(settings, "coordination_redis_url", settings.cache_redis_url)
+    from app.services.coordination import Coordination
+
+    try:
+        first = Coordination()
+    except Exception as exc:  # noqa: BLE001 - Redis 不可用时 skip，不误判失败
+        pytest.skip(f"Redis 不可用: {exc}")
+    second = Coordination()
+    key = f"repair:stock:{uuid.uuid4().hex}"
+    lock_key = f"{first._once_prefix}lock:{key}"
+    try:
+        token = first.acquire_lock(key)
+        assert token is not None
+        assert second.acquire_lock(key) is None
+        second.release_lock(key, token)
+        token2 = second.acquire_lock(key)
+        assert token2 is not None
+        first.release_lock(key, token)
+        assert second.acquire_lock(key) is None
+        second.release_lock(key, token2)
+        assert second.acquire_lock(key) is not None
+    finally:
+        assert first._once_client is not None
+        first._once_client.delete(lock_key)

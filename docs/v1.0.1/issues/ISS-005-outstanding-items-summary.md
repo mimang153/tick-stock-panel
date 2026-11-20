@@ -1,6 +1,6 @@
 # v1.0.1 未闭环问题与需求汇总
 
-> 文档类型：问题汇总 | 编号：ISS-005 | 状态：活跃清单 | 文档版本：v1.1 | 最后更新：2026-11-20
+> 文档类型：问题汇总 | 编号：ISS-005 | 状态：活跃清单 | 文档版本：v1.2 | 最后更新：2026-11-20
 > 负责人：待分配 | 来源：ISS-001~004、DES-001~005、REQ-001~002 的盘点结果
 > 用途：**单一入口**登记三个目录里仍未处理/待验收/状态待决的项；已闭环项不在此重复登记。处理完成后把对应行状态改为已完成并注明去处。
 
@@ -8,30 +8,36 @@
 
 - 盘点范围：`docs/v1.0.1/issues/`（ISS-001~004）、`docs/v1.0.1/design/`（DES-001~005）、`docs/v1.0.1/requirements/`（REQ-001~002）共 11 份文档。
 - 唯一编号条目约 88 项 + 无编号风险/待办约 15 项；其中已完成约 35 项，其余为本清单登记的未闭环项。
-- **历史实测数字**（4820/4848/4898 passed、163→0 failed）是各阶段过程证据，保留在原文，不作为当前状态。当前全量基线：`4898 passed / 13 skipped / 1 xfailed / 0 failed`（四后端 conftest 锁 memory）。
+- **历史实测数字**（4820/4848/4898 passed、163→0 failed）是各阶段过程证据，保留在原文，不作为当前状态。当前全量基线为 `4920 passed / 13 skipped / 1 xfailed / 0 failed`（2026-11-20 本轮 DIST/B4/B5 改动后重跑，四后端 conftest 锁 memory）；`pre-commit run --all-files` 仍因存量 mypy 错误与本机缺 `pnpm` 未通过（改动文件 ruff/mypy/门禁通过）。
+- **2026-11-20 代码核对 correction（已补齐）**：§7.1 中 DES-002 §9 与 DES-003 D-02/D-05 原记"均已落地"，逐项读码核对发现 30 天快照 TTL、repair CAS、私有 staging owner、D-02 审计 90 天 TTL、D-05 多 worker 强制 redis 五项缺失。本轮已全部补齐并定向验证；§4/§7.1.1/§7.1.2 状态同步为"已落地"。
 - 分类：`A 环境/人工验收`、`B 可做代码与产物`、`C 工程与质量债`、`D 设计待定/产品决策`、`E 文档滞后（已修正/待修正）`。
 
 ## 1. A 类：环境 / 人工验收（阻断发布，需外部条件）
 
 | 编号 | 来源 | 事项 | 为什么未闭环 | 前置条件 |
 |---|---|---|---|---|
-| CH-04 | ISS-002/004 | 三天跨日观察未闭环 | 日志止于 11-18，要求 11-20 复查跨日连续性与 uptime 回落 | 运行环境挂机到 11-20 |
-| CH-05 | ISS-002/004 | 回滚演练未执行 | 无 `master` 基线，`git checkout` 风险；回滚耗时未实测 | 项目方确认回滚基线 |
-| CH-06 | ISS-002/004 | S3/S4 未完整自动化、数据集矩阵未全量签字 | 缺复权四方对照、kill→重启→failed 场景、13 类矩阵 | CK 测试环境 |
-| CH-07 | ISS-002/004 | 页面级双栈对照未执行 | DEP-003 执行表为空，`执行用例数 __ / 12` | CH-09 构建环境 |
+| CH-04（暂缓） | ISS-002/004 | 三天跨日观察未闭环 | 2026-11-20 用户决定本轮暂不做；日志仍为 351 行，末条 `11-18T01:35:15+08:00` | 本轮不纳入发布判定；如恢复观察，再按 DEP-002 门槛复查 |
+| CH-05（不纳入范围） | ISS-002/004 | 回滚演练未执行 | 2026-11-20 用户决定本轮暂不考虑回滚问题；无基线，禁止擅自执行 | 本轮不作为发布阻断；后续如需回滚能力再另行立项 |
+| CH-06（已闭环） | ISS-002/004 | S3/S4 未完整自动化、数据集矩阵未全量签字 | 已补齐 S3 `adjust` 双响应/`/api/adj-factor` 与 S4 进程级 kill→重启→failed→重跑自动化；S3/S4 定向 32 passed，13 类矩阵近似集合 + 场景 85 passed | 无；记录见 DEP-002 §追加 |
+| CH-07 | ISS-002/004 | 页面级双栈对照未执行 | DEP-003 执行表为空，`执行用例数 __ / 12` | 部署页面可用（CH-09 已闭环） |
 | CH-08 | ISS-002/004 | 满量性能标定未完成 | 分钟仅 370 行、财务 0 行，未达 DEP-001 §9.1 规模 | 部署环境真实数据 |
-| CH-09 | ISS-002/004 | 前端构建未验证 | 本机无 `pnpm` | 有 pnpm 的构建环境 |
+| CH-09（已闭环） | ISS-002/004 | 前端构建未验证 | 2026-11-20 用 corepack `pnpm@9.10.0` 在可写副本执行 `tsc -b && vite build` 成功：2923 modules transformed，仅 chunk-size/browserslist 警告 | 无；原 root 属主 `frontend/node_modules` 未改动 |
 
 ## 2. B 类：可做代码与产物（阻断发布，可排期）
 
 | 编号 | 来源 | 事项 | 现状 |
 |---|---|---|---|
-| MN-02 | ISS-004 / DES-003 | mining 四个 Parquet artifact、候选库归属 | 仍本地落盘；需判定大对象归属与保留期 |
-| MN-03 | ISS-004 / DES-003 | 周度 claim 与数据指纹 | 仍本地；需映射到 CK 唯一键 |
-| MN-05 | ISS-004 | 历史读取归一化的 6 类残留缺口 | 读取路径已闭环，但老 run /result、非法目录名、时间戳契约、Redis 切换迁移单列待处理 |
-| T4.2~T4.8 | REQ-002 §6 | B4 回测/挖掘、同步/写入、展示/监控、因子、API 层、选股器、标的池的散点收敛 | 部分主路径已切，DoD（grep 归零）未达成 |
+| MN-02（主体已落地） | ISS-004 / DES-003 | mining 四个 Parquet artifact、候选库归属 | 已接入 `MINING_ARTIFACT_ROOT`、内容哈希、共享 URI、`s3/shared-root` 适配器与 `ck_mining_artifact` 元数据表；待全量回归与部署验收 |
+| MN-03（主体已落地） | ISS-004 / DES-003 | 周度 claim 与数据指纹 | 已拆分数据/实现指纹，实现指纹不进签名；签名声明、产物注册 Redis 原子化，审计 outbox/barrier 已落地；待全量回归与部署验收 |
+| MN-05（代码已闭环，待全量回归） | ISS-004 | 历史读取归一化的 6 类残留缺口 | 6 类均已实现：标准产物推断、`run_id` 别名、mtime 时间兜底、非法历史目录名只读兼容、events/summary 损坏降级、Redis 后端只读回退本地文件 run；写路径保持严格，待全量回归确认 |
+| T4.2~T4.8 | REQ-002 §6 | B4 回测/挖掘、同步/写入、展示/监控、因子、API 层、选股器、标的池的散点收敛 | T4.8 标的池缓存已收敛（CacheBackend 权威、parquet 离线回退），其余主路径已切，DoD（grep 归零）未达成 |
 | T5.1~T5.6 | REQ-002 §7 | B5 删 DuckDB/Parquet 依赖、清 publishing 标记、删遗留路径、测试迁移清零、文档、全量基线 | 在线读写主体完成，剩余本地路径与测试债务 |
 | T6.1~T6.7 | REQ-002 §8 | B6 场景 S1~S9、性能标定、真实数据抽样、回滚演练、三天观察、验收记录、页面级双栈对照 | 前置冒烟已记录，正式验收未开始 |
+| DIST-01（已闭环） | DES-002 §9 | 30 天快照 TTL + repair 状态 CAS | 已落地：`ck_repair_snapshot` DDL+v3 迁移加 30 天 TTL；`set_repair_status()` 增加按 `repair_id` 最新状态的状态机 CAS（终态不可覆写）；定向测试覆盖 |
+| DIST-02（已闭环） | DES-002 §9 | 私有 staging + owner 清理 | 已落地：staging 用本次 `backup_id` 唯一目录 + `.owner` 标记，`finally` 校验 owner 才清理，防同名/重试误删；repair_daily/integrity 59 passed |
+| DIST-03（已闭环） | DES-003 D-02 | 审计表 90 天 TTL | 已落地：`ck_mining_run_audit` DDL+v3 迁移加 90 天 TTL（CK 无独立 `ck_mining_events`，审计表即重建源）；schema 测试通过 |
+| DIST-04（已闭环） | DES-003 D-05 | 多 worker 强制 redis 后端 | 已落地：新增 `API_WORKERS` 配置，validator 拒绝 `api_workers>1` + `mining_store_backend=memory`；测试进程锁 `API_WORKERS=1`；配置测试通过 |
+| B4/B5 DoD（待重定义） | REQ-002 §6/§7 | grep 归零 / 裸 DataStore 清零 | 二次核对确认与架构原则冲突：剩余 parquet 调用多为 CK 优先回退、上游 dump、产物、暂存、取证、用户 SQL 引擎；本轮完成 ETF 因子 CK 优先、删 `screener_results` 残留。DoD 口径需走 REQ-002 §12 变更控制，见 REQ-002 B4/B5 收敛结论 |
 
 ## 3. C 类：工程与质量债（非阻断，可延后）
 
@@ -59,20 +65,20 @@
 | 编号 | 来源 | 事项 | 现状 |
 |---|---|---|---|
 | DES-001 D2/D3,R1~R6 | DES-001 | 存储设计待定决策与风险项 | 保持待定，按阶段评审 |
-| DES-002 §9（已确认） | DES-002 | 五项待定决策 | 按分布式原则确认：30 天 TTL + repair 租约/CAS；保留 `ck_`；`String` + `schema_version`；600s generation 租约 + 自动接管；staging 按 `repair_id` 私有化（见 §7.1.1） |
-| DES-003 D-02~D-05（部分闭环） | DES-003 | mining CK 化合同待定项 | D-01 Redis Lua 状态机已落地；D-02 90 天；D-03 内容寻址 + 共享 URI；D-04 候选库随 artifact 共享；D-05 多 worker 强制 redis、memory 仅离线（见 §7.1.2） |
+| DES-002 §9（已落地） | DES-002 | 五项待定决策 | `ck_` 前缀保留、`String`+`schema_version`、600s generation 租约/fencing/自动接管均已落地；2026-11-20 补齐 30 天快照 TTL（DDL+v3 迁移）、repair 状态 CAS、私有 staging owner 清理。见 §7.1.1 |
+| DES-003 D-02~D-05（已落地） | DES-003 | mining CK 化合同待定项 | 指纹分层、签名原子去重、共享产物根/内容哈希、审计 outbox/barrier、`ck_mining_artifact` 表与 `s3/shared-root`、redis 后端强制 `MINING_ARTIFACT_ROOT` 已落地；2026-11-20 补齐 D-02 审计 90 天 TTL、D-05 多 worker 强制 redis。见 §7.1.2 |
 | DES-004 S5 | DES-004 | 跨主机多机评估 | 可选，独立立项；跨主机前需共享存储与租约/fencing |
-| CH-12（已确认） | ISS-002 | `v_screener_base` 无业务调用 | 已从 B3 DoD 移除：视图/DDL/store 方法属冗余，在 B5 清理阶段删除（见 §7.1.3） |
+| CH-12（已闭环） | ISS-002 | `v_screener_base` 无业务调用 | 已从 B3 DoD 移除；2026-11-20 已删除视图 DDL 与 `store.screener_base()`（见 §7.1.3） |
 | CH-13 | ISS-002 | 历史对照报告未解释差异 | 重新生成或标注历史中间产物 |
 | RC-06（已闭环） | ISS-003/004 | DataStatusCache 各 worker 本地刷新 | 决策已登记，仅部署形态变化时重评 |
 
-> 2026-11-20 PH-1 决策：以上已确认项按本文 §7.1.0~§7.1.3 执行，后续变更走 REQ-002 §12 变更控制。数据指纹口径作为 DES-003 D-03 的配套决策一并登记，不再单独列为 D 类未决项。
+> 2026-11-20 PH-1 决策与落地：以上已确认项的主体代码已落地并通过定向测试与 pre-commit，包括 CK artifact 表与对象存储适配器；尚未重跑全量回归，部署验收仍待外部条件。后续变更走 REQ-002 §12 变更控制，数据指纹口径不再单独列为 D 类未决项。
 
 ## 5. E 类：文档状态（本次已处理 / 待处理）
 
 本次（2026-11-19）已修正的状态矛盾：
 
-- `DES-002` 头部“草案/待实现”→主体已落地 P0~P4；`DES-003` 头部“待评审未实现”→D-01 已拍板部分落地。
+- `DES-002` 头部“草案/待实现”→主体已落地 P0~P4；`DES-003` 头部“待评审未实现”→分布式决策主体已落地，外部验收与部署条件待补。
 - `REQ-002` 头部“草案”→主体已实现尾巴未闭环；§13.16 补当前基线 4898 与 ISS-005 指针。
 - `ISS-002` CH-10 证据、当前状态、CH-11 待决、建议顺序段加指针；`ISS-003` RC-02 AOF 决策、§8 结论；`ISS-004` DOC-01/ENG-05 基线、§3.1 D-01、退出标准第 8 条。
 - `DES-005` §13 基线 4881→4898；`DES-001`/`dev-container.md` 四后端默认 redis；`DES-004` §2.1/§2.2、S4；`deployment.md`、`CONTRIBUTING.md`、`REQ-001` 相关状态。
@@ -85,8 +91,10 @@
 ## 6. 当前全量门禁基线
 
 ```
-4898 passed / 13 skipped / 1 xfailed / 0 failed
+4920 passed / 13 skipped / 1 xfailed / 0 failed
 ```
+
+> 该数字是 2026-11-20 本轮 DIST/B4/B5 改动后的全量回归结果（改造前基线 4898）。`pre-commit run --all-files` 因存量 mypy 错误（多个未改动文件）与本机缺 `pnpm` 未通过；改动文件 ruff/mypy/门禁单独通过，提交/发布前仍需清除存量门禁欠账。
 
 - 四后端（cache/event_bus/coordination/mining_store）由 `tests/conftest.py` 强制 memory 保证隔离；redis 路径由 `test_*_redis.py` 与 `test_coordination_once.py` 单独覆盖。
 - PG 容器 `tsp-pg-dev` 需运行（DES-005 账户测试）；CK 测试库 `tsp_test`。
@@ -107,7 +115,7 @@
 
 ### 7.0 PH-0 执行细则（11-19~11-20，2 工作日）
 
-**目标**：把工作区成果拆成可审查的 PR 提交，形成冻结版本 tag；同时出具 CH-04 三天观察结论。两者互不阻塞，可并行。
+**目标**：把工作区成果拆成可审查的 PR 提交，形成冻结版本 tag。CH-04 三天观察按 2026-11-20 用户决定本轮暂缓，不再作为 PH-0 并行目标。
 
 #### 7.0.1 ENG-01：拆 PR 提交
 
@@ -141,16 +149,18 @@
 
 CH-04 只依赖已有观察日志和冻结版本，不依赖 PH-1 的代码改动，可与 ENG-01 并行。
 
+2026-11-20 复查结论：`data/ch_acceptance_observe.jsonl` 仍为 351 行，末条 `2026-11-18T01:35:15+08:00`，未覆盖 11-19/11-20；6 次 uptime 回落均为秒级抖动，但不满足连续三天观察窗口。**CH-04 仍不可闭环**，需继续采集到 11-20 同一时刻后重新执行上表三步。
+
 #### 7.0.3 PH-0 完成标准（M0）
 
 - [ ] 4 个 PR 按序提交并 DCO 签署，`git status` 工作区干净（或仅剩明确不提交的文件）
 - [ ] 冻结版本 tag 已打
 - [ ] CH-04 观察结论落 DEP-002
-- [ ] 全量门禁仍 4898/0 failed
+- [ ] 全量门禁仍 4920/0 failed
 
 ### 7.1 PH-1 决策记录（2026-11-20）
 
-以下决策按“做一个分布式系统”原则确认，作为 MN-02/MN-03、B4/B5 剩余清理与后续验收的执行口径。口径确认不等于代码已改；DDL/代码落地在 PH-2/PH-3 完成，变更走 REQ-002 §12 变更控制。
+以下决策按“做一个分布式系统”原则确认，作为 MN-02/MN-03、B4/B5 剩余清理与后续验收的执行口径。主体代码已于 2026-11-20 落地并通过定向门禁；2026-11-20 逐项读码核对发现的五项缺口已补齐，§7.1.1/§7.1.2 状态均为"已落地"，其余外部验收按 PH-2/PH-4 推进，变更走 REQ-002 §12 变更控制。
 
 #### 7.1.0 总原则
 
@@ -160,27 +170,27 @@ CH-04 只依赖已有观察日志和冻结版本，不依赖 PH-1 的代码改�
 
 #### 7.1.1 DES-002 §9 五项待定项
 
-| 项 | 决策 | 影响 / 落地动作 |
+| 项 | 决策 | 落地状态（2026-11-20 读码核对） |
 |---|---|---|
-| 快照保留期 | **30 天 TTL** | `ck_repair_snapshot` 增加 30 天 TTL；修补状态更新改为按 `repair_id` 的租约/CAS，过期快照不承诺可回滚 |
-| `ck_` 前缀 | **保留** | 元数据表继续使用 `ck_repair_audit` / `ck_repair_snapshot` / `ck_enriched_generation`，避免改名影响 DDL、测试和文档 |
-| 审计 JSON 字段类型 | **保持 `String` + `schema_version`** | `before_json` / `after_json` / `payload_json` 仍用 `Nullable(String)` / `String`，但写入端固定 schema 版本与规范化序列化；不引入 `Map(String, String)` |
-| generation 心跳超时 | **600s 租约 + 自动接管** | `ck_enriched_generation` 记录 owner / lease / fencing token；`heartbeat_at` 超过 600s 自动 fail 并允许新写者 takeover；redis 模式禁止回退本地 marker 形成双权威 |
-| staging 清理策略 | **按 `repair_id` 私有化** | `repair_daily.py` 的 staging 使用 `repair_id` 私有目录 + 租约，仅 owner 清理；保留“临时输入不是权威存储”的定位，不新增跨任务共享目录 |
+| 快照保留期 | **30 天 TTL** | ✅ 已落地（2026-11-20 补）：`ck_repair_snapshot` DDL + v3 迁移加 `TTL toDate(created_at)+INTERVAL 30 DAY`；`set_repair_status()` 增加按 `repair_id` 最新状态的状态机 CAS，终态不可覆写。未引入 owner/fencing 列（外层 `coordination.lock` 已串行化读-改-写），过期快照不承诺可回滚 |
+| `ck_` 前缀 | **保留** | ✅ 已落地：三张元数据表仍用 `ck_` 前缀 |
+| 审计 JSON 字段类型 | **保持 `String` + `schema_version`** | ✅ 已落地：字段保持 `String`，未引入 `Map` |
+| generation 心跳超时 | **600s 租约 + 自动接管** | ✅ 已落地：`ck_enriched_generation` 有 owner/fencing_token/lease_expires_at，`_LEASE_SECONDS=600`，过期仅 owner 可续期/接管，测试覆盖错 owner/token 被拒 |
+| staging 清理策略 | **按 `repair_id` 私有化** | ✅ 已落地（2026-11-20 补）：staging 用本次唯一 `backup_id` 私有目录并写 `.owner` 标记，`finally` 校验 owner 后才 `rmtree`。CK `repair_id` 在更底层 `apply_ck_repair()` 内生成且不向上传递，故以等价的备份批次 id 作为私有 owner；效果一致（防同名/重试误删） |
 
 补充约束：修补审计、快照、事实表写入无跨表事务，需 outbox/对账补偿；generation commit 与 `cache.bump("enriched")` 非原子，缓存失效必须可由 CK generation 幂等重建，不能依赖调用顺序。
 
-执行边界：本决策只确认口径；DDL/代码改动在 PH-2/PH-3 的最小变更中落地，不提前大范围重构。
+执行边界：决策口径不变，5 项均已落地（2026-11-20 补齐 TTL/CAS/staging owner）；generation 租约/fencing 与 repair CAS 均已实现。不做提前大范围重构，后续仅外部验收与对象存储适配。
 
 #### 7.1.2 DES-003 数据指纹与 mining CK 合同
 
-| 编号 | 决策 | 影响 / 落地动作 |
+| 编号 | 决策 | 落地状态（2026-11-20 读码核对） |
 |---|---|---|
-| 数据指纹口径 | **拆分“数据指纹 + 实现指纹”，且实现指纹不进签名** | 权威 digest 只从共享 CK generation、数据范围、请求计算；源码全量哈希、策略源码树哈希、本地 Parquet `mtime_ns/size` 仅作审计实现指纹；`compute_run_signature` 与 claim 判定不得消费实现指纹 |
-| D-02 事件 TTL | **90 天，且不小于协调态重建窗口** | 与 DES-003 §3.2 DDL 一致；MN-02 实现时校验 TTL 覆盖最大重建窗口 |
-| D-03 artifact 归属 | **内容寻址 + 共享 URI，CK 只存元数据** | `content_addr` 必须是跨实例可解析的共享 URI（CK/对象存储/共享卷），不能是本地相对路径；`ck_mining_artifact` 不存 payload |
-| D-04 候选库迁移 | **随 artifact 一起共享，不保留本地独占副本** | 候选库可存内容寻址产物或共享卷，但必须跨实例可见；共享存储是部署硬条件，否则该实例不声明支持分布式挖掘 |
-| D-05 `CK_MINING` 开关 | **不新增独立开关，多 worker 强制 redis 后端** | 复用 `CACHE_BACKEND` / storage 注入；memory 文件版 + flock 仅作离线兼容，不允许生产多 worker 退回该模式 |
+| 数据指纹口径 | **拆分“数据指纹 + 实现指纹”，且实现指纹不进签名** | ✅ 已落地：`_build_data_fingerprint_once()` 拆分 data/implementation digest，`compute_run_signature()` 只消费 data digest |
+| D-02 事件 TTL | **90 天，且不小于协调态重建窗口** | ✅ 已落地（2026-11-20 补）：`ck_mining_run_audit` DDL + v3 迁移加 `TTL toDate(created_at)+INTERVAL 90 DAY`。当前实现事件存 Redis、审计存 CK（`ck_mining_run_audit` 即 Redis 状态机重建源），无独立 `ck_mining_events` 表，TTL 落在审计表 |
+| D-03 artifact 归属 | **内容寻址 + 共享 URI，CK 只存元数据** | ✅ 已落地：`content_addr` sha256、`store_artifact_uri()` 返回 `file://`/`s3://`、`ck_mining_artifact` 只存元数据 |
+| D-04 候选库迁移 | **随 artifact 一起共享，不保留本地独占副本** | ✅ 已落地（依赖部署共享存储）：候选库随 artifact 走共享根/对象存储 |
+| D-05 `CK_MINING` 开关 | **不新增独立开关，多 worker 强制 redis 后端** | ✅ 已落地（2026-11-20 补）：新增 `API_WORKERS` 配置，validator 拒绝 `api_workers>1` + `mining_store_backend=memory`；测试进程锁 `API_WORKERS=1`。无独立 CK_MINING 开关，默认 redis + 强制 `MINING_ARTIFACT_ROOT` |
 
 补充约束：`find_by_signature → create` 必须 Redis `SETNX(signature → run_id)` 或 Lua 原子化；`register_artifact` 改 Lua/原子更新，避免并发丢更新；Redis 状态转换与 CK 审计之间用 outbox 或可等待的 rebuild barrier 闭环，避免“状态已变、审计未落”。
 
@@ -188,7 +198,7 @@ CH-04 只依赖已有观察日志和冻结版本，不依赖 PH-1 的代码改�
 
 - 决策：**从 B3 DoD 移除 `v_screener_base` 调用要求**。
 - 依据：`backend/app` 中无业务调用；5 处慢路径已由其他 CK 读法闭环，该视图属冗余。
-- 落地动作：PH-3 B5 清理阶段删除视图 DDL 与 `store.screener_base()` 方法，并同步更新 ISS-002 / DES-002 / REQ-002 文字。
+- 落地动作：2026-11-20 已删除视图 DDL 与 `store.screener_base()` 方法，并同步更新 ISS-002 / REQ-002 文字；无需数据迁移。
 - 兼容性：不触及在线读路径，不需要数据迁移；若后续重新引入 screener 慢路径，按新需求重新评审。
 
 ### 7.2 排期原则与关键路径
@@ -220,7 +230,7 @@ CH-04 只依赖已有观察日志和冻结版本，不依赖 PH-1 的代码改�
 | 编号 | 阶段 | 日期 | 工作日 | 事项（编号） | 依赖 | 产出 / 验收 |
 |---|---|---|---|---|---|---|
 | **PH-0** | 冻结 | 11-19~11-20 | 2 | ENG-01 拆 PR 提交当前成果（DES-005 / S4 / 文档收口）；CH-04 于 11-20 复查三天观察 | 本文评审（已具备） | 冻结版本 tag；CH-04 观察结论 |
-| **PH-1** | 决策与解锁 | 11-23~11-27 | 5 | D 类三项按分布式原则确认（DES-002 §9、数据指纹口径、CH-12）；CH-09 找 pnpm 环境构建；CH-05 项目方确认回滚基线并演练；CH-06 补 S3/S4 自动化与 13 类矩阵；B4 不依赖决策的读点并行收敛 | PH-0；项目方 / CK 环境 / pnpm 环境 | 决策记录落文档；CH-05/06/09 闭环；B4 读点进一步收敛 |
+| **PH-1** | 决策与解锁 | 11-23~11-27 | 5 | D 类三项按分布式原则确认并落地（DES-002 §9、数据指纹口径、CH-12）；CH-09 已闭环；CH-05 待项目方确认回滚基线并演练；CH-06 待 CK 环境补 S3/S4 自动化与 13 类矩阵；B4 读点收敛待排 | PH-0；项目方 / CK 环境 | 决策/代码/CH-09 已落地；CH-05/06 闭环；B4 读点进一步收敛 |
 | **PH-2** | 产物迁移 | 11-30~12-04 | 5 | MN-02（artifact 归属 + 保留期）、MN-03（claim/指纹 CK 唯一键）、MN-05（6 类残留缺口）；CH-07 页面双栈 12 用例；CH-08 开始真实数据积累 | PH-1 决策；CH-09 | MN-02/03/05 闭环；CH-07 报告归档；CH-08 数据开始积累 |
 | **PH-3** | B5 清理 | 12-07~12-11 | 5 | T5.1~T5.6（删 DuckDB/Parquet、清 publishing、遗留路径、测试迁移清零、文档、全量基线）；TR-10/11 随 B4/B5 闭环 | MN-02/03 完成；B4 DoD 归零 | 测试债务清零；B5 DoD 达成；全量仍 0 failed |
 | **PH-4** | 正式验收 | 12-14~12-18 | 5 | T6.1~T6.7（S1~S9、性能标定、真实数据抽样、回滚、三天观察、验收记录、页面对照）；CH-08 满量性能标定；T6.5 三天挂机与 T6.1~T6.4 并行 | B5 完成；CH-04~CH-07 闭环；CH-08 数据到位 | B6 验收记录；CH-08 阈值表回填 |
@@ -254,8 +264,18 @@ CH-04 只依赖已有观察日志和冻结版本，不依赖 PH-1 的代码改�
 |---|---|---|
 | 项目方回滚基线确认延迟 | CH-05 卡住，进而 M4 延后 | PH-1 即启动确认；若 11-27 未定，M4 顺延但文档/代码工作不停 |
 | CH-08 真实数据积累不足 | 满量性能无法按 §9.1 标定 | PH-2 即开始积累；PH-4 若仍未到位，DEP-001 维持"有条件通过"并登记例外 |
-| pnpm 环境不可用 | CH-09 阻塞 CH-07 | PH-1 优先解决；备选在 CI runner 构建 |
+| pnpm 环境不可用 | CH-09 曾阻塞 CH-07 | 已解决：`corepack pnpm@9.10.0` 在可写副本完成构建；后续在 CI/部署环境复跑即可 |
 | D 类决策反复 | MN-02/03 与 B5 返工 | PH-1 一次性拍板并冻结；后续变更走 REQ-002 §12 变更控制 |
 | 深 E 类测试债务比预期大 | B5 延期 | 按 REQ-002 §11 缓冲：T5.4 允许分两次合入（先 C/D 类再 B 类删除） |
 
 > 人天估算：PH-1~PH-5 合计约 31 人天（B4 剩余 ~3、B5 ~8、B6 ~7、MN 系列 ~8、CH/ENG/DOC ~5），均为单人线性估算；PH-4 的三天观察为挂机，不占人天。负责人待分配，本排期不含评审等待。
+
+## 8. 外部依赖调整（2026-11-20 用户确认）
+
+| 编号 | 调整结论 | 后续处理 |
+|---|---|---|
+| CH-04 | 本轮暂不做三天观察 | 不再作为本轮发布阻断；如恢复观察，再按 DEP-002 门槛重新采集和出结论 |
+| CH-05 | 本轮暂不考虑回滚问题 | 不作为本轮发布阻断；未确认基线前禁止回滚演练，后续如需回滚能力另行立项 |
+| CH-06 | 当前环境 CK 可直接作为测试环境 | 已补齐 S3/S4 严格口径自动化并完成实测（32 + 85 passed），记录见 DEP-002；CH-06 闭环 |
+
+调整后本轮剩余发布验收项为 CH-07 页面双栈对照、CH-08 满量性能；CH-04/CH-05 从阻断清单移出但保留历史记录。

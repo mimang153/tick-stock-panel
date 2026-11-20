@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from app.backtest.worker import make_worker_task, run_worker_task
 from app.services.coordination import coordination
@@ -15,8 +16,6 @@ from app.services.heavy_job_limiter import (
     shared_heavy_job_limiter,
 )
 from app.services.mining_jobs import (
-    ACTIVE_RUN_STATUSES,
-    SUCCESS_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
     MiningRunStore,
     MiningRunValidationError,
@@ -85,33 +84,25 @@ class MiningJobManager:
         run_id: str | None = None,
     ) -> dict[str, Any]:
         signature = compute_run_signature(request, data_fingerprint)
+        proposed_run_id = run_id or uuid.uuid4().hex
         with self._lock:
             if self._shutdown:
                 raise RuntimeError("mining job manager is shut down")
             if not force:
-                active = self._store.find_by_signature(
-                    signature,
-                    statuses=cast(Any, ACTIVE_RUN_STATUSES),
-                )
-                if active is not None:
-                    return active
-                succeeded = self._store.find_by_signature(
-                    signature,
-                    statuses=cast(Any, SUCCESS_RUN_STATUSES),
-                )
-                if succeeded is not None:
-                    return succeeded
+                claimed = self._store.claim_signature(signature, proposed_run_id)
+                if claimed != proposed_run_id:
+                    existing = self._store.get(claimed)
+                    if existing is not None:
+                        return existing
 
             try:
                 manifest = self._store.create(
                     request,
                     data_fingerprint,
-                    run_id=run_id,
+                    run_id=proposed_run_id,
                 )
             except MiningRunValidationError:
-                if run_id is None:
-                    raise
-                existing = self._store.get(run_id)
+                existing = self._store.get(proposed_run_id)
                 if existing is None:
                     raise
                 return existing

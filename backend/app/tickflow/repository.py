@@ -197,7 +197,6 @@ class DataStore:
             "kline_ext",
             "pools",
             "backtest_results",
-            "screener_results",
             "ai_cache",
             "user_data",
             "depth5",

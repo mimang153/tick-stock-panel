@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import logging
 from datetime import date, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -24,6 +25,47 @@ from app.services import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/kline", tags=["kline"])
+
+_RAW_PRICE_COLUMNS = ("open", "high", "low", "close", "volume", "amount")
+
+
+def _merge_raw_prices(rows: list[dict], raw_rows: list[dict]) -> list[dict]:
+    """Overlay raw OHLCV onto enriched rows while keeping indicator columns."""
+    raw_by_date = {row["date"]: row for row in raw_rows}
+    merged: list[dict] = []
+    for row in rows:
+        raw = raw_by_date.get(row.get("date"))
+        if raw is None:
+            merged.append(row)
+            continue
+        updated = dict(row)
+        for column in _RAW_PRICE_COLUMNS:
+            if column in raw:
+                updated[column] = raw[column]
+        merged.append(updated)
+    return merged
+
+
+def _rows_with_adjust(
+    rows: list[dict],
+    *,
+    adjust: Literal["forward", "none"],
+    symbol: str,
+    asset_type: str,
+    start: date,
+    end: date,
+) -> list[dict]:
+    """Project enriched rows to raw prices when ``adjust=none`` is requested."""
+    if adjust == "forward":
+        return rows
+    from app.storage.runtime import get_storage
+
+    runtime = get_storage()
+    if runtime is None:
+        return rows
+    table = "kline_etf_daily" if asset_type == "etf" else "kline_daily"
+    raw = runtime.store.read_daily(table, symbols=[symbol], start=start, end=end)
+    return _merge_raw_prices(rows, raw.to_dicts())
 
 
 @router.get("/instruments/search")
@@ -110,6 +152,7 @@ def get_daily(
     start_date: str | None = Query(None, description="起始日期 YYYY-MM-DD, 优先于 days"),
     end_date: str | None = Query(None, description="截止日期 YYYY-MM-DD, 默认今天"),
     ext_columns: str | None = Query(None, description="逗号分隔的 ext 列: config_id.field_name"),
+    adjust: Literal["forward", "none"] = Query("forward", description="复权口径: forward/none"),
 ):
     """读取本地 enriched 表中某只股票的日 K。
 
@@ -140,8 +183,11 @@ def get_daily(
         if enriched.is_empty():
             return _empty_daily_response(request, symbol, asset_type, stock_info, stock_name, end)
         rows = _enriched_rows(enriched, symbol, start, end)
-        # 即使 live 模式也尝试追加实时蜡烛
-        if end >= cn_today():
+        rows = _rows_with_adjust(
+            rows, adjust=adjust, symbol=symbol, asset_type=asset_type, start=start, end=end
+        )
+        # 即使 live 模式也尝试追加实时蜡烛；none 口径不混入前复权实时价
+        if adjust == "forward" and end >= cn_today():
             rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
         return _daily_response(
             request,
@@ -157,7 +203,10 @@ def get_daily(
         )
 
     rows = df.to_dicts()
-    if end >= cn_today():
+    rows = _rows_with_adjust(
+        rows, adjust=adjust, symbol=symbol, asset_type=asset_type, start=start, end=end
+    )
+    if adjust == "forward" and end >= cn_today():
         rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
     return _daily_response(
         request,

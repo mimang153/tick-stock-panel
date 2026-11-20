@@ -402,5 +402,5 @@ fail_generation(failed)
   - `ClickHouseStore.write` 为未显式给 `updated_at` 的写入生成严格递增的毫秒版本，避免同毫秒替换结果不确定。
 - **P4 主体完成，离线兼容保留**：显式 `storage` 路径不再依赖本地 backup/fingerprint/marker/glob；无 `storage` 的离线工具/单测仍保留 parquet 兼容路径（DES-002 §3.2 约定）。`SCHEMA_VERSION` 无需因三张元数据表升级，新增表由幂等 `ensure_schema` 覆盖。
 - 剩余：`pipeline_recompute` 的常规 enriched 编排与派生缓存（pools/regime/mainline/mining/factors）仍写本地 parquet/marker，离线工具同理；指数 enriched 表尚未纳入 CK。
-- 2026-11-20 PH-1 已按分布式原则确认 §9 五项口径（见上方）；本文 DDL 示例已同步 TTL / `schema_version` / owner / fencing token，但当前代码尚未补齐 repair 租约/CAS、generation 自动接管、私有 staging 与本地 marker 双权威收敛，待 PH-2/PH-3 随相关代码最小变更落地。
+- 2026-11-20 PH-1 按分布式原则确认的 §9 五项口径已在代码侧落地：快照 TTL / `schema_version` 进入 DDL，repair 写入由跨实例租约串行化且按 `backup_id` 使用私有 staging；generation 具备 owner / fencing token / 600s lease、自动到期判定与 leased heartbeat/commit/fail，CK 模式不再依赖本地 marker。
 - 验证：定向测试全绿；全量回归 `4820 passed / 13 skipped / 1 xfailed`，0 failed / 0 errors。改动文件 Ruff 全绿，`git diff --check` 通过。

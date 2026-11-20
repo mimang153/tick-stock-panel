@@ -257,7 +257,7 @@ T2.6（repository 切换）/ T2.8（首次同步）未开始，阻塞点见下�
 - T3.7 CK 联合视图（历史记录）
   - 曾新增视图 `v_screener_base`：`kline_daily_enriched ⋈ instruments`，两侧 `FINAL`
     （否则 ReplacingMergeTree 未合并版本会把行数放大：实测 5571 → 10787）
-  - 曾有 `store.screener_base(day, symbols=...)` 直接查视图；2026-11-20 PH-1 按 CH-12 决议**从 B3 DoD 移除该视图要求**，PH-3 删除视图 DDL 与 store 方法
+  - 曾有 `store.screener_base(day, symbols=...)` 直接查视图；2026-11-20 按 CH-12 **从 B3 DoD 移除该视图要求**，并已删除视图 DDL 与 store 方法；5 处慢路径保留
   - `screener` 5 处 Parquet 慢路径全部切 CK（该部分保留）：`_load_enriched_for_date`、
     `_compute_enriched_full` warmup、`_load_enriched_history`、`load_prior_consecutive`
     （窄读两列）、`_prior_partition_dates`（`list_daily_dates`）
@@ -376,10 +376,13 @@ T2.6（repository 切换）/ T2.8（首次同步）未开始，阻塞点见下�
 | T4.4 展示/监控侧 | 🟡 部分 | `auction_benchmark`、`sector_rotation`、`market_mainline`、`regime_builder`、`market_overview_builder` 已切；`quote_service`、`sector_monitor` 未改 |
 | T4.5 因子链路 | 🟡 部分 | `factors/ext_factors` 时序已切；`materialize_cache` 未接 T3.5 矩阵缓存 |
 | T4.6 API 层 | 🟡 部分 | `api/ext_data` 的 timeseries/snapshot 读已切；3 处 DuckDB `DESCRIBE read_parquet`、`api/overview`、`api/data`、`api/paper`、`api/mining` 未改 |
-| T4.7 选股器 SQL | ✅ 完成（B3 交付） | 5 处慢路径已切 CK；`v_screener_base` 已按 CH-12 从 DoD 移除，PH-3 删除视图 DDL/store 方法 |
-| T4.8 标的池缓存 | ❌ 未开始 | `tickflow/pools.py` |
+| T4.7 选股器 SQL | ✅ 完成（B3 交付） | 5 处慢路径已切 CK；`v_screener_base` 已按 CH-12 从 DoD 移除，2026-11-20 已删除视图 DDL/store 方法 |
+| T4.8 标的池缓存 | ✅ 完成 | `tickflow/pools.py`：CacheBackend 可用时作为权威缓存，本地 parquet 收敛为离线回退，缓存故障仍降级到本地文件 |
+| B4 尾巴清理 | ✅ 完成 | 清理无引用的 `DEMO_SYMBOLS`；不删除仍承载离线兼容的 DuckDB/Parquet 读点 |
 
-> B4 的 DoD（grep 归零）**尚未达成**：当前 `app/` 下仍有 81 处真实调用（其中 34 处在 `tickflow/repository.py`，随 B5 删除）。
+> B4 的 DoD（grep 归零）**尚未达成**：2026-11-20 已按 CH-12 删除 `v_screener_base` 视图与 store 方法、完成 T4.8 标的池缓存收敛与无引用死代码清理；其余 `scan_*parquet` / DuckDB / 本地 marker 调用点仍承载离线兼容或未迁移读路径，不能盲删，留作 B5/T5.4 单独批次。
+>
+> **2026-11-20 二次核对结论（DoD 与架构原则冲突）**：逐点核验剩余约 100 处 `read/scan_parquet` 后确认，绝大多数为**合法保留项**，不满足"归零"前提：① 已是"CK 优先 + 无 storage 回退"骨架（`ext_pull`/`index_sync`/`api/paper`/`api/ext_data`/`api/data`/`data_integrity` 等）；② 必须保留的本地文件读——上游 dump（`plugins/fuyao`）、挖掘 artifact（`mining_candidates`）、修补暂存（`repair_daily`）、文件级完整性取证（`data_integrity`）、产物文件（`api/mining`）、L2 因子缓存（`materialize_cache`）；③ 高风险重构——`matrix_loader.py` 的 `pads.dataset` 链路、`quote_service` 的文件签名缓存、`screener.py` 的 DuckDB 内存 SQL 引擎。本轮已把 `index_sync` 的 ETF 因子读取改为 CK 优先（保留本地回退）。**DoD "grep 归零" 与 §7.1.0 "本地文件仅作临时输入/离线兼容/可重建缓存" 的总原则冲突，强删会违反 CONTRIBUTING §12 "破坏历史数据且无兼容方案不得合并"；归零口径需由需求方重定义（REQ-002 §12 变更控制）**，不以机械删除达成。
 
 | ID | 任务 | 涉及文件（组） | 估算 |
 | --- | --- | --- | --- |
@@ -409,6 +412,10 @@ T2.6（repository 切换）/ T2.8（首次同步）未开始，阻塞点见下�
 | T5.4 | 测试迁移清零 | 按验收 §14 分类处置，`DataStore(tmp_path)` 归零，skip 清零 | 4 |
 | T5.5 | 文档更新 | README/deployment/configuration；两份 CH 文档状态改"已实现"并回填实测值 | 1 |
 | T5.6 | 全量基线 | `pytest` + `ruff` + `pnpm build` 全绿，记录用例数 | 0.5 |
+
+> 2026-11-20 B5 收敛结论：T5.1/T5.3 不在本批执行——`duckdb` 仍有 25 个 `backend/app` 文件引用，`app/parquet.py` 的 scan 函数在多处生产路径承载离线兼容；T5.2 的 publishing 标记继续兼容旧路径，CK 模式已由 generation lease/fencing 接管；T5.4 测试迁移未清零；T5.5 已更新 `docs/base_v1.0/configuration.md` 的存储口径；T5.6 的 `pnpm build` 与 pre-commit 已通过，全量 pytest 待发布前补跑。
+>
+> **2026-11-20 二次核对与部分执行**：T5.3 已删除 `screener_results` 目录创建/统计/清理引用（全仓无写入方，纯残留），同步更新 `test_data_status_storage.py` 期望值 7.5→6.5；`instruments_ext`/`kline_ext` 仍是活跃兼容分支（生产 API `_latest_sync_date` 回退读取），`db_safe.py` 的 `is_valid_ext_ident` 有 2 处生产校验引用（K 线扩展列白名单、screener 扩展列投影），删除会引入注入防护回归，均不删。T5.1 唯一运行时 duckdb 依赖是 `screener.py:515` 的用户 SQL 内存执行引擎（`enable_external_access=False` 隔离），删除即移除自定义筛选功能，且 `db_safe` 与该 SQL 路径无关；T5.2 的 publishing 标记是 CK generation 租约/fencing 体系的一部分，与 §7.1.1 决策冲突，不删。T5.4 的 47 处裸 `DataStore(tmp_path)` 多为验证文件版 marker/离线语义的单测，改为 CK storage 会改变测试对象。**T5.1/T5.2/T5.4 的 DoD 与已落地架构决策/测试意图冲突，需走 REQ-002 §12 变更控制重定义口径，不以机械删除或替换达成。**
 
 **DoD**
 - [ ] 验收 §14.3 三条完成标志达成
@@ -474,7 +481,7 @@ B4 的 8 组彼此独立，可并行
 
 ### 13.1 一句话现状
 
-B1、B2、B3 已交付并通过验收级验证；**B4 中 T4.1 与 T4.7 已完成，T4.2/T4.3/T4.4/T4.5/T4.6 只完成主路径、T4.8 未开始**，读路径已"CK 唯一读源、无 Parquet 回退"，但 `grep read_parquet` 尚未归零；测试侧积累约 **330 例待迁移用例**（不影响运行，但会让"全量绿"失真）。
+B1、B2、B3 已交付并通过验收级验证；**B4 中 T4.1/T4.7/T4.8 已完成，T4.2/T4.3/T4.4/T4.5/T4.6 只完成主路径**，读路径已"CK 唯一读源、无 Parquet 回退"，但 `grep read_parquet` 尚未归零；测试侧积累约 **330 例待迁移用例**（不影响运行，但会让"全量绿"失真）。
 
 关键数字（2026-11-16 实测）：
 
@@ -836,4 +843,4 @@ docker exec -w /app/backend tsp-dev .venv/bin/python -m pytest tests -q --tb=lin
 - `/api/health` 与 `/health` 同时返回 CK 健康状态，WBS T1.6 的路径口径已对齐（详见 ISS-002 CH-11）。
 - B5 已把分钟补拉/刷新、盘口、复权因子、财务表、维表 instruments 的在线读写收敛为 CK-only；daily/enriched 在显式 storage 下的在线读写（含修补、校验、universe、常规写入、live merge/flush、状态统计与缓存 generation）已收敛为 CK-only，本地 parquet 仅保留离线兼容。2026-11-18 评估的 daily 修补 CK 分支原型失败后，已按 DES-002 完成 P0~P4 主体落地。`pipeline_recompute` 常规 enriched 编排、派生缓存和离线迁移工具仍保留本地 Parquet 路径（详见 ISS-002、DES-002）。
 - B4 的 `read_parquet/scan_parquet` 归零、B5 剩余本地路径清理、B6 的三天观察 / 回滚演练 / 页面级双栈对照 / 满量性能标定仍未完成；需求暂不改判为完成。
-- **2026-11-19 当前状态**：全量回归 `4898 passed / 13 skipped / 1 xfailed / 0 failed`（四后端 conftest 锁 memory）；模拟盘账户已迁 PG 事务层（DES-005），S4 多 worker 已解锁（ISS-004 DIST-05）。本需求相关的剩余未闭环项（含 CH-04~CH-09、MN-02/03、B4/B5 尾巴）统一登记在 [ISS-005](ISS-005-outstanding-items-summary.md)。
+- **2026-11-20 当前状态**：已记录全量基线 `4898 passed / 13 skipped / 1 xfailed / 0 failed`（四后端 conftest 锁 memory）；本轮分布式改造后已完成定向测试与 pre-commit，全量回归待补。模拟盘账户已迁 PG 事务层（DES-005），S4 多 worker 已解锁（ISS-004 DIST-05）。CH-04/CH-05 本轮暂缓/不纳入范围，CH-06 已补齐 S3/S4 严格口径自动化并闭环，CH-09/CH-12 已闭环；剩余未闭环项统一登记在 [ISS-005](ISS-005-outstanding-items-summary.md)。

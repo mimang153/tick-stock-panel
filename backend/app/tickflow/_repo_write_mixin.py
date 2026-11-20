@@ -187,24 +187,21 @@ class _WriteMixin(_RepoMixinBase):
         )
         if merged.is_empty():
             raise ValueError("清理后整日日K为空, 需要完整日K数据, 原数据保持不变")
-        # CK 没有文件指纹，用写入前重读确认目标行未被并发改写。
-        current = store.read_daily(table, start=day, end=day)
-        if not current.equals(day_rows):
-            raise ValueError("修补期间发生变化, 请重新自检")
-        repair_id = store.begin_repair(table, day, "precise", actor)
-        try:
-            store.append_repair_snapshot(repair_id, table, day, before, actor)
-            diffs = self._repair_diff_frame(before, incoming, symbols, removals)
-            store.append_repair_audit(repair_id, table, day, diffs, actor)
-            if symbols is None:
-                store.delete_daily_date(table, day=day)
-            else:
-                store.delete_daily(table, day=day, symbols=list(symbols))
-            store.write_daily(table, merged)
-            store.set_repair_status(repair_id, "committed", actor)
-        except BaseException:
-            store.set_repair_status(repair_id, "failed", actor)
-            raise
+        from app.tickflow.repair_ck_write import apply_ck_repair
+
+        apply_ck_repair(
+            store,
+            table,
+            day,
+            day_rows,
+            before,
+            incoming,
+            merged,
+            symbols,
+            removals,
+            actor,
+            self._repair_diff_frame,
+        )
 
     def replace_daily_rows(
         self,

@@ -39,7 +39,7 @@ def test_pool_uses_cache_and_refetch_on_refresh(cache_env, monkeypatch):
     assert len(calls) == 2
 
 
-def test_pool_bump_invalidates_namespace(cache_env, monkeypatch, tmp_path):
+def test_pool_bump_invalidates_namespace(cache_env, monkeypatch):
     calls: list[bool] = []
 
     def fetch(pool_id):
@@ -50,11 +50,17 @@ def test_pool_bump_invalidates_namespace(cache_env, monkeypatch, tmp_path):
 
     assert pools.get_pool("CSI300") == ["600000.SH"]
     cache_env.bump("pool")
-    # 本地 parquet 是离线回退，不参与 CacheBackend generation；清掉后验证缓存失效会重新取数。
-    (tmp_path / "pools" / "CSI300.parquet").unlink()
 
     assert pools.get_pool("CSI300") == ["600036.SH"]
     assert len(calls) == 2
+
+
+def test_pool_no_longer_double_writes_parquet(cache_env, monkeypatch, tmp_path):
+    """CacheBackend 可用时本地 parquet 保持纯离线回退，不再被无条件写入。"""
+    monkeypatch.setattr(pools, "_fetch_pool", lambda pool_id: ["600000.SH"])
+
+    assert pools.get_pool("CSI300") == ["600000.SH"]
+    assert not (tmp_path / "pools" / "CSI300.parquet").exists()
 
 
 def test_pool_cache_failure_falls_back_to_local_file(cache_env, monkeypatch, tmp_path):

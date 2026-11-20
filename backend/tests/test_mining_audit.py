@@ -63,8 +63,36 @@ def test_rebuild_mining_runs_from_audit(ck_runtime, redis_installed) -> None:
     assert rebuilt is not None and rebuilt["status"] == "succeeded"
 
     client = redis_installed
-    for kind in ("runs", "summary", "runindex"):
+    for kind in ("runs", "summary", "runindex", "signature"):
         client.delete(f"tickflow:mining:{kind}:{namespace}")
+    client.delete(mining_audit.outbox_key(namespace))
+    client.srem(mining_audit._OUTBOX_INDEX, namespace)
+
+
+def test_transition_outbox_survives_ck_failure_and_barrier_flushes(
+    ck_runtime, redis_installed, monkeypatch
+) -> None:
+    namespace = "t" + uuid.uuid4().hex[:8]
+    store = RedisMiningRunStore(namespace=namespace)
+    original_flush = mining_audit.flush
+    monkeypatch.setattr(mining_audit, "flush", lambda namespace=None: 0)
+    manifest = store.create({"factor": "f1"}, "fp")
+    store.transition_status(manifest["run_id"], "running")
+
+    assert mining_audit.pending(namespace) == 1
+    monkeypatch.setattr(mining_audit, "flush", original_flush)
+    mining_audit.barrier(namespace)
+
+    assert mining_audit.pending(namespace) == 0
+    from app.storage.runtime import get_storage
+
+    client = get_storage().client  # type: ignore[union-attr]
+    rows = client.query(
+        f"SELECT run_id, to_status FROM {client.table('ck_mining_run_audit')} "
+        f"WHERE namespace = '{namespace}'"
+    )
+    assert rows.height == 1
+    assert rows.row(0, named=True)["to_status"] == "running"
 
 
 def test_enabled_guard(ck_runtime, monkeypatch) -> None:

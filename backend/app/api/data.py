@@ -545,7 +545,7 @@ def _compute_storage(data_dir: Path) -> dict:
         stats[f"{key}_size_mb"] = sz  # type: ignore[assignment]
 
     # total: 再加上其他零散目录 (financials 有下方专属明细统计, 不在此列)
-    other_dirs = ["pools", "backtest_results", "screener_results", "ai_cache"]
+    other_dirs = ["pools", "backtest_results", "ai_cache"]
     for name in other_dirs:
         d = data_dir / name
         if d.exists():
@@ -701,7 +701,6 @@ def _delete_parquet_dirs(data_dir) -> int:
         "pools",
         "financials",
         "backtest_results",
-        "screener_results",
         "ai_cache",
     ):
         d = data_dir / sub

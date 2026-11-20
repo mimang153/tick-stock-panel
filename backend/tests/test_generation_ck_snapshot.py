@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from app.enriched_generation import (
     enriched_publication_incomplete,
@@ -48,6 +48,23 @@ def test_incomplete_flags_only_stale_publishing(tmp_path, ck_runtime) -> None:
         f"ALTER TABLE {ck_runtime._table('ck_enriched_generation')} "
         "UPDATE heartbeat_at = {ts:DateTime64(3)} WHERE generation_id = {g:String}",
         {"ts": __import__("datetime").datetime.now() - timedelta(seconds=1200), "g": fresh},
+        settings={"mutations_sync": 2},
+    )
+    assert enriched_publication_incomplete(tmp_path, "stock") is True
+
+
+def test_incomplete_flags_expired_lease(tmp_path, ck_runtime) -> None:
+    """租约过期即使心跳新鲜也应判为 incomplete。"""
+    generation_id, token = ck_runtime.begin_generation_leased(
+        "stock", "system", None, "owner-a", lease_seconds=600
+    )
+    ck_runtime.heartbeat_generation_leased("stock", generation_id, "owner-a", token)
+    assert enriched_publication_incomplete(tmp_path, "stock") is False
+
+    ck_runtime._client.execute(
+        f"ALTER TABLE {ck_runtime._table('ck_enriched_generation')} "
+        "UPDATE lease_expires_at = {ts:DateTime64(3)} WHERE generation_id = {g:String}",
+        {"ts": datetime.now() - timedelta(seconds=1), "g": generation_id},
         settings={"mutations_sync": 2},
     )
     assert enriched_publication_incomplete(tmp_path, "stock") is True

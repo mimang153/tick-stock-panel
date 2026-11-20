@@ -31,3 +31,35 @@ def test_settings_reads_server_and_auth_values_from_env(
     assert configured.port == 4318
     assert configured.log_level == "DEBUG"
     assert configured.auth_password == "config-secret"
+
+
+def test_redis_mining_backend_requires_shared_artifact_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("MINING_ARTIFACT_ROOT", raising=False)
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="MINING_ARTIFACT_ROOT"):
+        _settings(_env_file=env_path, mining_store_backend="redis")
+
+
+def test_multi_worker_forces_redis_mining_backend(tmp_path: Path) -> None:
+    """D-05：多 worker 下禁用 memory 文件版 mining（flock 无法跨 worker 互斥）。"""
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="不允许多 worker"):
+        _settings(_env_file=env_path, mining_store_backend="memory", api_workers=2)
+    # 单 worker 的 memory 离线兼容仍可用。
+    configured = _settings(_env_file=env_path, mining_store_backend="memory", api_workers=1)
+    assert configured.mining_store_backend == "memory"
+    assert configured.api_workers == 1
+
+    configured = _settings(
+        _env_file=env_path,
+        mining_store_backend="redis",
+        mining_artifact_root=tmp_path / "shared-artifacts",
+    )
+    assert configured.mining_artifact_root is not None
