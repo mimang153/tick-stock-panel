@@ -80,8 +80,7 @@ def create_guardian_composite(
         raise ValueError("该策略对不在最新组合建议中 — 请先运行组合扫描, 且双方需为健康守护策略")
     if latest_enriched is None:
         raise ValueError("enriched 数据不可用, 无法建立守护基线")
-    # 与 _custom_strategy_path 同口径: 先 resolve 再比较,
-    # 避免 /tmp 等符号链接目录被误判为逃逸 data_dir
+    # guardian 元数据仍按 data_dir 定位; 策略文件本身已迁到 shared 目录。
     data_dir = Path(data_dir).resolve()
 
     strategy_id = _combo_strategy_id(left, right)
@@ -89,14 +88,13 @@ def create_guardian_composite(
         _ensure_guardian_profile(data_dir, strategy_id, latest_enriched)
         return {"ok": True, "strategy_id": strategy_id, "created": False}
 
-    composite_dir = data_dir / "strategies" / "composite"
-    unresolved = composite_dir
-    unresolved.mkdir(parents=True, exist_ok=True)
-    if unresolved.is_symlink():
+    from app.state import shared_strategy_path
+
+    composite_dir = shared_strategy_path("composite", f"{strategy_id}.py").parent
+    composite_dir.mkdir(parents=True, exist_ok=True)
+    if composite_dir.is_symlink():
         raise ValueError("composite strategy directory must not be a symlink")
-    root = unresolved.resolve()
-    if not root.is_relative_to(data_dir):
-        raise ValueError("composite directory escapes data_dir")
+    root = composite_dir.resolve()
     existing = sorted(root.glob("guardian_combo_*.py"))
     if len(existing) >= _GUARDIAN_COMBO_MAX:
         raise ValueError(f"守护组合数量已达上限 ({_GUARDIAN_COMBO_MAX}); 请删除不再使用的组合")
@@ -152,7 +150,7 @@ def _invalidate_caches(data_dir: Path) -> None:
         from app.services.strategy_cache import clear_cache
 
         clear_cache(data_dir)
-    except Exception:  # noqa: BLE001 - 缓存失效失败不阻断组合归档, 保持静默降级
+    except Exception:  # noqa: BLE001 - 缓存失效失败不阻断组合归档，日志留痕后降级
         logger.warning("strategy cache invalidation failed", exc_info=True)
 
 

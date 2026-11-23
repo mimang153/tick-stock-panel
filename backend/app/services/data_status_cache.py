@@ -45,6 +45,12 @@ class DataStatusCache:
             due = {key: self._versions[key] for key in loaders if now >= self._expires[key]}
             result = {key: self._values[key] for key in loaders}
             result["stats_pending"] = busy or bool(due)
+            logger.debug(
+                "data status snapshot: busy=%s due=%s refresh_thread=%s",
+                busy,
+                sorted(due),
+                self._thread is not None,
+            )
             if due and not busy and self._thread is None:
                 worker = threading.Thread(
                     target=self._refresh,
@@ -70,13 +76,20 @@ class DataStatusCache:
         is_busy: Callable[[], bool],
     ) -> None:
         fresh: dict[str, Any] = {}
+        logger.debug("data status refresh start: keys=%s", sorted(versions))
         try:
             for key in versions:
                 # 同步/预热可能在请求返回后开始, 不再启动后续重统计。
                 if is_busy():
+                    logger.debug("data status refresh aborted by busy: key=%s", key)
                     break
                 try:
                     fresh[key] = loaders[key]()
+                    logger.debug(
+                        "data status refresh loader done: key=%s is_none=%s",
+                        key,
+                        fresh[key] is None,
+                    )
                 except Exception:
                     # 保留旧统计, 后续请求可重试。
                     logger.exception("data status refresh failed: %s", key)
@@ -89,4 +102,7 @@ class DataStatusCache:
                         self._values[key] = value
                         # None 也是有效的空表结果, 避免每次轮询都重算。
                         self._expires[key] = now + self._ttls[key]
+                        logger.debug("data status published: key=%s ttl=%s", key, self._ttls[key])
+                    else:
+                        logger.debug("data status refresh discarded stale: key=%s", key)
                 self._thread = None

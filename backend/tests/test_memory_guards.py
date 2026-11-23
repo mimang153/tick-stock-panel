@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import threading
 from types import SimpleNamespace
 
@@ -101,7 +100,7 @@ def test_process_rss_bytes_for_invalid_pid():
 
 @pytest.fixture()
 def _isolated_prefs(tmp_path, monkeypatch):
-    """preferences.json 指向临时文件, 避免读写真实 data 目录。"""
+    """偏好走 app.state 门面; 临时路径仅为兼容旧签名的虚拟标识。"""
     from app.services import preferences
 
     path = tmp_path / "preferences.json"
@@ -118,20 +117,14 @@ def test_backtest_rss_limit_pref_roundtrip_and_clamp(_isolated_prefs):
 
     assert preferences.set_backtest_worker_rss_limit_gib(8) == 8
     assert preferences.get_backtest_worker_rss_limit_gib() == 8
-    assert (
-        json.loads(_isolated_prefs.read_text(encoding="utf-8"))["backtest_worker_rss_limit_gib"]
-        == 8
-    )
+    assert preferences.load()["backtest_worker_rss_limit_gib"] == 8
 
     # 越界钳制: 0 是合法值 (不限制), 负数按 0、超上限按 64 收口
     assert preferences.set_backtest_worker_rss_limit_gib(-3) == 0
     assert preferences.set_backtest_worker_rss_limit_gib(999) == 64
 
-    # 手改 JSON 出现非法值时自愈回默认
-    _isolated_prefs.write_text(
-        json.dumps({"backtest_worker_rss_limit_gib": "abc"}), encoding="utf-8"
-    )
-    preferences._invalidate_cache()
+    # DES-006: 非法值写入 PG 后读取时自愈回默认
+    preferences.save({"backtest_worker_rss_limit_gib": "abc"})
     assert preferences.get_backtest_worker_rss_limit_gib() == 6
 
 

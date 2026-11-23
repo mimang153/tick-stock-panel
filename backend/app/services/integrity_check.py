@@ -1,13 +1,14 @@
 """显式日K自检报告与修补编排; 复用完整性检测与精准修补服务。
 
 run_check 做深度扫描并把结果持久化为报告(用户确认凭证), run_repair 以报告为
-凭证重新读当前文件确定修补范围, 报告一旦变化即拒绝执行, 避免修补范围漂移。
+凭证重新读当前数据确定修补范围, 报告一旦变化即拒绝执行, 避免修补范围漂移。
+报告与备份经 ``app.state`` 门面落到 PG/blob, 不再写本地用户数据目录。
 """
 
 from __future__ import annotations
 
-import json
 import logging
+import shutil
 import uuid
 from collections.abc import Callable
 from datetime import date, timedelta
@@ -15,7 +16,11 @@ from pathlib import Path
 
 from app.market_time import cn_now, cn_today
 from app.services import daily_health, data_integrity
-from app.services.fs_utils import atomic_write_text
+from app.state import (
+    get_latest_integrity_report,
+    save_integrity_backup,
+    save_integrity_report,
+)
 
 logger = logging.getLogger(__name__)
 ASSET_TABLES = {family: table for table, family in data_integrity.TABLE_FAMILY.items()}
@@ -31,22 +36,38 @@ KIND_LABELS = {
 
 
 def _report_path(root: Path) -> Path:
+    """兼容旧调用的虚拟路径；门面持久化后不再读写该文件。"""
     return root / "user_data" / "integrity_report.json"
 
 
 def latest_report(root: Path) -> dict | None:
     """读取最近一次自检报告; 不存在或版本不符时返回 None。"""
-    try:
-        value = json.loads(_report_path(root).read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) and value.get("version") == 1 else None
-    except (OSError, ValueError):
-        return None
+    report = get_latest_integrity_report()
+    return report if isinstance(report, dict) and report.get("version") == 1 else None
 
 
 def _save(root: Path, report: dict) -> None:
-    path = _report_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, json.dumps(report, ensure_ascii=False))
+    """把自检报告写入门面; root 仅为兼容旧签名而保留。"""
+    save_integrity_report(report)
+
+
+def _persist_backup(backup_id: str, backup_dir: Path) -> bool:
+    """把修补产生的备份文件存入门面并返回是否存在备份, 随后清理临时目录。"""
+    files: dict[str, bytes] = {}
+    try:
+        if backup_dir.exists():
+            for path in sorted(backup_dir.rglob("*")):
+                if path.is_file():
+                    files[str(path.relative_to(backup_dir))] = path.read_bytes()
+    except OSError as exc:
+        logger.warning("读取修补备份失败 backup=%s: %s", backup_id, exc)
+    if files:
+        try:
+            save_integrity_backup(backup_id, {"backup_id": backup_id}, files)
+        except (OSError, ValueError) as exc:
+            logger.warning("保存修补备份失败 backup=%s: %s", backup_id, exc)
+    shutil.rmtree(backup_dir, ignore_errors=True)
+    return bool(files)
 
 
 def _repairable(issue: data_integrity.IntegrityIssue) -> bool:
@@ -130,7 +151,7 @@ def _known_issues(root: Path, assets: list[str], end: date) -> list[data_integri
                 date.fromisoformat(day),
                 ASSET_TABLES[asset],
                 entries[0]["kind"] if raw else "recompute",
-                symbols=tuple(sorted(symbols)) if None not in symbols else (),
+                symbols=tuple(sorted(symbols)) if "" not in symbols else (),
                 reason=entries[0]["reason"]
                 if raw
                 else "日K已校验, 受影响指标或共享统计尚未完成重算",
@@ -248,20 +269,22 @@ def run_repair(repo, capset, report_id: str, on_progress: Callable | None = None
             root, lookback_days=days, asset_types=assets, end_date=end, storage=storage
         )
     backup_id = uuid.uuid4().hex
+    backup_dir = root / "integrity_backups" / backup_id
     failure: BaseException | None = None
     try:
         repair_integrity_issues(
             repo,
             capset,
             issues,
-            backup_dir=root / "integrity_backups" / backup_id,
+            backup_dir=backup_dir,
             on_progress=on_progress,
         )
     except BaseException as exc:  # noqa: BLE001 — 取消也保留可重试状态, 保存报告后原样抛出
         failure = exc
+    has_backup = _persist_backup(backup_id, backup_dir)
 
     report = run_check(root, lookback_days=days, asset_types=assets, end_date=end, storage=storage)
-    if (root / "integrity_backups" / backup_id).exists():
+    if has_backup:
         report["backup_dir"] = f"integrity_backups/{backup_id}"
     if failure is not None:
         report["repair_error"] = str(failure)

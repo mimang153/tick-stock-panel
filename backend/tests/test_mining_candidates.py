@@ -20,6 +20,14 @@ from app.strategy import config as strategy_config
 from app.strategy.engine import StrategyEngine
 
 
+@pytest.fixture(autouse=True)
+def _isolate_shared_root(tmp_path, monkeypatch):
+    """DES-006: 策略发布写 shared 根；隔离到 tmp_path 避免仓库只读目录。"""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "shared_data_root", tmp_path)
+
+
 class _StrategyEngine:
     def __init__(self) -> None:
         self.strategies = {

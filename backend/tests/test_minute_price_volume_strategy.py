@@ -23,6 +23,12 @@ STRATEGY_PATH = (
 START = datetime(2026, 10, 20, 9, 31)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_shared_root(tmp_path, monkeypatch):
+    """DES-006: 策略写 shared 根；隔离到 tmp_path 避免仓库只读目录。"""
+    monkeypatch.setattr(settings, "shared_data_root", tmp_path)
+
+
 @pytest.fixture
 def strategy():
     spec = importlib.util.spec_from_file_location("minute_price_volume", STRATEGY_PATH)

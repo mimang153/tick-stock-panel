@@ -17,6 +17,15 @@ from app.strategy.ai_iterator import AIStrategyIterator
 from app.strategy.engine import StrategyDataContext, StrategyEngine
 from app.strategy.prompt_builder import build_step1, build_step2
 
+
+@pytest.fixture(autouse=True)
+def _isolate_shared_root(tmp_path, monkeypatch):
+    """DES-006: 策略写 shared 根；隔离到 tmp_path 避免仓库只读目录。"""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "shared_data_root", tmp_path)
+
+
 MINUTE_CODE = """import polars as pl
 META = {"id": "custom_minute", "name": "分钟策略", "asset_types": ["stock"],
         "timeframes": ["1m"], "basic_filter": {"enabled": False}, "scoring": {}}

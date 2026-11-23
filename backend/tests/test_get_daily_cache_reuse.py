@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import cast
 
 import polars as pl
 from polars.testing import assert_frame_equal
@@ -51,6 +52,7 @@ def _raw_frame(days: int = 80) -> pl.DataFrame:
 
 def _bare_repo(raw: pl.DataFrame) -> tuple[KlineRepository, dict]:
     repo = KlineRepository.__new__(KlineRepository)
+    repo._enriched_warming = False
     repo._enriched_history_cache = None
     repo._enriched_history_start = None
     repo._enriched_cache = None
@@ -82,7 +84,7 @@ def test_get_daily_cache_path_matches_scan_path():
     repo_new, calls_new = _bare_repo(raw)
     hist = repo_new._compute_enriched_range(raw)
     repo_new._enriched_history_cache = hist
-    repo_new._enriched_history_start = hist["date"].min()
+    repo_new._enriched_history_start = cast("date", hist["date"].min())
     result_new = repo_new.get_daily(SYM, start, end)
 
     assert calls_new["scan"] == 0, "缓存命中时不得回退到扫描路径"
@@ -105,7 +107,7 @@ def test_get_daily_falls_back_to_scan_when_cache_does_not_cover_start():
     repo, calls = _bare_repo(raw)
     hist = repo._compute_enriched_range(raw)
     repo._enriched_history_cache = hist
-    repo._enriched_history_start = hist["date"].min()
+    repo._enriched_history_start = cast("date", hist["date"].min())
 
     # 请求起点早于缓存覆盖 → 必须回退扫描路径
     result = repo.get_daily(SYM, dates[0] - timedelta(days=5), dates[-1])

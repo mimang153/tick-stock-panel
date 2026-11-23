@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from app.config import settings
@@ -28,6 +28,9 @@ _JOB_STATE_TABLE = "ck_coord_job_state"
 _CANCEL_TABLE = "ck_coord_cancel_request"
 _LEASE_TABLE = "ck_coord_limiter_lease"
 _ACTOR = "coordination_audit"
+# 与 Redis LimiterCounter TTL 对齐：超过该时长的未释放租约视为进程崩溃遗留，
+# 重建时不恢复其容量，否则一次异常退出会永久占满 exclusive 槽位。
+_LEASE_REBUILD_MAX_AGE_S = 3600
 
 
 def enabled() -> bool:
@@ -203,12 +206,24 @@ def rebuild_coordination() -> dict[str, int]:
         counts["cancel"] += 1
 
     lease_df = _query(
-        f"SELECT sum(weight) AS used FROM {_client().table(_LEASE_TABLE)} FINAL "
+        f"SELECT lease_id, weight, acquired_at FROM {_client().table(_LEASE_TABLE)} FINAL "
         "WHERE released_at IS NULL"
     )
+    cutoff = datetime.now() - timedelta(seconds=_LEASE_REBUILD_MAX_AGE_S)
     used = 0
-    if not lease_df.is_empty() and lease_df["used"][0] is not None:
-        used = int(lease_df["used"][0])
+    stale_leases: list[str] = []
+    for row in lease_df.iter_rows(named=True):
+        acquired = row.get("acquired_at")
+        if isinstance(acquired, datetime) and acquired >= cutoff:
+            used += int(row.get("weight") or 0)
+            continue
+        stale_leases.append(str(row.get("lease_id") or ""))
+    if stale_leases:
+        logger.warning(
+            "skip stale limiter leases on rebuild: count=%d leases=%s",
+            len(stale_leases),
+            stale_leases[:10],
+        )
     coordination.limiter_counter.restore(used)
     counts["lease"] = used
 

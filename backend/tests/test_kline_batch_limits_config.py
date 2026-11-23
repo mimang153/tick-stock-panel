@@ -16,15 +16,17 @@ from app.services import preferences
 
 @pytest.fixture(autouse=True)
 def _isolated(tmp_path, monkeypatch):
-    path = tmp_path / "preferences.json"
-    monkeypatch.setattr(preferences, "_path", lambda: path)
+    # DES-006: 偏好在 PG 门面；conftest 的 autouse 夹具已逐例重置，这里只清进程缓存。
     preferences._invalidate_cache()
-    yield path
+    yield tmp_path
     preferences._invalidate_cache()
 
 
 def _write(path, data):
-    path.write_text(json.dumps(data), encoding="utf-8")
+    # DES-006: 直接写门面，模拟手改偏好（含非法值）以验证读路径收敛。
+    from app.state import save_preferences
+
+    save_preferences(dict(data))
     preferences._invalidate_cache()
 
 

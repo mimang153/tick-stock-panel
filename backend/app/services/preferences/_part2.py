@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import json
 from typing import cast
 
 import app.services.preferences as _self
-from app.services.fs_utils import atomic_write_text
 
 from ._state import (
     _EMAIL_SMTP_DEFAULTS,
@@ -30,10 +28,10 @@ def set_market_recap_system_prompt(text: str | None) -> str:
     """
     cleaned = text.strip() if isinstance(text, str) else ""
     if not cleaned:
+        from app.state import delete_preference_keys
+
         with _SAVE_LOCK:
-            current = _self.load()
-            current.pop("market_recap_system_prompt", None)
-            atomic_write_text(_self._path(), json.dumps(current, indent=2, ensure_ascii=False))
+            delete_preference_keys(["market_recap_system_prompt"])
             _self._invalidate_cache()
         return ""
     if len(cleaned) > MARKET_RECAP_PROMPT_MAX_CHARS:

@@ -1,12 +1,11 @@
 """日K异常及待重算状态。与一次自检报告分离, 缩小检查范围不能解除旧异常。
 
 同一记录只有在日K校验及依赖重算均完成后才移除; 重启/取消/实时刷新不会绕过它。
-读取仅 stat + 小 JSON 缓存, 不在策略或行情热路径扫描 Parquet。
+当前态经 ``app.state`` 门面落到 PG, 进程内按版本号做 lru 缓存, 热路径不扫 Parquet。
 """
 
 from __future__ import annotations
 
-import json
 import threading
 import uuid
 from datetime import date
@@ -14,7 +13,11 @@ from functools import lru_cache
 from pathlib import Path
 
 from app.enriched_generation import EnrichedGenerationUnavailableError
-from app.services.fs_utils import atomic_write_text
+from app.state import (
+    get_daily_integrity_snapshot,
+    get_integrity_revision,
+    put_daily_integrity_snapshot,
+)
 
 ASSET_LABELS = {"stock": "股票", "etf": "ETF", "index": "指数"}
 _LOCK = threading.RLock()
@@ -25,13 +28,20 @@ class DailyIntegrityError(EnrichedGenerationUnavailableError):
 
 
 def _path(root: Path) -> Path:
+    """兼容旧调用的虚拟路径；门面持久化后不再读写该文件。"""
     return Path(root) / "user_data" / "daily_integrity_state.json"
 
 
+def _revision_key() -> str:
+    """聚合全部资产族的完整性版本号, 作为快照缓存键。"""
+    return ":".join(f"{asset}={get_integrity_revision(asset)}" for asset in ASSET_LABELS)
+
+
 @lru_cache(maxsize=32)
-def _read(path: str, mtime: int, size: int) -> dict:
+def _read(revision_key: str) -> dict:
+    """按版本号读取并校验完整性快照; revision_key 只作缓存键不参与取值。"""
+    value = get_daily_integrity_snapshot()
     try:
-        value = json.loads(Path(path).read_text(encoding="utf-8"))
         if value["version"] != 1 or not isinstance(value["entries"], list):
             raise ValueError("unsupported integrity state")
         for entry in value["entries"]:
@@ -53,35 +63,29 @@ def _read(path: str, mtime: int, size: int) -> dict:
         ):
             raise ValueError("invalid revision")
         return value
-    except (OSError, ValueError, TypeError, KeyError) as exc:
+    except (ValueError, TypeError, KeyError) as exc:
         raise DailyIntegrityError("日K完整性状态无法读取, 请检查数据目录") from exc
 
 
 def snapshot(root: Path) -> dict:
-    """读取待重算状态快照; 结构损坏时返回空状态而非抛错。"""
-    path = _path(root)
-    try:
-        info = path.stat()
-    except FileNotFoundError:
-        return {"version": 1, "entries": [], "revisions": {}}
-    except OSError as exc:
-        raise DailyIntegrityError("日K完整性状态无法读取, 请检查数据目录权限") from exc
-    return _read(str(path), info.st_mtime_ns, info.st_size)
+    """读取待重算状态快照; root 仅为兼容旧签名而保留。"""
+    return _read(_revision_key())
 
 
 def revision(root: Path, asset_type: str = "stock") -> str:
     """返回资产及其基准指数的合并修订号, 供缓存键判断依赖是否已重算。"""
-    revisions = snapshot(root).get("revisions", {})
-    own = revisions.get(asset_type, "0")
-    benchmark = revisions.get("index", "0") if asset_type in {"stock", "etf"} else "0"
+    own = get_integrity_revision(asset_type)
+    benchmark = get_integrity_revision("index") if asset_type in {"stock", "etf"} else "0"
     return f"{own}:{benchmark}" if benchmark != "0" else own
 
 
 def _key(entry: dict):
-    return entry["asset_type"], entry["day"], entry["symbol"]
+    # 门面把 None 归一化为 ""（PG NOT NULL），服务层必须用同一口径做去重键。
+    return entry["asset_type"], entry["day"], entry.get("symbol") or ""
 
 
 def _save(root: Path, old: dict, entries: list[dict]) -> None:
+    """按资产族更新版本号后整表写回门面; root 仅为兼容旧签名而保留。"""
     entries.sort(key=lambda e: (e["asset_type"], e["day"], e["symbol"] or ""))
     if entries == old["entries"]:
         return
@@ -91,12 +95,7 @@ def _save(root: Path, old: dict, entries: list[dict]) -> None:
             e for e in old["entries"] if e["asset_type"] == asset
         ]:
             revisions[asset] = uuid.uuid4().hex
-    path = _path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(
-        path,
-        json.dumps({"version": 1, "entries": entries, "revisions": revisions}, ensure_ascii=False),
-    )
+    put_daily_integrity_snapshot({"version": 1, "entries": entries, "revisions": revisions})
 
 
 def _issue_entries(issues) -> dict:
@@ -106,7 +105,7 @@ def _issue_entries(issues) -> dict:
     for issue in issues:
         if issue.kind == "unconfirmed":
             continue
-        for symbol in issue.symbols or (None,):
+        for symbol in issue.symbols or ("",):
             entry = {
                 "asset_type": TABLE_FAMILY[issue.table],
                 "day": issue.day.isoformat(),
@@ -207,17 +206,12 @@ def clear_assets(root: Path, assets: set[str]) -> None:
     """仅随明确的清除数据操作清理对应状态。"""
     with _LOCK:
         if assets == set(ASSET_LABELS):
-            path = _path(root)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_text(
-                path,
-                json.dumps(
-                    {
-                        "version": 1,
-                        "entries": [],
-                        "revisions": {asset: uuid.uuid4().hex for asset in assets},
-                    }
-                ),
+            put_daily_integrity_snapshot(
+                {
+                    "version": 1,
+                    "entries": [],
+                    "revisions": {asset: uuid.uuid4().hex for asset in assets},
+                }
             )
             return
         old = snapshot(root)
@@ -241,12 +235,7 @@ def assert_usable(
         if (
             (entry["asset_type"] == asset_type or dependency)
             and entry["day"] <= end.isoformat()
-            and (
-                dependency
-                or symbols is None
-                or entry["symbol"] is None
-                or entry["symbol"] in symbols
-            )
+            and (dependency or symbols is None or not entry["symbol"] or entry["symbol"] in symbols)
         ):
             raise DailyIntegrityError(
                 f"{ASSET_LABELS[entry['asset_type']]}日K在 {entry['day']} 有未完成修补或重算, "

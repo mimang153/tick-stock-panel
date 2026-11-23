@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import contextlib
-import json
 import logging
 import threading
 import time
@@ -29,6 +28,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
+from typing import cast
 
 import polars as pl
 
@@ -219,7 +219,7 @@ def _partition_problem(
                 continue
             columns = [*DAILY_REQUIRED, *(["amount"] if "amount" in parquet.schema.names else [])]
             for batch in parquet.iter_batches(batch_size=65536, columns=columns):
-                invalid = invalid_daily_rows(pl.from_arrow(batch), day)
+                invalid = invalid_daily_rows(cast("pl.DataFrame", pl.from_arrow(batch)), day)
                 if not invalid.is_empty():
                     bad.append(path.name)
                     reasons.append(_invalid_daily_reason(invalid, day))
@@ -713,39 +713,23 @@ def within_auto_repair_window(day: date | None, *, today: date | None = None) ->
 
 # ── 自动修复退避 (issue #514) ────────────────────────────────────────
 # 同一坏日的自动修复失败后 (多为数据源拉取失败), 重启/再开实时行情不应无条件
-# 再发一次全量修复。按坏日在 data_dir 记 last_attempt, 冷却期内跳过自动修复;
+# 再发一次全量修复。按坏日在状态门面记 last_attempt, 冷却期内跳过自动修复;
 # 数据页手动修正不受限制 (不走 launch_integrity_repair)。
 INTEGRITY_REPAIR_BACKOFF_S = 6 * 3600.0
 
 
-def _backoff_path(data_dir: Path) -> Path:
-    return Path(data_dir) / ".integrity_repair_backoff.json"
-
-
 def repair_backoff_remaining_s(data_dir: Path, start_date: date) -> float:
-    """自动修复冷却剩余秒数 (0 = 不在退避期)。按修复起点日 (最早坏日) 记账。"""
-    try:
-        payload = json.loads(_backoff_path(data_dir).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return 0.0
-    last = (payload.get("last_attempt") or {}).get(start_date.isoformat())
-    if not isinstance(last, int | float):
-        return 0.0
-    elapsed = time.time() - float(last)
-    if elapsed >= INTEGRITY_REPAIR_BACKOFF_S:
-        return 0.0
-    return INTEGRITY_REPAIR_BACKOFF_S - elapsed
+    """自动修复冷却剩余秒数 (0 = 不在退避期)。data_dir 仅为兼容旧签名而保留。"""
+    from app.state import repair_backoff_remaining_s as state_backoff_remaining_s
+
+    return state_backoff_remaining_s(start_date)
 
 
 def _record_repair_attempt(data_dir: Path, start_date: date) -> None:
-    payload = {"last_attempt": {start_date.isoformat(): time.time()}}
-    path = _backoff_path(data_dir)
-    tmp = path.with_suffix(".tmp")
-    try:
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        tmp.replace(path)
-    except OSError as e:
-        logger.debug("repair backoff marker write failed: %s", e)
+    """记录修补尝试到门面 (6h 冷却), data_dir 仅为兼容旧签名而保留。"""
+    from app.state import record_repair_attempt as state_record_repair_attempt
+
+    state_record_repair_attempt(start_date)
 
 
 def prune_enriched_partitions(

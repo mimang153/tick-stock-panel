@@ -9,6 +9,7 @@ from __future__ import annotations
 from app.tickflow._repo_mixin_base import _RepoMixinBase
 from app.tickflow.repository import (
     date,
+    logger,
     pl,
 )
 
@@ -18,7 +19,7 @@ class _DailyMixin(_RepoMixinBase):
     # 热路径: Polars 查询 (Chart / Screener / Signals / Intraday)
     # ================================================================
 
-    def get_daily(  # noqa: C901 - C901: 分支为业务多阶段编排, 拆分会割裂上下文; 单测已覆盖
+    def get_daily(  # noqa: C901 - C901: 分支为业务多阶段编排, 拆分会割裂上下文; 单测已覆盖  # func-length-allow: 查询为缓存/回退/重算多阶段顺序编排，拆函数会割裂热路径上下文
         self,
         symbol: str,
         start: date,
@@ -67,11 +68,24 @@ class _DailyMixin(_RepoMixinBase):
                     & (pl.col("date") >= start)
                     & (pl.col("date") <= end)
                 )
+        logger.debug(
+            "get_daily cache state: symbol=%s hist_rows=%s warming=%s hist_span=%s",
+            symbol,
+            0 if hist is None else len(hist),
+            self._enriched_warming,
+            self.get_enriched_history_span(),
+        )
         if df.is_empty():
             # 扫描14列 parquet
             df = self._scan_daily_symbol(symbol, warmup_start, end, None)
             if not df.is_empty():
                 df = self._compute_enriched_range(df)
+            logger.debug(
+                "get_daily fallback: symbol=%s rows=%d columns=%d",
+                symbol,
+                len(df),
+                len(df.columns),
+            )
 
         # 尝试用缓存数据覆盖最新日 (盘中更准确)
         cached, cache_date = self.get_enriched_latest(symbols=[symbol], end=end)
@@ -91,6 +105,14 @@ class _DailyMixin(_RepoMixinBase):
             existing = [c for c in columns if c in df.columns]
             df = df.select(existing)
 
+        logger.debug(
+            "get_daily result: symbol=%s rows=%d columns=%d has_deviate=%s has_metadata=%s",
+            symbol,
+            len(df),
+            len(df.columns),
+            "deviate_3d" in df.columns,
+            "float_shares" in df.columns,
+        )
         return df
 
     def get_daily_batch(

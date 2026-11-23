@@ -20,6 +20,15 @@ from app.strategy.ai_generator import AIStrategyGenerator
 from app.strategy.engine import StrategyEngine
 
 
+@pytest.fixture(autouse=True)
+def shared_root_alias(tmp_path, monkeypatch):
+    """DES-006: shared 根动态别名到 settings.data_dir，保持旧测试目录语义。"""
+    from app.state import shared
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(shared, "shared_data_root", lambda: settings.data_dir)
+
+
 def strategy(sid: str, *, factor: str = "uf_shared") -> str:
     return f'''import polars as pl
 META = {{"id": "{sid}", "name": "{sid}", "description": "资源传输测试", "tags": [],
@@ -212,7 +221,7 @@ def test_signal_and_factor_only_bundles(env, tmp_path, monkeypatch, root):
     assert preview["roots"] == [f"{root['kind']}:{root['id']}"]
     apply(blob, preview)
     assert (dest / "user_data/custom_factors/uf_shared.json").exists()
-    assert not (dest / "strategies").exists()
+    assert not list((dest / "strategies").rglob("*.py"))
 
 
 @pytest.mark.parametrize("selected, imported", [("factor:uf_shared", 1), ("signal:shared", 2)])
@@ -229,7 +238,7 @@ def test_extract_page_resource_from_strategy_zip_without_importing_strategies(
     assert (dest / "user_data/custom_signals/shared.json").exists() == selected.startswith(
         "signal:"
     )
-    assert not (dest / "strategies").exists()
+    assert not list((dest / "strategies").rglob("*.py"))
     assert not (dest / "user_data/strategy_overrides").exists()
 
 

@@ -30,7 +30,12 @@ from app.data_providers.custom.config import (
 )
 from app.data_providers.custom.managed import ManagedProvider
 from app.data_providers.custom.provider import GenericHTTPProvider, _token_from_env
-from app.services.fs_utils import atomic_write_text
+from app.state import (
+    delete_data_source_config,
+    get_data_source_config,
+    list_data_source_configs,
+    save_data_source_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +55,27 @@ def plugins_dir() -> Path:
 
 
 def data_sources_dir() -> Path:
+    """兼容旧签名；用户数据源配置权威已迁到 PG data_source_config。"""
     return settings.data_dir / "data_sources"
 
 
+def _activate_config(config: CustomSourceConfig, label: str) -> None:
+    """校验并注册单个自定义源；失败只记状态，不影响其他数据源。"""
+    try:
+        http_provider = GenericHTTPProvider(config)
+        errors = http_provider.validate()
+        if errors:
+            _LOAD_ERRORS.append({"path": label, "name": config.name, "errors": errors})
+            http_provider.close()
+            return
+        _PROVIDERS[config.name] = ManagedProvider(http_provider, builtin=False)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("custom data source load failed %s: %s", label, e)
+        _LOAD_ERRORS.append({"path": label, "errors": [str(e)]})
+
+
 def load_all(path: Path | None = None) -> None:
-    """Load all custom provider YAML files into process memory."""
+    """Load custom provider configs into process memory (PG 权威，显式 path 兼容旧文件)。"""
     global _PROVIDERS, _LOAD_ERRORS
     retained = {
         name: provider
@@ -67,21 +88,20 @@ def load_all(path: Path | None = None) -> None:
     _PROVIDERS = dict(retained)
     _LOAD_ERRORS = []
 
-    base = path or data_sources_dir()
-    base.mkdir(parents=True, exist_ok=True)
-    for file in sorted([*base.glob("*.yaml"), *base.glob("*.yml")]):
-        try:
-            config = load_config(file)
-            http_provider = GenericHTTPProvider(config)
-            errors = http_provider.validate()
-            if errors:
-                _LOAD_ERRORS.append({"path": str(file), "name": config.name, "errors": errors})
-                http_provider.close()
+    if path is None:
+        for item in list_data_source_configs():
+            label = f"pg:{item['name']}"
+            try:
+                raw = yaml.safe_load(item["content"]) or {}
+            except yaml.YAMLError as e:
+                _LOAD_ERRORS.append({"path": label, "errors": [str(e)]})
                 continue
-            _PROVIDERS[config.name] = ManagedProvider(http_provider, builtin=False)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("custom data source load failed %s: %s", file, e)
-            _LOAD_ERRORS.append({"path": str(file), "errors": [str(e)]})
+            _activate_config(config_from_dict(raw), label)
+    else:
+        base = Path(path)
+        base.mkdir(parents=True, exist_ok=True)
+        for file in sorted([*base.glob("*.yaml"), *base.glob("*.yml")]):
+            _activate_config(load_config(file), str(file))
 
     # 内置可选插件 (plugins/ 目录)。与用户 YAML 源独立, 缺依赖只记状态不报错。
     _load_builtin_plugins()
@@ -491,14 +511,9 @@ def save_config(name: str, config: dict) -> Path:
         raise ValueError(f"'{name}' 是内置插件, 不可编辑")
     if not _NAME_RE.match(name or ""):
         raise ValueError(f"invalid data source name: {name!r} (only lowercase a-z 0-9 _ allowed)")
-    base = data_sources_dir()
-    base.mkdir(parents=True, exist_ok=True)
-    path = (base / f"{name}.yaml").resolve()
-    if not path.is_relative_to(base.resolve()):
-        raise ValueError("invalid data source name: path escape detected")
     cleaned = _sanitize_for_yaml(config)
-    atomic_write_text(path, yaml.safe_dump(cleaned, allow_unicode=True, sort_keys=False))
-    return path
+    save_data_source_config(name, yaml.safe_dump(cleaned, allow_unicode=True, sort_keys=False))
+    return data_sources_dir() / f"{name}.yaml"
 
 
 def delete_config(name: str) -> bool:
@@ -507,13 +522,9 @@ def delete_config(name: str) -> bool:
         raise ValueError(f"'{name}' 是内置插件, 不可删除")
     if not _NAME_RE.match(name or ""):
         raise ValueError(f"invalid data source name: {name!r}")
-    base = data_sources_dir().resolve()
-    path = (base / f"{name}.yaml").resolve()
-    if not path.is_relative_to(base):
-        raise ValueError("invalid data source name: path escape detected")
-    if not path.exists():
+    if get_data_source_config(name) is None:
         return False
-    path.unlink()
+    delete_data_source_config(name)
     return True
 
 

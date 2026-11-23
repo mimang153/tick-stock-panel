@@ -26,8 +26,7 @@ def installed(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(sys, "executable", str(exe))
     monkeypatch.setattr(settings, "data_dir", target)
-    monkeypatch.setattr(secrets_store, "_cache", None)
-    monkeypatch.setattr(secrets_store, "_cache_sig", None)
+    # DES-006: secrets 缓存已迁入 app.state.secrets，由 conftest 的 autouse 夹具重置。
     monkeypatch.setattr(preferences, "_cache", None)
     monkeypatch.setattr(preferences, "_cache_sig", None)
     yield SimpleNamespace(
@@ -265,9 +264,9 @@ def test_saved_access_password_is_restored_before_env_bootstrap(installed, monke
     with monkeypatch.context() as patch:
         patch.setattr(settings, "data_dir", installed.legacy)
         auth.set_password("old-upgrade-test-password")
-    original = (installed.legacy / "user_data" / "auth.json").read_bytes()
+    # DES-006: 访问密码以 PG 为权威，set_password 已写入门面，无本地 auth.json。
+    assert auth.is_configured() is True
     monkeypatch.setattr(auth, "_configured_cache", None)
-    monkeypatch.setattr(auth, "_sessions", {})
     monkeypatch.setattr(config, "_ENV_FILE", installed.target / "absent.env")
     monkeypatch.setattr(settings, "auth_password", "different-environment-test-password")
     monkeypatch.delenv("TDX_PROBE_WORKER", raising=False)
@@ -288,7 +287,7 @@ def test_saved_access_password_is_restored_before_env_bootstrap(installed, monke
     monkeypatch.setattr(desktop, "_open_window", lambda _: None)
     assert desktop.main() == 0
     assert seen == [False]
-    assert (installed.target / "user_data" / "auth.json").read_bytes() == original
+    assert not (installed.target / "user_data" / "auth.json").exists()
 
 
 def test_recovery_does_not_print_keys(installed, caplog):

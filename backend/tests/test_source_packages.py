@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from app import secrets_store
 from app.api.settings import PluginKeyIn, save_plugin_key
+from app.config import settings as app_settings
 from app.custom.source_packages.routes import router
 from app.data_providers.base import ProviderRequestError
 from app.data_providers.custom import loader, packages
@@ -39,15 +40,13 @@ class Provider:
 
 @pytest.fixture
 def isolated(monkeypatch, tmp_path):
-    monkeypatch.setattr(packages.settings, "data_dir", tmp_path)
+    # DES-006: 插件包根改由 shared_data_root 门面决定；测试隔离到 tmp_path。
+    monkeypatch.setattr(app_settings, "shared_data_root", tmp_path)
     monkeypatch.setattr(loader, "plugins_dir", lambda: tmp_path / "builtins")
     monkeypatch.setattr(loader, "_PROVIDERS", {})
     monkeypatch.setattr(loader, "_PLUGIN_STATUS", {})
     monkeypatch.setattr(packages, "_started", set())
-    monkeypatch.setattr(secrets_store, "_cache", None)
-    monkeypatch.setattr(secrets_store, "_cache_sig", None)
-    monkeypatch.setattr(preferences, "_cache", None)
-    monkeypatch.setattr(preferences, "_cache_sig", None)
+    # DES-006: 密钥/偏好缓存迁入 app.state，由 conftest 的 autouse 夹具逐例重置。
     return tmp_path
 
 

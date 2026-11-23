@@ -15,10 +15,21 @@ from pathlib import Path
 
 import pytest
 
+from app.config import settings
 from app.factors import store as factor_store
 from app.factors.registry import unregister_factor
 from app.services import strategy_bundle
 from app.strategy.engine import StrategyEngine
+
+
+@pytest.fixture(autouse=True)
+def shared_root_alias(tmp_path, monkeypatch):
+    """DES-006: shared 根动态别名到 settings.data_dir，保持旧测试目录语义。"""
+    from app.state import shared
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(shared, "shared_data_root", lambda: settings.data_dir)
+
 
 META_COMMON = '"asset_types": ["stock"], "timeframes": ["1d"]'
 

@@ -17,8 +17,8 @@ from app.api.definitions import _uploads
 from app.custom.source_packages.routes import read_upload, require_management
 from app.extensions.packages import ExtensionPackageStore
 from app.services import import_center
-from app.services.ext_pages import PagePackStore
 from app.services.package_archive import read_code_archive
+from app.state import list_ext_pages
 
 router = APIRouter(prefix="/api", tags=["import-center"])
 _MANAGE = [Depends(require_management)]
@@ -27,6 +27,11 @@ _MANAGE = [Depends(require_management)]
 def _store(request: Request) -> ExtensionPackageStore:
     """返回当前数据源目录下的扩展包存储。"""
     return ExtensionPackageStore(request.app.state.repo.store.data_dir)
+
+
+def _page_exists(pack_id: str) -> bool:
+    """页面插件是否已存在（DES-006: 元数据在 PG，不再读本地 ext_pages 目录）。"""
+    return any(str(row.get("id")) == pack_id for row in list_ext_pages())
 
 
 @router.post("/import-center/inspect")
@@ -130,8 +135,7 @@ async def install_page(
         data = await file.read(5 * 1024 * 1024 + 1)
         if hashlib.sha256(data).hexdigest() != digest:
             raise HTTPException(409, "页面文件与预览不一致，请重新预览")
-        store = PagePackStore(request.app.state.repo.store.data_dir)
-        if store.get(id) and not overwrite:
+        if _page_exists(id) and not overwrite:
             raise HTTPException(409, "页面标识已存在，请确认替换或更换标识")
         candidate = UploadFile(filename=file.filename, file=io.BytesIO(data))
         try:
@@ -158,7 +162,7 @@ def import_project_page(request: Request, body: ProjectPageBody):
     if not body.trusted:
         raise HTTPException(403, "请先确认页面代码来源可信")
     try:
-        if PagePackStore(request.app.state.repo.store.data_dir).get(body.id) and not body.overwrite:
+        if _page_exists(body.id) and not body.overwrite:
             raise HTTPException(409, "页面标识已存在，请确认替换或更换标识")
         return ext_pages.import_source_from_project(
             request,

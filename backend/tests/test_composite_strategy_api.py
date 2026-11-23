@@ -23,7 +23,17 @@ from app.api.strategy import (
     _save_composite_strategy,
     _strategy_detail,
 )
+from app.config import settings
 from app.strategy.engine import StrategyEngine
+
+
+@pytest.fixture(autouse=True)
+def shared_root_alias(tmp_path, monkeypatch):
+    """DES-006: shared 根动态别名到 settings.data_dir，保持旧测试目录语义。"""
+    from app.state import shared
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(shared, "shared_data_root", lambda: settings.data_dir)
 
 
 def _filter_code(strategy_id: str) -> str:

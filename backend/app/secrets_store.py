@@ -1,103 +1,58 @@
-"""Key / 凭据本地存储(§14)。
+"""Key / 凭据存储 (DES-006)。
 
-存储位置:`data/user_data/secrets.json`,权限 0600。
-优先级:secrets.json > .env > 空(Free 模式)。
-
-UI 改 Key 时只动这个文件,不动 .env。
+密钥存 PG user_secret (AES-GCM 加密, 经 app.state 门面), 不再读写 secrets.json。
+优先级: PG 密钥 > .env > 空(Free 模式)。
+取消 secrets.json 外部编辑语义 (D-05): 统一走 API/UI 配置。
 """
 
 from __future__ import annotations
 
 import copy
-import json
 import logging
 import os
 from pathlib import Path
 
-from app.services.fs_utils import atomic_write_text
+from app.state import get_secrets, save_secrets
 
 logger = logging.getLogger(__name__)
 
-# (mtime_ns, size) 签名缓存 — 与 preferences.load 同模式。
-# 实时行情每轮的 webhook/邮件判定会多次读 secrets, 避免每次全文件读+JSON 解析。
-_cache: dict | None = None
-_cache_sig: tuple[int, int] | None = None
-
 
 def _path() -> Path:
+    """返回虚拟路径标识 (DES-006 后密钥不再落本地文件, 仅兼容展示与日志)。"""
     from app.config import settings
 
-    p = settings.data_dir / "user_data" / "secrets.json"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
+    return settings.data_dir / "user_data" / "secrets.json"
 
 
 def file_path() -> Path:
-    """secrets.json 绝对路径 (设置页展示用)。
-
-    该文件是 AI 与数据源 Key 的统一配置源, 支持用户用编辑器直接修改;
-    load() 按 mtime 签名缓存失效, 外部保存后下一次请求即读取最新内容,
-    无需重启。
-    """
+    """虚拟路径标识 (设置页展示用); DES-006 后该路径不存在实际文件。"""
     return _path()
 
 
 def load() -> dict:
-    """读取 secrets.json (带 mtime 签名缓存)。返回深拷贝, 调用方可自由修改。"""
-    global _cache, _cache_sig
-    p = _path()
-    try:
-        sig = (p.stat().st_mtime_ns, p.stat().st_size)
-    except OSError:
-        return {}
-    if _cache is not None and sig == _cache_sig:
-        return copy.deepcopy(_cache)
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    except Exception as e:  # noqa: BLE001
-        logger.warning("secrets.json malformed: %s", e)
-        return {}
-    _cache = data
-    _cache_sig = sig
-    return copy.deepcopy(_cache)
+    """读取 PG 密钥配置 (经门面)。返回深拷贝, 调用方可自由修改。"""
+    return copy.deepcopy(get_secrets())
 
 
 def save(updates: dict) -> dict:
-    """合并写入(不会清掉未提及的字段)。返回新内容。"""
-    current = load()
-    current.update({k: v for k, v in updates.items() if v is not None})
-    p = _path()
-    atomic_write_text(
-        p,
-        json.dumps(current, indent=2, ensure_ascii=False),
-        mode=0o600,
-    )
-    return current
+    """合并写入 (不会清掉未提及的字段)。返回新内容。"""
+    save_secrets({key: value for key, value in updates.items() if value is not None})
+    return load()
 
 
 def clear(*keys: str) -> dict:
-    """清掉指定字段(留空清全部)。"""
-    p = _path()
-    if not p.exists():
-        return {}
-    if not keys:
-        p.unlink()
-        return {}
-    current = load()
-    for k in keys:
-        current.pop(k, None)
-    atomic_write_text(
-        p,
-        json.dumps(current, indent=2, ensure_ascii=False),
-        mode=0o600,
-    )
-    return current
+    """清掉指定字段 (留空清全部)。返回新内容。
+
+    门面 save_secrets 将 None 值视为删除, 故用其表达清理语义。
+    """
+    targets = keys or tuple(get_secrets().keys())
+    if targets:
+        save_secrets({key: None for key in targets})
+    return load()
 
 
 def get_tickflow_key() -> str:
-    """取当前 TickFlow Key:secrets.json 优先,否则 .env。"""
+    """取当前 TickFlow Key:PG 密钥优先,否则 .env。"""
     val = load().get("tickflow_api_key")
     if val:
         return val
@@ -107,7 +62,7 @@ def get_tickflow_key() -> str:
 
 
 def get_ai_key() -> str:
-    """取当前 AI Key:secrets.json 优先,否则 .env。"""
+    """取当前 AI Key:PG 密钥优先,否则 .env。"""
     val = load().get("ai_api_key")
     if val:
         return val
@@ -117,7 +72,7 @@ def get_ai_key() -> str:
 
 
 def get_ai_config(key: str, default: str = "") -> str:
-    """取 AI 配置项:secrets.json 优先,否则 config。"""
+    """取 AI 配置项:PG 密钥优先,否则 config。"""
     val = load().get(key)
     if val:
         return val
@@ -127,7 +82,7 @@ def get_ai_config(key: str, default: str = "") -> str:
 
 
 def get_ai_config_int(key: str, default: int) -> int:
-    """取 AI 数值配置项 (如 ai_max_output_tokens): secrets.json 优先,否则 config。"""
+    """取 AI 数值配置项 (如 ai_max_output_tokens): PG 密钥优先,否则 config。"""
     val = load().get(key)
     if val is not None:
         try:
@@ -170,9 +125,9 @@ def set_email_smtp_password(password: str) -> str:
 
 
 def get_env_backed_secret(field: str, env_name: str) -> str:
-    """取环境变量后备的密钥(插件 API Key 等):secrets.json 优先,否则环境变量。
+    """取环境变量后备的密钥(插件 API Key 等):PG 密钥优先,否则环境变量。
 
-    与 get_tickflow_key 同优先级语义:UI 写入 secrets.json 后即覆盖 .env。
+    与 get_tickflow_key 同优先级语义:UI 写入 PG 密钥后即覆盖 .env。
     """
     val = load().get(field)
     if val:

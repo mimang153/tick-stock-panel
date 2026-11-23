@@ -5,6 +5,7 @@ import threading
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import polars as pl
 import pytest
@@ -18,6 +19,16 @@ from app.enriched_generation import bump_enriched_generation, get_enriched_gener
 from app.services.mining_jobs import MiningRunStore
 
 _CK = {"store": None}
+
+
+@pytest.fixture(autouse=True)
+def _worker_shared_root(tmp_path, monkeypatch):
+    """DES-006: worker 从 shared 根扫描策略；测试把 shared 根指向 tmp/data。"""
+    from app.config import settings
+
+    shared_root = tmp_path / "data"
+    monkeypatch.setenv("SHARED_DATA_ROOT", str(shared_root))
+    monkeypatch.setattr(settings, "shared_data_root", shared_root)
 
 
 @pytest.fixture(autouse=True)
@@ -290,7 +301,9 @@ def test_spawn_mining_writes_four_artifacts_and_returns_compact_summary(tmp_path
         assert frame.columns
         if name == "folds":
             assert "n_dates" in frame.columns
-            assert frame.filter(pl.col("regime_state") == "overall")["n_dates"].min() > 0
+            assert (
+                cast("int", frame.filter(pl.col("regime_state") == "overall")["n_dates"].min()) > 0
+            )
 
 
 def _create_custom_mining_manifest(data_dir, start, snapshot):

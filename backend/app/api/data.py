@@ -250,6 +250,7 @@ def _safe_aggregate(repo, view: str) -> dict | None:
     except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
         logger.debug("aggregate %s failed: %s", view, e)
         return None
+    logger.debug("aggregate %s stats=%s", view, stats)
     return stats or None
 
 
@@ -270,10 +271,12 @@ def _safe_aggregate_daily(repo, view: str = "kline_daily") -> dict | None:
             d.name[5:] for d in daily_dir.iterdir() if d.is_dir() and d.name.startswith("date=")
         ]
     if not dates:
+        logger.debug("aggregate %s: no dates in store", view)
         return None
     dates.sort()
 
     symbols = _count_instruments_symbols(repo)
+    logger.debug("aggregate %s dates=%d symbols=%d", view, len(dates), symbols)
 
     return {
         "rows": 0,
@@ -309,10 +312,12 @@ def _safe_aggregate_enriched(repo) -> dict | None:
             d.name[5:] for d in enriched_dir.iterdir() if d.is_dir() and d.name.startswith("date=")
         ]
     if not dates:
+        logger.debug("aggregate enriched: no dates in store")
         return None
     dates.sort()
 
     symbols = _count_instruments_symbols(repo)
+    logger.debug("aggregate enriched dates=%d symbols=%d", len(dates), symbols)
 
     return {
         "rows": 0,
@@ -601,9 +606,12 @@ def _load_last_runs() -> dict[str, str | None]:
 
 def _data_pipeline_busy(request: Request) -> bool:
     """同步任务运行中或指标预热未完成 — /status 的重聚合应退化为纯缓存读。"""
-    if not getattr(request.app.state, "indicators_ready", True):
+    indicators_ready = getattr(request.app.state, "indicators_ready", True)
+    active_status = job_store.active_status()
+    logger.debug("data status busy: ready=%s active=%s", indicators_ready, active_status)
+    if not indicators_ready:
         return True
-    return job_store.active_status() in ("pending", "running")
+    return active_status in ("pending", "running")
 
 
 @router.get("/status")
@@ -628,6 +636,7 @@ async def status(request: Request) -> dict:
     loaders["storage"] = lambda: _compute_storage(repo.store.data_dir)  # type: ignore
     loaders["last_runs"] = _load_last_runs  # type: ignore[assignment]
     snapshot = _status_cache.snapshot(loaders, is_busy=lambda: _data_pipeline_busy(request))  # type: ignore[arg-type]
+    logger.debug("data status: stats_pending=%s", snapshot.get("stats_pending"))
     last_runs = snapshot.pop("last_runs") or {
         "last_instruments_run": None,
         "last_pipeline_run": None,

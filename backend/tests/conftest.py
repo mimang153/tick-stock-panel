@@ -23,6 +23,12 @@ os.environ["COORDINATION_BACKEND"] = "memory"
 os.environ["MINING_STORE_BACKEND"] = "memory"
 # mining memory 文件版仅允许单 worker（flock 是进程内锁）；测试进程固定 1。
 os.environ["API_WORKERS"] = "1"
+# DES-006 用户状态：测试用独立 schema/Redis 库，避免污染 dev 数据；
+# 由 _user_state 夹具初始化并在用例间重置（见下）。
+os.environ["USER_STATE_PG_SCHEMA"] = "tsp_user_state_test"
+os.environ["USER_STATE_REDIS_URL"] = "redis://:123456@localhost:6379/15"
+os.environ["USER_STATE_REDIS_PREFIX"] = "tsp:user:test:"
+os.environ["USER_STATE_ENCRYPTION_KEY"] = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 
 import uuid
 from collections.abc import Iterator
@@ -139,3 +145,62 @@ def paper_account_ids(paper_pg):
     yield make
     for aid in created:
         paper_pg.delete_account(aid)
+
+
+# ── 用户状态门面（DES-006）测试隔离 ────────────────────────────
+_USER_STATE_TABLES = (
+    "schema_migrations",
+    "user_auth",
+    "api_token",
+    "user_secret",
+    "user_preference",
+    "capability_cache",
+    "watchlist_item",
+    "watchlist_group",
+    "watchlist_membership",
+    "daily_integrity",
+    "integrity_revision",
+    "integrity_report",
+    "repair_backoff",
+    "data_source_config",
+    "user_blob",
+    "ext_page",
+    "sound_pack",
+    "integrity_backup",
+    "state_migration_audit",
+)
+
+
+@pytest.fixture(autouse=True)
+def _user_state() -> Iterator[None]:
+    """每个用例重置 PG 用户状态表与 Redis 测试命名空间，保证用例间隔离。
+
+    PG/Redis 不可用时（纯离线环境）不阻断：门面读取按未初始化降级，依赖
+    真实状态的用例由各自 fixture 负责 skip。
+    """
+    from app.state.pg import execute, is_ready
+
+    try:
+        from app.state import init_state_pg
+
+        init_state_pg()
+    except Exception:  # noqa: BLE001 - PG 不可用时降级，不污染纯函数测试
+        yield
+        return
+    if is_ready():
+        for table in _USER_STATE_TABLES:
+            execute(f"TRUNCATE TABLE {settings.user_state_pg_schema}.{table}")
+    try:
+        from app.state.cache import _client
+
+        client = _client()
+        keys = list(client.scan_iter(match=f"{settings.user_state_redis_prefix}*"))
+        if keys:
+            client.delete(*keys)
+    except Exception:  # noqa: BLE001 - Redis 不可用时不影响 PG 状态测试
+        pass
+    import app.state.secrets as _secrets_state
+
+    _secrets_state.secret_cache = None
+    _secrets_state.secret_cache_generation = None
+    yield

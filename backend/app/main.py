@@ -391,6 +391,7 @@ def _lifespan_strategy_engine(
 ):
     """策略引擎创建 + 去内置化迁移 + 旧策略归档; 返回引擎与筛选器。"""
     from app.services.screener import ScreenerService
+    from app.state import shared_strategy_dirs
     from app.strategy import config as strategy_config
     from app.strategy.engine import StrategyEngine
 
@@ -405,11 +406,11 @@ def _lifespan_strategy_engine(
         seeded_strategies = seed_missing_builtins(store.data_dir)
     except Exception as e:  # noqa: BLE001 - 外部IO/解析失败需降级, 非静默吞异常
         logger.warning("strategy seeding failed (ignored): %s", e)
+    # DES-006: 用户策略写入已统一到 shared 目录，扫描路径必须同步，
+    # 否则新建/迁移策略落在 shared 而引擎仍扫旧 data_dir，导致策略不可见。
     strategy_dirs = [
         Path(__file__).resolve().parent / "strategy" / "research",
-        store.data_dir / "strategies" / "custom",
-        store.data_dir / "strategies" / "ai",
-        store.data_dir / "strategies" / "composite",
+        *shared_strategy_dirs(),
     ]
     strategy_engine = StrategyEngine(
         strategy_dirs=strategy_dirs,
@@ -593,6 +594,10 @@ async def _lifespan_shutdown(app: FastAPI, state: _LifespanState) -> None:
     from app.storage.runtime import shutdown_storage
 
     shutdown_storage()
+    # 用户状态 PG 池最后关闭 (DES-006): 与启动顺序相反, 放所有业务线程之后
+    from app.state import close_state_pg
+
+    close_state_pg()
     logger.info("shutdown")
 
 
@@ -603,9 +608,16 @@ async def _application_lifespan(app: FastAPI):
         __version__,
         tf_client.current_mode(),
     )
+    # 用户状态存储先于 auth bootstrap：后者改用 PG 存密码哈希、Redis 存会话。
+    from app.state.bootstrap import bootstrap_user_state
+
+    bootstrap_user_state()
     _lifespan_early()
 
     store, repo = _lifespan_data_core(app)
+    from app.state.bootstrap import recover_interrupted_jobs_at_startup
+
+    recover_interrupted_jobs_at_startup()
     seeded_signals = _lifespan_seed_factors(store)
     _lifespan_mining_guardian(app, store, repo)
 

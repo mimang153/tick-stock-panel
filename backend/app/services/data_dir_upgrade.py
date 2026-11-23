@@ -175,6 +175,42 @@ def _merge_tree(source: Path, dest: Path, data_dir: Path, backup: Path, depth: i
         _publish_merged_item(item, target, relative)
 
 
+def _read_json_object(path: Path) -> dict:
+    """读取旧配置 JSON 对象；格式无效时返回空字典并记日志。"""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError) as exc:
+        logger.warning("升级配置读取失败，跳过门面导入：%s (%s)", path, exc)
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _import_state_to_pg(data_dir: Path) -> None:
+    """把恢复后的旧 secrets/preferences 导入 PG 门面（仅补缺，不覆盖用户现值）。
+
+    DES-006 后密钥与偏好以 PG 为权威，旧安装升级必须把文件配置导入门面，
+    否则用户配置在升级后不可见。已存在的键不覆盖；偏好嵌套字段逐层补齐。
+    """
+    from app.state.pg import is_ready
+
+    if not is_ready():
+        logger.warning("用户状态 PG 未初始化，跳过升级配置导入，下次启动重试")
+        return
+    from app.state import get_preferences, get_secrets, save_preferences, save_secrets
+
+    secrets_path = data_dir / "user_data" / "secrets.json"
+    if secrets_path.is_file():
+        legacy = _read_json_object(secrets_path)
+        # 旧语义：secrets 作为整体凭据，现有配置优先，不与旧配置混合。
+        if legacy and not get_secrets():
+            save_secrets(legacy, actor="migration")
+    prefs_path = data_dir / "user_data" / "preferences.json"
+    if prefs_path.is_file():
+        merged = copy.deepcopy(get_preferences())
+        if _fill_missing(merged, _read_json_object(prefs_path)):
+            save_preferences(merged, actor="migration")
+
+
 def _restore_source(source: Path, dest: Path, data_dir: Path) -> None:
     if source.is_symlink() or not source.is_dir():
         return
@@ -208,6 +244,8 @@ def _restore_source(source: Path, dest: Path, data_dir: Path) -> None:
         raise RuntimeError(f"升级恢复记录无效，未自动重复迁移：{marker}")
     logger.info("恢复旧数据目录（保留现有配置）：%s -> %s", source, dest)
     _merge_tree(source, dest, data_dir, backup)
+    # 文件复制完成后导入 PG 门面；放在标记写入之前，导入失败时下次启动可重试。
+    _import_state_to_pg(data_dir)
     backup.mkdir(parents=True, exist_ok=True)
     # A completed recovery must not resurrect keys users subsequently remove.
     atomic_write_text(marker, json.dumps({"version": 1, "source": str(source_root)}), mode=0o600)

@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from app.backtest.minute_trigger import MINUTE_EXIT_TRIGGER_SIGNALS
 from app.services import strategy_pool
+from app.state import shared_strategy_root
 from app.strategy import config as strategy_config
 from app.strategy.ai_generator import (
     AIStrategyGenerator,
@@ -653,7 +654,7 @@ def _validate_strategy_id(strategy_id: str) -> str:
 def _target_dir(data_dir: Path, source: str) -> Path:
     if source not in {"ai", "custom", "composite"}:
         raise ValueError("target_source 必须是 ai、custom 或 composite")
-    return data_dir / "strategies" / source
+    return shared_strategy_root() / source
 
 
 def _prepare_strategy_code(req: StrategyCodeValidateRequest | StrategyCodeSaveRequest) -> dict:

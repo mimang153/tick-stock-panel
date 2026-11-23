@@ -50,6 +50,10 @@ EXPECTED_TABLES = {
     "ck_coord_limiter_lease",
     "ck_mining_run_audit",
     "ck_mining_artifact",
+    # DES-006 v5: 用户状态迁移审计表
+    "ck_integrity_event",
+    "ck_integrity_report_history",
+    "ck_config_change_audit",
     "backtest_runs",
     "backtest_trades",
     "sync_state",

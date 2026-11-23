@@ -239,11 +239,22 @@ class Settings(BaseSettings):
     data_dir: Path = _user_data_root()
     # 挖掘产物共享根 — 配置后 artifact/候选库落跨实例可见目录；未配置时沿用 data/ 兼容布局。
     mining_artifact_root: Path | None = None
-    # 产物存储后端 — shared-root 用共享卷；s3 用 S3 兼容对象存储。
-    mining_artifact_store: Literal["shared-root", "s3"] = "shared-root"
+    # 产物存储后端 — shared-root/s3 为历史兼容；pgblob 用 PG user_blob 表。
+    mining_artifact_store: Literal["shared-root", "s3", "pgblob"] = "shared-root"
     mining_artifact_s3_bucket: str = ""
     mining_artifact_s3_prefix: str = "mining-artifacts"
     mining_artifact_s3_endpoint_url: str | None = None
+
+    # 用户状态分布式存储（DES-006）— PG 为持久权威，Redis 为短态与缓存。
+    user_state_pg_url: str = "postgresql://tsp:123456@localhost:5432/tsp_dev"
+    user_state_pg_schema: str = "tsp_user_state"
+    user_state_redis_url: str = "redis://:123456@localhost:6379/3"
+    user_state_redis_prefix: str = "tsp:user:"
+    shared_data_root: Path | None = None
+    runtime_data_root: Path | None = None
+    user_blob_max_bytes: int = 67_108_864
+    job_live_ttl_days: int = 7
+    user_state_encryption_key: str = ""
 
     # ClickHouse 存储层 — 方案与包络见 ../../docs/v1.0.1/design/DES-001-clickhouse-storage-design.md §4.8/§4.9。
     # CK 由 docker compose 以 clickhouse/clickhouse-server:24.8.8-alpine 启动:

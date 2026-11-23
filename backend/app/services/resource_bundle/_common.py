@@ -178,17 +178,25 @@ class _DependencyResolver:
                 self.resolving_local.remove(marker)
 
 
-def _strategy_rel_path(data_dir: Path, sdef: Any) -> str | None:
-    """StrategyDef → 包内相对路径; 内置策略 (app 包内) 返回 None。"""
-    if sdef.file_path is None:
-        return None
+def _relative_name(path: Path, root: Path) -> str | None:
+    """返回 path 相对 root 的 POSIX 名; 不在 root 下返回 None。"""
     try:
-        rel = sdef.file_path.relative_to(data_dir)
+        return path.relative_to(root).as_posix()
     except ValueError:
         return None
-    if rel.parts and rel.parts[0] == "strategies":
-        return rel.as_posix()
-    return None
+
+
+def _strategy_rel_path(data_dir: Path, sdef: Any) -> str | None:
+    """StrategyDef → 包内相对路径; 内置策略 (app 包内) 返回 None。"""
+    from app.state import shared_strategy_root
+
+    if sdef.file_path is None:
+        return None
+    rel = _relative_name(sdef.file_path, data_dir)
+    if rel and rel.startswith("strategies/"):
+        return rel
+    rel = _relative_name(sdef.file_path, shared_strategy_root())
+    return f"strategies/{rel}" if rel else None
 
 
 def _signal_lookup(data_dir: Path) -> dict[str, dict]:
@@ -383,22 +391,38 @@ def _zip(
     return _archive(items, manifest)
 
 
+def _assert_no_symlink(base: Path, target: Path, name: str) -> None:
+    """校验 target 相对 base 的目录链不含符号链接。"""
+    relative = target.relative_to(base)
+    current = base
+    for part in relative.parts[:-1]:
+        current /= part
+        if current.is_symlink():
+            raise ResourceBundleError(f"资源目标路径包含符号链接: {name}")
+
+
 def _target(name: str) -> tuple[str, Path]:
+    """按白名单解析资源落盘目标；策略允许落在 shared 根。"""
+    from app.state import shared_strategy_root
+
     data_dir = config_backup._data_dir()
+    shared_root = shared_strategy_root()
     rel = config_backup._safe_rel(name)
     classified = config_backup._classify(rel, data_dir)
     if rel.as_posix() != name or classified is None or classified[0] not in BUNDLE_CATEGORIES:
         raise ResourceBundleError(f"不允许的资源路径: {name}")
     category, target = classified
-    # data_dir 自身可由部署配置指向符号链接; 包内子路径必须是普通路径。
-    current = target
-    while current != data_dir:
-        if current.is_symlink():
-            raise ResourceBundleError(f"资源目标路径包含符号链接: {name}")
-        current = current.parent
-    if not target.resolve().is_relative_to(data_dir.resolve()):
-        raise ResourceBundleError(f"资源目标越界: {name}")
-    return category, target
+    # 先按未解析路径检查符号链接，否则指向外部的链接会被误报为越界而非符号链接。
+    for base in (data_dir, shared_root):
+        if target.is_relative_to(base):
+            _assert_no_symlink(base, target, name)
+            break
+    resolved = target.resolve()
+    if resolved.is_relative_to(data_dir.resolve()) or resolved.is_relative_to(
+        shared_root.resolve()
+    ):
+        return category, target
+    raise ResourceBundleError(f"资源目标越界: {name}")
 
 
 def _metadata(name: str, payload: bytes) -> dict:
@@ -517,9 +541,12 @@ def _signal_input_refs(definition: dict) -> frozenset[str]:
 
 
 def _local_strategy_paths(data_dir: Path) -> dict[str, list[Path]]:
+    """从 shared 策略目录读取本机策略定义，用于资源依赖闭包。"""
+    from app.state import shared_strategy_dirs
+
     local_strategies: dict[str, list[Path]] = {}
-    for source in ("custom", "ai", "composite"):
-        for path in (data_dir / "strategies" / source).glob("*.py"):
+    for directory in shared_strategy_dirs():
+        for path in directory.glob("*.py"):
             if path.stem.startswith("_"):
                 continue
             try:

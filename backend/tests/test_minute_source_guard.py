@@ -22,8 +22,7 @@ def isolated_settings(tmp_path, monkeypatch, ck_runtime):
     # 全量并跑时被其他用例泄漏的 runtime 污染会导致读到错误前缀数据（flaky）。
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     preferences._invalidate_cache()
-    monkeypatch.setattr(secrets_store, "_cache", None)
-    monkeypatch.setattr(secrets_store, "_cache_sig", None)
+    # DES-006: secrets 缓存已迁入 app.state.secrets，由 conftest 的 autouse 夹具重置。
     yield
     preferences._invalidate_cache()
 

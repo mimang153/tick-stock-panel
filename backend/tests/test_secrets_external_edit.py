@@ -1,15 +1,14 @@
-"""secrets.json 作为统一配置源的外部编辑契约。
+"""密钥配置源的读取契约 (DES-006)。
 
-用户可以直接用编辑器修改 secrets.json (AI + 数据源 Key 同文件), 保存后
-下一次请求即读取最新内容 —— 不需要重启服务。这里锁定三条:
-① file_path() 指向 data/user_data/secrets.json;
-② 外部改写文件后 load()/get_ai_config() 立刻反映新值 (mtime+size 签名缓存失效);
+密钥统一存 PG user_secret (经 app.state 门面), 取消 secrets.json 外部编辑语义 (D-05)。
+这里锁定三条:
+① file_path() 仅返回兼容展示用的虚拟路径标识;
+② 经 save() 写入后 load()/get_ai_config() 立刻反映新值 (无文件 mtime 缓存);
 ③ GET /api/settings 暴露 secrets_path 供设置页展示。
 """
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -34,19 +33,13 @@ def test_external_edit_is_picked_up_without_restart(data_dir: Path) -> None:
     secrets_store.save({"ai_model": "old-model", "ai_base_url": "https://old.example/v1"})
     assert secrets_store.get_ai_config("ai_model") == "old-model"
 
-    # 模拟用户编辑器直接覆写文件 (绕过 secrets_store.save)。
-    # 内容长度与 mtime 都变化, 签名缓存必然失效。
-    path = data_dir / "user_data" / "secrets.json"
-    path.write_text(
-        json.dumps(
-            {
-                "ai_model": "brand-new-model",
-                "ai_base_url": "https://new.example/v1",
-                "ai_api_key": "sk-new",
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
+    # DES-006: 统一经门面写入 PG, 下一次读取即反映新值 (无需重启)。
+    secrets_store.save(
+        {
+            "ai_model": "brand-new-model",
+            "ai_base_url": "https://new.example/v1",
+            "ai_api_key": "sk-new",
+        }
     )
 
     assert secrets_store.get_ai_config("ai_model") == "brand-new-model"
@@ -55,18 +48,11 @@ def test_external_edit_is_picked_up_without_restart(data_dir: Path) -> None:
 
 
 def test_external_edit_with_same_size_still_reloads(data_dir: Path) -> None:
-    """同长度改写: 签名含 mtime_ns, 不能因 size 相同而吃到旧缓存。"""
-    import os
-    import time
-
-    path = data_dir / "user_data" / "secrets.json"
+    """同长度改写: 门面以 generation 失效进程缓存, 不因值长度相同而读到旧值。"""
     secrets_store.save({"ai_model": "model-aaaa"})
     assert secrets_store.get_ai_config("ai_model") == "model-aaaa"
 
-    path.write_text(json.dumps({"ai_model": "model-bbbb"}), encoding="utf-8")
-    # 强制 mtime 前进 (文件系统时间戳粒度可能吞掉快速连续写入)
-    future = time.time() + 5
-    os.utime(path, (future, future))
+    secrets_store.save({"ai_model": "model-bbbb"})
 
     assert secrets_store.get_ai_config("ai_model") == "model-bbbb"
 

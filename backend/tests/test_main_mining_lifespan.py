@@ -159,6 +159,8 @@ def test_application_only_recovers_runs_when_it_owns_lock(tmp_path, monkeypatch,
         raise StopAfterManagerInitializationError
 
     monkeypatch.setattr(main_module, "DataStore", lambda: SimpleNamespace(data_dir=tmp_path))
+    # DES-006: 启动期会校验 shared 可写，隔离到 tmp 避免触碰仓库只读 data/shared。
+    monkeypatch.setattr(main_module.settings, "shared_data_root", tmp_path)
     monkeypatch.setattr(
         main_module, "KlineRepository", lambda *a, **kw: SimpleNamespace(refresh_cache=stop)
     )

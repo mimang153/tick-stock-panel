@@ -1,9 +1,6 @@
-"""preferences mtime 缓存测试 — 读盘去重, 且外部修改/自身写入后立即可见。"""
+"""preferences 缓存测试 (DES-006) — Redis 短缓存命中去重, 写入后立即可见。"""
 
 from __future__ import annotations
-
-import json
-import os
 
 import pytest
 
@@ -18,47 +15,43 @@ def _record(result, log, *items):
 
 @pytest.fixture(autouse=True)
 def _isolated(tmp_path, monkeypatch):
-    path = tmp_path / "preferences.json"
+    path = tmp_path / "preferences.json"  # 虚拟路径标识, 不再落盘
     monkeypatch.setattr(preferences, "_path", lambda: path)
     preferences._invalidate_cache()
     yield path
     preferences._invalidate_cache()
 
 
-def _patched_loads(monkeypatch, counter: dict):
-    real_loads = json.loads
-
-    def _counting(text):
-        counter["loads"] += 1
-        return real_loads(text)
-
-    monkeypatch.setattr(preferences.json, "loads", _counting)
-
-
 def test_second_load_hits_cache_without_disk_parse(_isolated, monkeypatch):
-    _isolated.write_text(json.dumps({"realtime_quotes_enabled": True}), encoding="utf-8")
-    counter = {"loads": 0}
-    _patched_loads(monkeypatch, counter)
+    from app.state import preferences as state_preferences
+
+    preferences.save({"realtime_quotes_enabled": True})
+    calls: list = []
+    real_fetch_one = state_preferences.fetch_one
+
+    def _counting(*args, **kwargs):
+        calls.append(1)
+        return real_fetch_one(*args, **kwargs)
+
+    monkeypatch.setattr(state_preferences, "fetch_one", _counting)
 
     assert preferences.load()["realtime_quotes_enabled"] is True
     assert preferences.load()["realtime_quotes_enabled"] is True
-    assert counter["loads"] == 1, "签名未变时第二次 load 不得重复读盘+parse"
+    assert calls == [], "Redis 短缓存命中时不应回查 PG"
 
 
 def test_external_file_change_invalidates_cache(_isolated, monkeypatch):
-    _isolated.write_text(json.dumps({"realtime_quote_interval": 6.0}), encoding="utf-8")
+    preferences.save({"realtime_quote_interval": 6.0})
     assert preferences.load()["realtime_quote_interval"] == 6.0
 
-    _isolated.write_text(json.dumps({"realtime_quote_interval": 3.0}), encoding="utf-8")
-    # 同尺寸修改且 mtime 粒度可能不变时, 显式推进 mtime 模拟真实场景
-    st = _isolated.stat()
-    os.utime(_isolated, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    # DES-006: 门面写入后 bump generation 并刷新 Redis 短缓存, 下一次读取即新值。
+    preferences.save({"realtime_quote_interval": 3.0})
 
     assert preferences.load()["realtime_quote_interval"] == 3.0
 
 
 def test_save_then_load_sees_merged_values(_isolated):
-    _isolated.write_text(json.dumps({"a": 1}), encoding="utf-8")
+    preferences.save({"a": 1})
     out = preferences.save({"b": 2})
     assert out == {"a": 1, "b": 2}
     assert preferences.load() == {"a": 1, "b": 2}
@@ -70,7 +63,7 @@ def test_interval_setter_invalidates_cache(_isolated):
 
 
 def test_load_returns_copy_not_cached_object(_isolated):
-    _isolated.write_text(json.dumps({"k": [1, 2]}), encoding="utf-8")
+    preferences.save({"k": [1, 2]})
     first = preferences.load()
     first["k"].append(3)
     first["extra"] = True
@@ -87,15 +80,12 @@ def test_mining_schedule_defaults_are_disabled(_isolated):
 
 
 def test_mining_schedule_invalid_stored_values_fail_closed(_isolated):
-    _isolated.write_text(
-        json.dumps(
-            {
-                "mining_schedule_enabled": "false",
-                "mining_schedule_weekday": True,
-                "mining_budget_profile": None,
-            }
-        ),
-        encoding="utf-8",
+    preferences.save(
+        {
+            "mining_schedule_enabled": "false",
+            "mining_schedule_weekday": True,
+            "mining_budget_profile": None,
+        }
     )
 
     assert preferences.get_mining_schedule() == {

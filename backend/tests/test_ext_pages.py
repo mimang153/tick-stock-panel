@@ -17,6 +17,16 @@ from fastapi.testclient import TestClient
 from starlette.datastructures import UploadFile
 
 from app.api.ext_pages import router
+from app.config import settings
+
+
+@pytest.fixture(autouse=True)
+def shared_root_alias(tmp_path, monkeypatch):
+    """DES-006: shared 根动态别名到 settings.data_dir，保持旧测试目录语义。"""
+    from app.state import shared
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(shared, "shared_data_root", lambda: settings.data_dir)
 
 
 @pytest.fixture
@@ -52,7 +62,8 @@ def test_upload_and_lifecycle(client: TestClient, tmp_path: Path):
     assert meta["id"] == "demo_page"
     assert meta["enabled"] is False  # 上传后未验证, 默认停用
     assert meta["size"] == len(_bundle_js()) and len(meta["sha256"]) == 64
-    assert (tmp_path / "ext_pages" / "demo_page" / "bundle.js").exists()
+    # DES-006: bundle 已迁 user_blob，通过分发接口校验而非直读文件。
+    assert client.get("/api/ext-pages/demo_page/bundle.js").status_code == 200
 
     # 清单回填 → 启用
     r = client.put(

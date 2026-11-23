@@ -217,6 +217,20 @@ class _RefreshMixin(_RepoMixinBase):
         target_parquet = enriched_dir / f"date={ds}" / "part.parquet"
 
         if not target_parquet.exists():
+            parquet_latest = max(
+                (
+                    item.name.removeprefix("date=")
+                    for item in enriched_dir.glob("date=*")
+                    if item.is_dir()
+                ),
+                default=None,
+            )
+            if parquet_latest is not None and ds > parquet_latest:
+                logger.warning(
+                    "enriched CK latest %s newer than local parquet latest %s; hot cache stays stale",
+                    ds,
+                    parquet_latest,
+                )
             logger.info(
                 "enriched refresh skipped: %s not found (%.2fs)",
                 target_parquet,

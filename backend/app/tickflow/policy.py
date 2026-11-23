@@ -10,7 +10,6 @@ Tier Label 算法见 §5.3:基线档 + 补丁能力。
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from dataclasses import dataclass
@@ -21,11 +20,13 @@ import yaml
 
 from app import secrets_store
 from app.config import settings
+from app.state import get_capability_cache, save_capability_cache
 
 from .capabilities import Cap, CapabilityLimits, CapabilitySet
 
 logger = logging.getLogger(__name__)
 
+# 仅作为旧签名/日志中的虚拟标识; DES-006 后能力缓存读写走 PG 门面, 不落本地文件。
 _CAPSET_CACHE_FILE = "capabilities.json"
 
 # 缓存 schema 版本。capabilities 模型有结构性变更时 bump(如新增/拆分 Cap),
@@ -276,19 +277,17 @@ def _probe_real(tiers: dict) -> tuple[CapabilitySet, list[str], set[Cap]]:
 def _load_cached_capset(cache_path: Path) -> CapabilitySet | None:
     """读取上次持久化的 capset(schema 匹配时)。供瞬时失败时保留旧档位用。
 
-    此时尚未 _persist 本次探测结果, 缓存文件仍是上一次的值。schema 不匹配则返回 None
-    (旧结构不可靠, 不作为保留依据)。
+    DES-006: 改从 PG 门面读取, cache_path 仅为兼容旧签名保留。
+    schema 不匹配或读取失败则返回 None (旧结构不可靠, 不作为保留依据)。
     """
     try:
-        if not cache_path.exists():
-            return None
-        with cache_path.open(encoding="utf-8") as f:
-            cached = json.load(f)
-        if cached.get("schema_version") != _CACHE_SCHEMA_VERSION:
-            return None
-        return _capset_from_json(cached)
-    except Exception:  # noqa: BLE001
+        cached = get_capability_cache()
+    except Exception as exc:  # noqa: BLE001 - 能力缓存读取失败按无缓存处理, 不阻断探测
+        logger.warning("读取 capabilities 缓存失败: %s", exc)
         return None
+    if cached is None or cached.get("schema_version") != _CACHE_SCHEMA_VERSION:
+        return None
+    return _capset_from_json(cached)
 
 
 def detect_capabilities(force: bool = False) -> CapabilitySet:
@@ -349,18 +348,18 @@ def _augment_custom_sources(capset: CapabilitySet) -> None:
 
 def _detect_tickflow_caps(force: bool = False) -> CapabilitySet:
     """探测 TickFlow API Key 的能力集 (不含自定义数据源补能力)。"""
-    cache_path = settings.data_dir / _CAPSET_CACHE_FILE
-    if not force and cache_path.exists():
-        with cache_path.open(encoding="utf-8") as f:
-            cached = json.load(f)
+    cache_path = settings.data_dir / _CAPSET_CACHE_FILE  # 虚拟路径, 仅供旧签名使用
+    if not force:
+        cached = get_capability_cache()
         # schema 版本校验:旧缓存或缺版本号 → 过期,丢弃后重新探测
-        if cached.get("schema_version") == _CACHE_SCHEMA_VERSION:
+        if cached is not None and cached.get("schema_version") == _CACHE_SCHEMA_VERSION:
             return _capset_from_json(cached)
-        logger.info(
-            "capabilities 缓存 schema 版本过期(缓存=%s, 当前=%d), 重新探测",
-            cached.get("schema_version"),
-            _CACHE_SCHEMA_VERSION,
-        )
+        if cached is not None:
+            logger.info(
+                "capabilities 缓存 schema 版本过期(缓存=%s, 当前=%d), 重新探测",
+                cached.get("schema_version"),
+                _CACHE_SCHEMA_VERSION,
+            )
 
     tiers = _load_tiers_yaml()
     if settings.use_free_mode:
@@ -604,8 +603,7 @@ def _persist(
     extras: list[str] | None = None,
     invalid_key: bool = False,
 ) -> None:
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = settings.data_dir / _CAPSET_CACHE_FILE
+    """把探测结果写入 PG 能力缓存门面 (不再写 capabilities.json)。"""
     payload = {
         "schema_version": _CACHE_SCHEMA_VERSION,
         "label": label,
@@ -615,8 +613,7 @@ def _persist(
         "extras_caps": extras or [],  # 超出本档的额外能力
         "invalid_key": invalid_key,  # 探测出的 key 无效(连单只日K都拿不到)
     }
-    with cache_path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    save_capability_cache(payload)
 
 
 def _capset_from_json(data: dict[str, Any]) -> CapabilitySet:
@@ -635,36 +632,27 @@ def _capset_from_json(data: dict[str, Any]) -> CapabilitySet:
 
 
 def tier_label() -> str:
-    cache_path = settings.data_dir / _CAPSET_CACHE_FILE
-    if cache_path.exists():
-        with cache_path.open(encoding="utf-8") as f:
-            return json.load(f).get("label", "Unknown")
-    return "Unknown"
+    """当前档位标签 (从 PG 门面读取, 未探测返回 Unknown)。"""
+    cached = get_capability_cache()
+    return str(cached.get("label", "Unknown")) if cached else "Unknown"
 
 
 def probe_log() -> list[str]:
-    cache_path = settings.data_dir / _CAPSET_CACHE_FILE
-    if cache_path.exists():
-        with cache_path.open(encoding="utf-8") as f:
-            return json.load(f).get("probe_log", [])
-    return []
+    """最近一次探测的过程日志 (从 PG 门面读取)。"""
+    cached = get_capability_cache()
+    return list(cached.get("probe_log", [])) if cached else []
 
 
 def missing_caps() -> list[str]:
     """本档应有但未探测到的 capability — 通常意味着探测有 bug 或权限边界。"""
-    cache_path = settings.data_dir / _CAPSET_CACHE_FILE
-    if cache_path.exists():
-        with cache_path.open(encoding="utf-8") as f:
-            return json.load(f).get("missing_caps", [])
-    return []
+    cached = get_capability_cache()
+    return list(cached.get("missing_caps", [])) if cached else []
 
 
 def extras_caps() -> list[str]:
-    cache_path = settings.data_dir / _CAPSET_CACHE_FILE
-    if cache_path.exists():
-        with cache_path.open(encoding="utf-8") as f:
-            return json.load(f).get("extras_caps", [])
-    return []
+    """超出本档的额外 capability (从 PG 门面读取)。"""
+    cached = get_capability_cache()
+    return list(cached.get("extras_caps", [])) if cached else []
 
 
 def is_invalid_key() -> bool:
@@ -672,11 +660,8 @@ def is_invalid_key() -> bool:
 
     settings 层据此清除已存的 key,避免乱填的 key 被持久化。
     """
-    cache_path = settings.data_dir / _CAPSET_CACHE_FILE
-    if cache_path.exists():
-        with cache_path.open(encoding="utf-8") as f:
-            return bool(json.load(f).get("invalid_key", False))
-    return False
+    cached = get_capability_cache()
+    return bool(cached.get("invalid_key", False)) if cached else False
 
 
 def base_tier_name() -> str:

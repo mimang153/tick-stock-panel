@@ -2,14 +2,13 @@ import { useState, useEffect, useRef, type ReactNode } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Save, Loader2, Check, Wifi, Eye, EyeOff, Shield, SlidersHorizontal,
-  Shuffle, ExternalLink, Trash2, FileCog, RefreshCw,
+  Shuffle, ExternalLink, Trash2,
   Terminal, ChevronDown, Sparkles, Atom, Waves, Cloud, Gem, Moon,
 } from 'lucide-react'
 import { useSettings } from '@/lib/useSharedQueries'
 import { api, type SettingsState, type SponsorModelItem } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { AnchorWrap } from '@/lib/useCardFlash'
-import { copyText } from '@/lib/clipboard'
 import { DEEPSEEK_FALLBACK_RANGE, MAX_DISCOUNT_FALLBACK_PCT, bandDiscountLabel, discountRangeLabel, loadSponsorModelItems, maxDiscountPct, useSponsorModelItems } from '@/lib/sponsor-discount'
 
 // 折扣率 → 中文折数: 0.6→"6折", 0.35→"3.5折", 0.2→"2折"
@@ -154,8 +153,6 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
   const [saved, setSaved] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
-  const [pathCopied, setPathCopied] = useState(false)
-  const [reloaded, setReloaded] = useState(false)
   // 赞助商预设的模型列表下拉（/models 接口 + 关键词过滤）
   const [modelsOpen, setModelsOpen] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(false)
@@ -250,30 +247,6 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
     if (userEditedRef.current) return
     syncFormFromSettings(s)
   }, [s])
-
-  // 「从文件重新加载」: 用户外部编辑 secrets.json 后, 显式重读磁盘并覆盖表单。
-  // 后端按 mtime 签名缓存失效, refetch 即取到最新文件内容, 无需重启服务。
-  const reloadFromFile = async () => {
-    userEditedRef.current = false
-    draftsInitialized.current = false
-    setTestResult(null)
-    try {
-      const fresh = await settings.refetch()
-      if (fresh.data) syncFormFromSettings(fresh.data)
-      setReloaded(true)
-      window.setTimeout(() => setReloaded(false), 2000)
-    } finally {
-      draftsInitialized.current = true
-    }
-  }
-
-  const copySecretsPath = async () => {
-    if (!s?.secrets_path) return
-    if (await copyText(s.secrets_path)) {
-      setPathCopied(true)
-      window.setTimeout(() => setPathCopied(false), 2000)
-    }
-  }
 
   const payload = () => ({
     provider,
@@ -814,33 +787,6 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
           </div>
         )}
 
-        {/* 配置文件: Key 统一存放位置, 支持外部编辑后热加载 */}
-        {s?.secrets_path && (
-          <div className="border-t border-border/40 px-5 py-3" title="AI 与数据源 Key 统一存放在此文件; 外部编辑保存后点「重新加载」即生效, 无需重启。">
-            <div className="flex items-center gap-2">
-              <FileCog className="h-3.5 w-3.5 shrink-0 text-muted/70" />
-              <span className="shrink-0 text-[11px] text-muted">配置文件</span>
-              <code className="min-w-0 truncate rounded bg-base/70 px-1.5 py-0.5 font-mono text-[11px] text-secondary" title={s.secrets_path}>
-                {s.secrets_path}
-              </code>
-              <span className="ml-auto flex shrink-0 items-center gap-1">
-                <button type="button" onClick={copySecretsPath}
-                  className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-elevated hover:text-secondary">
-                  {pathCopied ? <Check className="h-3 w-3 text-bear" /> : null}
-                  {pathCopied ? '已复制' : '复制路径'}
-                </button>
-                <button type="button" onClick={reloadFromFile} disabled={settings.isFetching}
-                  className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-elevated hover:text-secondary disabled:opacity-50">
-                  {reloaded ? <Check className="h-3 w-3 text-bear" /> : <RefreshCw className={`h-3 w-3 ${settings.isFetching ? 'animate-spin' : ''}`} />}
-                  {reloaded ? '已同步' : '重新加载'}
-                </button>
-              </span>
-            </div>
-            <p className="mt-1.5 pl-[22px] text-[10px] leading-relaxed text-muted/80">
-              可直接用编辑器修改本文件, 保存后点「重新加载」同步; 所有 AI 与数据源 Key 均在此统一管理。
-            </p>
-          </div>
-        )}
       </section>
       </div>
       </AnchorWrap>

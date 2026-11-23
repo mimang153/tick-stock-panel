@@ -14,7 +14,18 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from app.config import settings
 from app.services import config_backup
+
+
+@pytest.fixture(autouse=True)
+def shared_root_alias(tmp_path, monkeypatch):
+    """DES-006: shared 根动态别名到 settings.data_dir，保持旧测试目录语义。"""
+    from app.state import shared
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(shared, "shared_data_root", lambda: settings.data_dir)
+
 
 SAFE_STRATEGY = """\
 META = {"id": "custom_demo", "name": "demo", "description": "", "tags": []}
@@ -56,7 +67,9 @@ def _write(path: Path, content: str | bytes) -> Path:
 
 
 @pytest.fixture()
-def src_env(tmp_path, monkeypatch):
+def src_env(
+    tmp_path, monkeypatch
+):  # func-length-allow: pytest fixture 逐文件构造各类别测试样本，线性 setup 不宜拆分
     """源环境: 把全局 data_dir 指到 tmp, 造一份各类别齐全的用户配置。"""
     from app.config import settings as app_settings
 
@@ -120,6 +133,24 @@ def src_env(tmp_path, monkeypatch):
     _write(root / "user_data" / "alerts.jsonl", '{"msg": "m"}\n')
     _write(root / "user_data" / "assistant_sessions.json", '{"sessions": []}')
     _write(root / "user_data" / "auth.json", json.dumps({"password_hash": "h", "sessions": {}}))
+    # DES-006: 数据源/扩展页面/语音包权威已迁 PG，fixture 同步写入门面。
+    from app import secrets_store
+    from app.state import save_data_source_config, save_ext_page, save_preferences, save_sound_pack
+
+    secrets_store.save({"ai_api_key": "sk-1", "tickflow_api_key": "tf-1"})
+    save_preferences(
+        {
+            "quote_interval": 5,
+            "feishu_webhook_url": "https://open.feishu.cn/hook/tok",
+            "feishu_webhook_secret": "s3cret",
+            "wecom_bot_secret": "bot-s3cret",
+        }
+    )
+    save_data_source_config("my_src", "name: my_src\nbase_url: https://x\n")
+    save_ext_page(
+        "mypage", {"id": "mypage", "title": "p"}, b"export default function P() { return null }"
+    )
+    save_sound_pack("ding.mp3", b"ID3fakeaudio", "mp3")
     # 派生/临时数据, 任何情况下都不应进入备份
     _write(root / "user_data" / "strategy_cache.json", '{"derived": 1}')
     _write(root / "user_data" / "task_registry.json", '{"tasks": []}')
@@ -140,14 +171,8 @@ def _reset_store_caches(monkeypatch):
     monkeypatch.setattr(loader, "list_plugins", lambda: [])
     monkeypatch.delenv("EXT_EXT1_API_KEY", raising=False)
     preferences._invalidate_cache()
-    import app.secrets_store as secrets_store
-
-    secrets_store._cache = None
-    secrets_store._cache_sig = None
     yield
     preferences._invalidate_cache()
-    secrets_store._cache = None
-    secrets_store._cache_sig = None
 
 
 def _zip_entries(data: bytes) -> dict[str, bytes]:
@@ -312,10 +337,7 @@ def test_export_contains_all_categories_and_manifest(src_env):
         "user_data/research_candidates.json",
         "data_sources/my_src.yaml",
         "analysis_menus/am_demo.json",
-        "ext_pages/mypage/page.json",
-        "ext_pages/mypage/bundle.js",
         "ext_data/ext1/config.json",
-        "sound_packs/ding.mp3",
         "user_data/alerts.jsonl",
         "user_data/assistant_sessions.json",
         "user_data/preferences.json",
@@ -335,7 +357,10 @@ def test_export_contains_all_categories_and_manifest(src_env):
     assert counts["strategies"] == 3
     assert counts["watchlist"] == 2
     assert counts["paper"] == 3
-    assert counts["ext_pages"] == 2
+    assert counts["data_sources"] == 1
+    assert any(p["id"] == "mypage" for p in manifest["pg_tables"]["ext_page"])
+    assert any(p["name"] == "ding.mp3" for p in manifest["pg_tables"]["sound_pack"])
+    assert manifest["blobs"]
     assert "auth" not in counts and "secrets" not in counts
 
 
@@ -362,10 +387,10 @@ def test_export_with_secrets_keeps_plaintext(src_env):
 
 
 def test_export_includes_env_keys_without_secrets_file(src_env, monkeypatch):
+    from app import secrets_store
     from app.config import settings
 
-    path = src_env / "user_data" / "secrets.json"
-    path.unlink()
+    secrets_store.clear()
     monkeypatch.setattr(settings, "ai_api_key", "test-env-ai-key")
     monkeypatch.setattr(settings, "tickflow_api_key", "test-env-tickflow-key")
     monkeypatch.setattr(settings, "ai_base_url", "https://example.test/v1")
@@ -380,11 +405,13 @@ def test_export_includes_env_keys_without_secrets_file(src_env, monkeypatch):
     assert saved["ai_model"] == "test-env-model"
     assert "must-not-export" not in entries["user_data/secrets.json"].decode()
     assert set(entries) == {"manifest.json", "user_data/secrets.json"}
-    assert not path.exists()  # 导出不能回写源设备的密钥文件
+    assert secrets_store.load() == {}  # 导出不能回写源设备的密钥
 
 
 def test_export_without_configured_keys_has_no_secrets_entry(src_env):
-    (src_env / "user_data" / "secrets.json").unlink()
+    from app import secrets_store
+
+    secrets_store.clear()
     data, _ = config_backup.build_backup(categories={"secrets"})
     assert set(_zip_entries(data)) == {"manifest.json"}
     assert config_backup.inspect_archive(data)["has_secrets"] is False
@@ -392,25 +419,22 @@ def test_export_without_configured_keys_has_no_secrets_entry(src_env):
 
 @pytest.mark.parametrize("stored_key", ["test-local-key", ""])
 def test_export_resolves_plugin_and_ext_keys_with_store_priority(src_env, monkeypatch, stored_key):
+    from app import secrets_store
     from app.config import settings
     from app.data_providers.custom import loader
 
-    path = src_env / "user_data" / "secrets.json"
-    path.write_text(
-        json.dumps(
-            {
-                "ai_api_key": stored_key,
-                "tickflow_api_key": stored_key,
-                "sample_api_key": stored_key,
-                "ext_ext1_api_key": stored_key,
-                "ai_base_url": "https://local.test/v1",
-                "ai_round_checkpoint": 0,
-                "local_only": "keep",
-            }
-        ),
-        encoding="utf-8",
-    )
-    original = path.read_bytes()
+    stored = {
+        "ai_api_key": stored_key,
+        "tickflow_api_key": stored_key,
+        "sample_api_key": stored_key,
+        "ext_ext1_api_key": stored_key,
+        "ai_base_url": "https://local.test/v1",
+        "ai_round_checkpoint": 0,
+        "local_only": "keep",
+    }
+    secrets_store.clear()
+    secrets_store.save(stored)
+    original = dict(secrets_store.load())
     monkeypatch.setattr(settings, "ai_api_key", "test-fallback-key")
     monkeypatch.setattr(settings, "tickflow_api_key", "test-fallback-key")
     monkeypatch.setattr(settings, "ai_base_url", "https://fallback.test/v1")
@@ -432,7 +456,7 @@ def test_export_resolves_plugin_and_ext_keys_with_store_priority(src_env, monkey
     assert saved["ai_base_url"] == "https://local.test/v1"
     assert saved["ai_round_checkpoint"] == 0
     assert saved["local_only"] == "keep"
-    assert path.read_bytes() == original
+    assert secrets_store.load() == original
 
 
 def test_api_env_key_backup_restores_on_new_device(src_env, tmp_path_factory, monkeypatch):
@@ -445,7 +469,7 @@ def test_api_env_key_backup_restores_on_new_device(src_env, tmp_path_factory, mo
     from app.data_providers.custom import loader
     from app.services.ext_data import get_ext_api_key
 
-    (src_env / "user_data" / "secrets.json").unlink()
+    secrets_store.clear()
     monkeypatch.setattr(settings, "ai_api_key", "test-env-ai")
     monkeypatch.setattr(settings, "tickflow_api_key", "test-env-tickflow")
     monkeypatch.setattr(settings, "ai_base_url", "https://backup.test/v1")
@@ -470,7 +494,7 @@ def test_api_env_key_backup_restores_on_new_device(src_env, tmp_path_factory, mo
         response = client.get("/api/config-backup/export", params={"categories": "secrets"})
         assert response.status_code == 200
         archive = response.content
-        root = _fresh_env(tmp_path_factory, monkeypatch)
+        _fresh_env(tmp_path_factory, monkeypatch)
         monkeypatch.setattr(settings, "ai_api_key", "")
         monkeypatch.setattr(settings, "tickflow_api_key", "")
         monkeypatch.setattr(settings, "ai_base_url", "https://new-device.test/v1")
@@ -496,16 +520,16 @@ def test_api_env_key_backup_restores_on_new_device(src_env, tmp_path_factory, mo
         == "test-env-plugin"
     )
     assert get_ext_api_key("ext1") == "test-env-ext"
-    assert (root / "user_data" / "secrets.json").is_file()
+    assert secrets_store.get_ai_key() == "test-env-ai"  # PG 恢复后优先于新设备 .env
 
 
 def test_inspect_reports_counts_conflicts_and_secrets(src_env):
     data, _ = config_backup.build_backup(categories=config_backup.CATEGORY_KEYS)
     summary = config_backup.inspect_archive(data)
     assert summary["has_secrets"] is True
-    # 23 个常规配置文件 + secrets + auth
-    assert summary["total_files"] == 25
-    assert summary["conflict_files"] == 25 - 2  # 除偏好/密钥 (merge 语义) 外全部同名冲突
+    # DES-006: ext_pages/sound_packs 改走 v2 PG 段，文件条目减少 3 个。
+    assert summary["total_files"] == 22
+    assert summary["conflict_files"] == 22 - 2  # 除偏好/密钥 (merge 语义) 外全部同名冲突
     cats = {c["key"]: c for c in summary["categories"]}
     assert cats["strategies"]["count"] == 3
     assert cats["strategies"]["conflicts"] == 3
@@ -612,8 +636,9 @@ def test_apply_into_fresh_env_roundtrip(src_env, tmp_path_factory, monkeypatch):
     assert imported["lots"] == 1
     assert imported["paper"] == 3
     assert imported["research_candidates"] == 1
-    assert imported["ext_pages"] == 2
-    assert imported["sound_packs"] == 1
+    # DES-006: 扩展页面/语音包由 v2 PG 段恢复，不再作为文件条目计入 imported。
+    assert imported.get("ext_pages", 0) == 0
+    assert imported.get("sound_packs", 0) == 0
     assert imported["history"] == 2
     assert all(not c["failed"] for c in result["categories"])
     assert result["reload_hints"] == {
@@ -629,11 +654,17 @@ def test_apply_into_fresh_env_roundtrip(src_env, tmp_path_factory, monkeypatch):
     assert (root / "user_data" / "watchlist.parquet").is_file()
     # 嵌套路径与二进制类别按原样落盘
     assert (root / "paper" / "accounts" / "acc1" / "nav" / "daily.jsonl").is_file()
-    assert (root / "sound_packs" / "ding.mp3").read_bytes() == b"ID3fakeaudio"
+    from app.state import list_ext_pages, read_sound_pack
 
-    # 回环: 新环境再导出, 条目集合一致
+    assert [page["id"] for page in list_ext_pages()] == ["mypage"]
+    assert read_sound_pack("ding.mp3") == (b"ID3fakeaudio", "mp3")
+
+    # 回环: 新环境再导出；偏好已迁 PG，不作为文件条目参与比较。
     data2, _ = config_backup.build_backup(categories=config_backup.CATEGORY_KEYS)
-    assert set(_zip_entries(data2)) == set(_zip_entries(data))
+    assert set(_zip_entries(data2)) == set(_zip_entries(data)) - {"user_data/preferences.json"}
+    from app.state import get_preferences
+
+    assert get_preferences()["quote_interval"] == 5
 
 
 def test_apply_conflict_default_skip_and_overwrite(src_env):
@@ -672,18 +703,15 @@ def test_apply_preferences_merges_not_replaces(src_env):
 
 def test_apply_secrets_via_store(src_env, tmp_path_factory, monkeypatch):
     data, _ = config_backup.build_backup(categories=config_backup.CATEGORY_KEYS)
-    root = _fresh_env(tmp_path_factory, monkeypatch)
-    (root / "user_data").mkdir(parents=True)
-    (root / "user_data" / "secrets.json").write_text(
-        json.dumps({"local_key": "lv"}), encoding="utf-8"
-    )
+    _fresh_env(tmp_path_factory, monkeypatch)
+    import app.secrets_store as secrets_store
+
+    secrets_store.save({"local_key": "lv"})
     result = config_backup.apply_archive(data)
     assert result["secrets_merged"] is True
 
     import app.secrets_store as secrets_store
 
-    secrets_store._cache = None
-    secrets_store._cache_sig = None
     merged = secrets_store.load()
     assert merged["ai_api_key"] == "sk-1"
     assert merged["local_key"] == "lv"

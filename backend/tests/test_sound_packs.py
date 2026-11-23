@@ -10,6 +10,16 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api import settings as settings_api
+from app.config import settings
+
+
+@pytest.fixture(autouse=True)
+def shared_root_alias(tmp_path, monkeypatch):
+    """DES-006: shared 根动态别名到 settings.data_dir，保持旧测试目录语义。"""
+    from app.state import shared
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(shared, "shared_data_root", lambda: settings.data_dir)
 
 
 @pytest.fixture
@@ -32,7 +42,8 @@ def test_upload_list_serve_roundtrip(client: TestClient, tmp_path: Path):
     )
     assert r.status_code == 200, r.text
     assert r.json()["pack"]["name"] == name
-    assert (tmp_path / "sound_packs" / name).read_bytes() == data
+    # DES-006: 音频正文已迁 user_blob，通过下载接口校验而非直读文件。
+    assert client.get(f"/api/settings/sound-packs/{name}/file").content == data
 
     listed = client.get("/api/settings/sound-packs").json()["packs"]
     assert [p["name"] for p in listed] == [name]
@@ -68,7 +79,7 @@ def test_upload_sanitizes_unsafe_stem(client: TestClient, tmp_path: Path):
     saved = r.json()["pack"]["name"]
     assert saved.endswith(".mp3")
     assert "/" not in saved and ".." not in saved and "*" not in saved
-    assert (tmp_path / "sound_packs" / saved).is_file()
+    assert client.get(f"/api/settings/sound-packs/{saved}/file").status_code == 200
 
 
 def test_upload_size_limit(client: TestClient, monkeypatch: pytest.MonkeyPatch):

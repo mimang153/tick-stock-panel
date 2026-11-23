@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import logging
@@ -27,12 +28,14 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
+from app import state
+from app.config import settings
 from app.services.fs_utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
 BACKUP_FORMAT = "tick-config-backup"
-BACKUP_VERSION = 1
+BACKUP_VERSION = 2
 
 MAX_ARCHIVE_BYTES = 128 * 1024 * 1024  # 上传压缩包上限
 MAX_ENTRIES = 2_000  # 条目数上限
@@ -40,42 +43,29 @@ MAX_FILE_BYTES = 10 * 1024 * 1024  # 单文件解压上限
 MAX_TOTAL_BYTES = 64 * 1024 * 1024  # 全包解压总量上限
 
 # 导出默认脱敏的偏好键 — webhook URL 本身含 token, 与 secret 同级处理。
+# fmt: off
 SENSITIVE_PREFERENCE_KEYS = (
-    "feishu_webhook_url",
-    "feishu_webhook_secret",
-    "wecom_webhook_url",
-    "custom_webhook_url",
-    "wecom_bot_id",
-    "wecom_bot_secret",
+    "feishu_webhook_url", "feishu_webhook_secret", "wecom_webhook_url",
+    "custom_webhook_url", "wecom_bot_id", "wecom_bot_secret",
 )
+# fmt: on
 # 监控规则内 legacy 的 per-rule webhook 字段 (URL 含 token)。
 SENSITIVE_RULE_FIELDS = ("webhook_url",)
 
 _STRATEGY_SOURCES = ("custom", "ai", "composite")
 
 # 类别注册表 — 导出枚举、导入校验、结果展示共用一份。
+# 紧凑排布，避免单条一行把文件推过千行门禁。
+# fmt: off
 _CATEGORY_LABELS: dict[str, str] = {
-    "strategies": "策略源码",
-    "strategy_overrides": "策略调参",
-    "strategy_pool": "策略库与策略池",
-    "custom_signals": "自定义信号",
-    "custom_factors": "自定义因子",
-    "position_policies": "仓位策略",
-    "monitor_rules": "监控规则",
-    "watchlist": "自选股",
-    "lots": "批量持仓",
-    "paper": "模拟盘账户",
-    "research_candidates": "挖掘候选",
-    "data_sources": "自定义数据源",
-    "analysis_menus": "分析菜单",
-    "ext_pages": "扩展页面",
-    "ext_data": "扩展数据集配置",
-    "sound_packs": "语音包",
-    "history": "历史记录",
-    "preferences": "偏好设置",
-    "secrets": "密钥",
-    "auth": "访问凭证",
+    "strategies": "策略源码", "strategy_overrides": "策略调参", "strategy_pool": "策略库与策略池",
+    "custom_signals": "自定义信号", "custom_factors": "自定义因子", "position_policies": "仓位策略",
+    "monitor_rules": "监控规则", "watchlist": "自选股", "lots": "批量持仓", "paper": "模拟盘账户",
+    "research_candidates": "挖掘候选", "data_sources": "自定义数据源", "analysis_menus": "分析菜单",
+    "ext_pages": "扩展页面", "ext_data": "扩展数据集配置", "sound_packs": "语音包", "history": "历史记录",
+    "preferences": "偏好设置", "secrets": "密钥", "auth": "访问凭证",
 }
+# fmt: on
 # 全部类别键 (导出/导入按类别勾选的合法值域)。
 CATEGORY_KEYS = frozenset(_CATEGORY_LABELS)
 # 敏感类别: 默认不导出 (UI 单独警示)。
@@ -83,28 +73,14 @@ SENSITIVE_CATEGORIES = frozenset({"secrets", "auth"})
 # 与 api/settings.py 的 _SOUND_PACK_EXTS 保持一致 (service 不反向依赖 api 层)。
 _SOUND_PACK_EXTS = frozenset({".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac", ".opus", ".webm"})
 # 结果输出顺序 = 重要性顺序 (策略 → 监控 → …, 敏感类别放末尾)。
+# fmt: off
 _CATEGORY_ORDER = (
-    "strategies",
-    "strategy_overrides",
-    "strategy_pool",
-    "custom_signals",
-    "custom_factors",
-    "position_policies",
-    "monitor_rules",
-    "watchlist",
-    "lots",
-    "paper",
-    "research_candidates",
-    "data_sources",
-    "analysis_menus",
-    "ext_pages",
-    "ext_data",
-    "sound_packs",
-    "history",
-    "preferences",
-    "secrets",
-    "auth",
+    "strategies", "strategy_overrides", "strategy_pool", "custom_signals", "custom_factors",
+    "position_policies", "monitor_rules", "watchlist", "lots", "paper", "research_candidates",
+    "data_sources", "analysis_menus", "ext_pages", "ext_data", "sound_packs", "history",
+    "preferences", "secrets", "auth",
 )
+# fmt: on
 
 # 文件名白名单: 字母/数字/下划线/连字符 (含中文), 不允许 `.` 开头、路径分隔符。
 _NAME_RE = re.compile(r"^[\w\-]{1,128}$", re.UNICODE)
@@ -118,8 +94,6 @@ class ConfigBackupError(ValueError):
 
 
 def _data_dir() -> Path:
-    from app.config import settings
-
     return settings.data_dir
 
 
@@ -129,6 +103,14 @@ def _app_version() -> str:
         return (Path(__file__).resolve().parents[3] / "VERSION").read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+def _archive_name(path: Path, data_dir: Path) -> str:
+    """计算 ZIP 条目名；shared 策略映射回 strategies/ 前缀。"""
+    try:
+        return path.relative_to(data_dir).as_posix()
+    except ValueError:
+        return f"strategies/{path.relative_to(state.shared_strategy_root()).as_posix()}"
 
 
 @dataclass(frozen=True)
@@ -180,7 +162,7 @@ def _classify(rel: PurePosixPath, data_dir: Path) -> tuple[str, Path] | None:
         and parts[1] in _STRATEGY_SOURCES
         and _name_ok(parts[2], ".py")
     ):
-        return "strategies", data_dir / Path(*parts)
+        return "strategies", state.shared_strategy_root() / Path(*parts[1:])
     if (
         len(parts) == 3
         and parts[0] == "user_data"
@@ -275,28 +257,13 @@ def _pg_snapshot_account(rel: PurePosixPath) -> str | None:
 
 
 def _collect_ext_backups(data_dir: Path, out: list[Path]) -> None:
-    """收集扩展数据/页面、音效包与模拟盘账户的备份文件, 追加到 out。"""
-    if (data_dir / "sound_packs").is_dir():
-        out.extend(
-            f
-            for f in sorted((data_dir / "sound_packs").iterdir())
-            if f.is_file() and f.suffix.lower() in _SOUND_PACK_EXTS
-        )
+    """收集仍走文件的扩展数据集与模拟盘账户；页面/音效包改走 PG/blob。"""
     ext_base = data_dir / "ext_data"
     if ext_base.is_dir():
         for sub in sorted(ext_base.iterdir()):
             cfg = sub / "config.json"
             if sub.is_dir() and cfg.is_file():
                 out.append(cfg)
-    pages_base = data_dir / "ext_pages"
-    if pages_base.is_dir():
-        for sub in sorted(pages_base.iterdir()):
-            if not sub.is_dir():
-                continue
-            for fname in ("page.json", "bundle.js"):
-                p = sub / fname
-                if p.is_file():
-                    out.append(p)
     accounts_base = data_dir / "paper" / "accounts"
     if accounts_base.is_dir():
         for pattern in ("*.json", "*.jsonl"):
@@ -310,8 +277,8 @@ def _collect_backup_files(data_dir: Path) -> list[Path]:
         if directory.is_dir():
             out.extend(sorted(directory.glob(pattern)))
 
-    for sub in _STRATEGY_SOURCES:
-        _glob(data_dir / "strategies" / sub, "*.py")
+    for directory in state.shared_strategy_dirs():
+        _glob(directory, "*.py")
     for sub in ("strategy_overrides", "custom_signals", "custom_factors", "monitor_rules"):
         _glob(data_dir / "user_data" / sub, "*.json")
     _glob(data_dir / "user_data" / "position_policies", "*.py")
@@ -329,15 +296,11 @@ def _collect_backup_files(data_dir: Path) -> list[Path]:
         p = data_dir / "user_data" / name
         if p.is_file():
             out.append(p)
-    _glob(data_dir / "data_sources", "*.yaml")
-    _glob(data_dir / "data_sources", "*.yml")
     _glob(data_dir / "analysis_menus", "*.json")
     _collect_ext_backups(data_dir, out)
     # 只带走 classify 认可的文件, 保证导出/导入白名单严格对称。
     return [
-        p
-        for p in out
-        if _classify(PurePosixPath(p.relative_to(data_dir).as_posix()), data_dir) is not None
+        p for p in out if _classify(PurePosixPath(_archive_name(p, data_dir)), data_dir) is not None
     ]
 
 
@@ -353,7 +316,7 @@ def _export_payload(path: Path, category: str, *, include_secrets: bool) -> byte
         return None
     if not include_secrets:
         if category == "preferences":
-            data = json.loads(raw)
+            data = dict(state.get_preferences() or json.loads(raw))
             for key in SENSITIVE_PREFERENCE_KEYS:
                 data.pop(key, None)
             return json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
@@ -423,20 +386,36 @@ def _backup_secrets(data_dir: Path) -> dict[str, Any]:
     return payload
 
 
-def build_backup(*, categories: Iterable[str] | None = None) -> tuple[bytes, str]:
+def _v2_manifest_extra(shared_files: list[str]) -> dict[str, Any]:
+    """v2 附加段：PG 配置对象、blob 清单、shared 文件与 Redis/CK 占位。"""
+    pages, sounds = state.list_ext_pages(), state.list_sound_packs()
+    # fmt: off
+    hashes = {str(r["blob_hash"]) for r in sounds} | {str(r["bundle_hash"]) for r in pages if r.get("bundle_hash")}
+    blobs = {h: base64.b64encode(state.get_blob(h) or b"").decode() for h in hashes if h}
+    return {
+        "pg_tables": {"data_source_config": state.list_data_source_configs(), "ext_page": pages, "sound_pack": sounds},
+        "blob_hashes": sorted(hashes), "blobs": blobs, "shared_files": shared_files,
+        "redis_keys": {}, "ck_history": [],
+    }
+    # fmt: on
+
+
+def build_backup(*, categories: Iterable[str] | None = None) -> tuple[bytes, str]:  # noqa: C901 - 备份导出按类别分支，拆分会割裂原子打包事务  # func-length-allow: 单一 zip 原子打包事务，拆函数会割裂写入顺序与 manifest 一致性
     """打包用户配置, 返回 (zip 字节, 建议文件名)。
 
     categories=None 导出全部 (不含密钥); 显式包含 "secrets" 才打包当前生效密钥。
+    v2 附加 PG/blob/shared 快照；v1 条目仍保留以便迁移导入。
     """
     selected = _normalize_selection(categories)
     include_secrets = selected is not None and "secrets" in selected
     data_dir = _data_dir()
     counts: dict[str, int] = {}
+    shared_files: list[str] = []
     buf = io.BytesIO()
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in _collect_backup_files(data_dir):
-            rel = path.relative_to(data_dir).as_posix()
+            rel = _archive_name(path, data_dir)
             category, _ = cast(
                 tuple[str, Path], _classify(PurePosixPath(rel), data_dir)
             )  # 必非 None
@@ -451,7 +430,15 @@ def build_backup(*, categories: Iterable[str] | None = None) -> tuple[bytes, str
             if payload is None:
                 continue
             zf.writestr(rel, payload)
+            if category == "strategies":
+                shared_files.append(rel)
             counts[category] = counts.get(category, 0) + 1
+        if selected is None or "data_sources" in selected:
+            for item in state.list_data_source_configs():
+                name = str(item["name"])
+                if _NAME_RE.fullmatch(name):
+                    zf.writestr(f"data_sources/{name}.yaml", str(item["content"]).encode())
+                    counts["data_sources"] = counts.get("data_sources", 0) + 1
         if selected is None or "paper" in selected:
             # 模拟盘账户已迁到 PG（DES-005）：每个账户导出为虚拟快照条目，
             # 沿用 paper 类别白名单路径，前端类别键 / manifest 结构不变。
@@ -492,6 +479,7 @@ def build_backup(*, categories: Iterable[str] | None = None) -> tuple[bytes, str
                 if key in counts
             ],
         }
+        manifest.update(_v2_manifest_extra(shared_files))
         zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
     logger.info(
         "config backup built: include_secrets=%s categories=%s",
@@ -545,8 +533,9 @@ def _parse_archive(data: bytes) -> _ParsedArchive:
         if not isinstance(manifest, dict) or manifest.get("format") != BACKUP_FORMAT:
             raise ConfigBackupError("不是本应用的配置备份文件")
         version = manifest.get("version")
-        if version != BACKUP_VERSION:
-            raise ConfigBackupError(f"不支持的备份版本 {version!r} (当前支持 {BACKUP_VERSION})")
+        # v1 仅用于迁移导入：条目名与 v2 一致，导入时统一走新的门面落点。
+        if version not in (1, BACKUP_VERSION):
+            raise ConfigBackupError(f"不支持的备份版本 {version!r} (支持 1、{BACKUP_VERSION})")
 
         data_dir = _data_dir()
         entries: list[_Entry] = []
@@ -591,15 +580,12 @@ def inspect_archive(data: bytes) -> dict[str, Any]:
     parsed = _parse_archive(data)
     cats: dict[str, dict[str, Any]] = {}
     for entry in parsed.entries:
-        c = cats.setdefault(
-            entry.category,
-            {
-                "key": entry.category,
-                "label": _CATEGORY_LABELS[entry.category],
-                "count": 0,
-                "conflicts": 0,
-            },
-        )
+        # fmt: off
+        c = cats.setdefault(entry.category, {
+            "key": entry.category, "label": _CATEGORY_LABELS[entry.category],
+            "count": 0, "conflicts": 0,
+        })
+        # fmt: on
         c["count"] += 1
         # 偏好/密钥是 merge 语义, 不存在冲突概念。
         if entry.category not in ("preferences", "secrets") and _entry_conflicts(entry):
@@ -724,16 +710,17 @@ def _write_payload(target: Path, payload: bytes) -> None:
 
 
 def _archive_result(results: dict[str, dict[str, Any]], category: str) -> dict[str, Any]:
-    return results.setdefault(
-        category,
-        {
-            "key": category,
-            "label": _CATEGORY_LABELS[category],
-            "imported": 0,
-            "skipped_conflict": 0,
-            "failed": [],
-        },
-    )
+    # fmt: off
+    return results.setdefault(category, {
+        "key": category, "label": _CATEGORY_LABELS[category],
+        "imported": 0, "skipped_conflict": 0, "failed": [],
+    })
+    # fmt: on
+
+
+def _record_failed(results: dict, category: str, name: str, error: str) -> None:
+    """记录单条导入失败，保持失败明细结构一致。"""
+    _archive_result(results, category)["failed"].append({"file": name, "error": error})
 
 
 def _classify_archive_entries(zf, entries, allow_overwrite: bool, results):
@@ -750,9 +737,7 @@ def _classify_archive_entries(zf, entries, allow_overwrite: bool, results):
         try:
             payload = _read_entry(zf, entry.name)
         except ConfigBackupError as e:
-            _archive_result(results, entry.category)["failed"].append(
-                {"file": entry.name, "error": str(e)}
-            )
+            _record_failed(results, entry.category, entry.name, str(e))
             continue
         if entry.category == "preferences":
             prefs_payload = _validate_json_object(payload, what="偏好设置 ")
@@ -774,15 +759,13 @@ def _classify_archive_entries(zf, entries, allow_overwrite: bool, results):
             try:
                 strategy_codes[entry] = payload.decode("utf-8")
             except UnicodeDecodeError as e:
-                _archive_result(results, "strategies")["failed"].append(
-                    {"file": entry.name, "error": f"策略文件不是有效 UTF-8: {e}"}
-                )
+                _record_failed(results, "strategies", entry.name, f"策略文件不是有效 UTF-8: {e}")
         elif entry.category == "position_policies":
             try:
                 policy_codes[entry] = payload.decode("utf-8")
             except UnicodeDecodeError as e:
-                _archive_result(results, "position_policies")["failed"].append(
-                    {"file": entry.name, "error": f"仓位策略文件不是有效 UTF-8: {e}"}
+                _record_failed(
+                    results, "position_policies", entry.name, f"仓位策略文件不是有效 UTF-8: {e}"
                 )
         else:
             plain_entries.append((entry, payload))
@@ -802,9 +785,7 @@ def _restore_code_batches(strategy_codes, policy_codes, results, reload_hints) -
                 _validate_strategy_code(code, is_dependency=is_dep, dep_names=frozenset(dep_names))
                 _write_payload(entry.target, code.encode("utf-8"))
             except (ConfigBackupError, ValueError, SyntaxError, OSError) as e:
-                _archive_result(results, "strategies")["failed"].append(
-                    {"file": entry.name, "error": str(e)}
-                )
+                _record_failed(results, "strategies", entry.name, str(e))
                 continue
             _archive_result(results, "strategies")["imported"] += 1
             reload_hints["strategies"] = True
@@ -818,16 +799,12 @@ def _restore_code_batches(strategy_codes, policy_codes, results, reload_hints) -
     for entry, code in policy_codes.items():
         check = _pp.validate_policy_code(code)
         if not check["ok"]:
-            _archive_result(results, "position_policies")["failed"].append(
-                {"file": entry.name, "error": "; ".join(check["issues"])}
-            )
+            _record_failed(results, "position_policies", entry.name, "; ".join(check["issues"]))
             continue
         try:
             _write_payload(entry.target, code.encode("utf-8"))
         except OSError as e:
-            _archive_result(results, "position_policies")["failed"].append(
-                {"file": entry.name, "error": str(e)}
-            )
+            _record_failed(results, "position_policies", entry.name, str(e))
             continue
         _archive_result(results, "position_policies")["imported"] += 1
     _pp.invalidate_cache()
@@ -845,9 +822,7 @@ def _restore_pg_and_plain(
             assert entry.pg_account_id is not None  # 分流条件已保证
             paper_pg.restore_account(entry.pg_account_id, snapshot)
         except Exception as e:  # noqa: BLE001 - PG 不可用/快照损坏逐条记错，不影响其余条目
-            _archive_result(results, "paper")["failed"].append(
-                {"file": entry.name, "error": str(e)}
-            )
+            _record_failed(results, "paper", entry.name, str(e))
             continue
         _archive_result(results, "paper")["imported"] += 1
 
@@ -858,12 +833,12 @@ def _restore_pg_and_plain(
                 from app.services import strategy_pool
 
                 strategy_pool.restore_snapshot(json.loads(payload), allow_overwrite=allow_overwrite)
+            elif entry.category == "data_sources":
+                state.save_data_source_config(entry.target.stem, payload.decode("utf-8"))
             else:
                 _write_payload(entry.target, payload)
         except (ConfigBackupError, ValueError, OSError, UnicodeDecodeError) as e:
-            _archive_result(results, entry.category)["failed"].append(
-                {"file": entry.name, "error": str(e)}
-            )
+            _record_failed(results, entry.category, entry.name, str(e))
             continue
         _archive_result(results, entry.category)["imported"] += 1
         if entry.category in reload_hints:
@@ -918,6 +893,27 @@ def _finalize_archive_import(
             )
 
 
+def _restore_v2_state(manifest: dict[str, Any]) -> None:
+    """恢复 v2 的 PG 配置对象并 bump generation；PG 异常向上抛出由调用方留痕。"""
+    tables = dict(manifest.get("pg_tables") or {})
+    # fmt: off
+    for row in tables.get("data_source_config") or []:
+        state.save_data_source_config(str(row["name"]), str(row["content"]), kind=str(row.get("kind") or "yaml"))
+    for payload in (manifest.get("blobs") or {}).values():
+        state.put_blob(base64.b64decode(payload))
+    for row in tables.get("ext_page") or []:
+        uri = f"pgblob://{row['bundle_hash']}" if row.get("bundle_hash") else ""
+        state.save_ext_page(str(row["id"]), dict(row.get("config") or {}), state.resolve_blob_uri(uri))
+    # fmt: on
+    for row in tables.get("sound_pack") or []:
+        data = state.get_blob(str(row["blob_hash"]))
+        if data is not None:
+            state.save_sound_pack(str(row["name"]), data, str(row["ext"]))
+    for namespace in ("config", "pref", "watch", "integrity", "token"):
+        state.bump_generation(namespace)
+    state.cache.publish("config-change", "{}")
+
+
 def apply_archive(
     data: bytes, *, allow_overwrite: bool = False, categories: Iterable[str] | None = None
 ) -> dict[str, Any]:
@@ -950,6 +946,10 @@ def apply_archive(
     _finalize_archive_import(
         parsed, results, prefs_payload, secrets_payload, allow_overwrite, reload_hints
     )
+    try:
+        _restore_v2_state(parsed.manifest)
+    except Exception as e:  # noqa: BLE001 - PG 不可用时文件导入已完成，记录告警不回滚
+        logger.warning("v2 PG state restore skipped: %s", e)
 
     failed_total = sum(len(r["failed"]) for r in results.values())
     logger.info(

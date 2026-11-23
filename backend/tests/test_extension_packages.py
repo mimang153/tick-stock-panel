@@ -361,6 +361,8 @@ with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 12345)) a
     env = {
         **os.environ,
         "DATA_DIR": str(tmp_path),
+        # DES-006: 显式隔离 shared 根，避免子进程启动校验写到仓库只读 data/shared。
+        "SHARED_DATA_ROOT": str(tmp_path / "shared"),
         "STATIC_DIR": str(static_dir),
         "TICKFLOW_API_KEY": "",
         "AI_API_KEY": "",

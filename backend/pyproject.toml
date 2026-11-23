@@ -46,6 +46,7 @@ dependencies = [
     "clickhouse-connect>=0.9",
     # PostgreSQL 事务层：模拟盘账户资金状态（DES-005），binary 自带 libpq 免系统依赖。
     "psycopg[binary]>=3.1",
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]

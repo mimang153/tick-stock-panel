@@ -22,11 +22,11 @@ from typing import cast
 import yaml
 from packaging.version import Version
 
-from app.config import settings
 from app.services.fs_utils import atomic_write_text
 from app.services.package_archive import MAX_EXPANDED as MAX_EXPANDED
 from app.services.package_archive import MAX_UPLOAD as MAX_UPLOAD
 from app.services.package_archive import compatibility, read_code_archive
+from app.state import get_data_source_config, shared_plugin_root
 
 NAME = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 VERSION = re.compile(r"\d+\.\d+\.\d+(?:[a-zA-Z0-9.+-]*)\Z")
@@ -37,8 +37,8 @@ _started: set[str] = set()
 
 
 def root() -> Path:
-    """返回插件包根目录。"""
-    return settings.data_dir / "plugins"
+    """返回用户插件包根目录（shared/plugins）。"""
+    return shared_plugin_root()
 
 
 def directory(name: str) -> Path:
@@ -192,10 +192,7 @@ def inspect_archive(data: bytes) -> tuple[dict, dict[str, bytes]]:
     if (
         (loader.plugins_dir() / doc["name"]).exists()
         or doc["name"] == "tickflow"
-        or any(
-            (loader.data_sources_dir() / f"{doc['name']}{suffix}").exists()
-            for suffix in (".yaml", ".yml")
-        )
+        or get_data_source_config(doc["name"]) is not None
     ):
         raise ValueError("插件名称与内置插件或 HTTP 数据源冲突")
     state = read_state(doc["name"])
@@ -516,10 +513,7 @@ def discover():
                 if (
                     (loader.plugins_dir() / name).exists()
                     or name == "tickflow"
-                    or any(
-                        (loader.data_sources_dir() / f"{name}{suffix}").exists()
-                        for suffix in (".yaml", ".yml")
-                    )
+                    or get_data_source_config(name) is not None
                 ):
                     raise ValueError("插件名称冲突")
                 loader.refresh_plugin(name, manifest_doc=doc)

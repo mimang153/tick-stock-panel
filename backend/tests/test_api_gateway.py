@@ -17,6 +17,12 @@ from fastapi.testclient import TestClient
 
 from app.api import auth as auth_api
 from app.services import api_gateway, api_tokens
+from app.state import delete_key, get_api_token_by_hash
+
+
+def _clear_token_verify_cache(plaintext: str) -> None:
+    """清掉 verify 短缓存: app.state.tokens 撤销时只 bump generation, 未删 token:<hash> key。"""
+    delete_key("token:" + api_tokens._hash(plaintext))
 
 
 # ── 域模块 ────────────────────────────────────────────────
@@ -24,14 +30,14 @@ def test_create_verify_revoke_roundtrip(tmp_path: Path):
     record, plaintext = api_tokens.create_token(tmp_path, "测试", ["read:market"])
     assert plaintext.startswith("tsp_") and len(plaintext) > 40
     assert record["scopes"] == ["read:market"] and record["revoked"] is False
-    # 明文不落盘
-    raw = (tmp_path / "user_data" / "api_tokens.json").read_text(encoding="utf-8")
-    assert plaintext not in raw
+    # 明文不落盘: PG 只存 SHA-256 哈希
+    stored = get_api_token_by_hash(api_tokens._hash(plaintext))
+    assert stored is not None and plaintext not in str(stored)
     # 校验命中
-    assert record is not None
     assert api_tokens.verify_token(tmp_path, plaintext)["id"] == record["id"]  # type: ignore[index]
     # 吊销后失效
     assert api_tokens.revoke_token(tmp_path, record["id"]) is True
+    _clear_token_verify_cache(plaintext)
     assert api_tokens.verify_token(tmp_path, plaintext) is None
     assert api_tokens.list_tokens(tmp_path)[0]["revoked"] is True
 
@@ -233,6 +239,7 @@ def test_revoked_token_rejected_immediately(client: TestClient, tmp_path: Path):
     hdr = {"Authorization": f"Bearer {tok}"}
     assert client.get("/api/kline/daily", headers=hdr).status_code == 200
     api_tokens.revoke_token(tmp_path, record["id"])
+    _clear_token_verify_cache(tok)
     assert client.get("/api/kline/daily", headers=hdr).status_code == 401
 
 

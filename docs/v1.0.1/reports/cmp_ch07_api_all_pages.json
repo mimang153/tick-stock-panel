@@ -1,0 +1,1186 @@
+{
+  "generated_at": "2026-11-21T17:16:32",
+  "window": {
+    "start": "2026-11-12",
+    "end": "2026-11-13"
+  },
+  "summary": {
+    "total": 97,
+    "ok": 57,
+    "diff": 40,
+    "blocked": 0
+  },
+  "by_page": {
+    "全局": {
+      "total": 12,
+      "ok": 3,
+      "diff": 9,
+      "blocked": 0
+    },
+    "看板": {
+      "total": 4,
+      "ok": 2,
+      "diff": 2,
+      "blocked": 0
+    },
+    "自选": {
+      "total": 4,
+      "ok": 1,
+      "diff": 3,
+      "blocked": 0
+    },
+    "选股": {
+      "total": 5,
+      "ok": 3,
+      "diff": 2,
+      "blocked": 0
+    },
+    "指数": {
+      "total": 3,
+      "ok": 0,
+      "diff": 3,
+      "blocked": 0
+    },
+    "异动": {
+      "total": 2,
+      "ok": 0,
+      "diff": 2,
+      "blocked": 0
+    },
+    "复盘": {
+      "total": 3,
+      "ok": 2,
+      "diff": 1,
+      "blocked": 0
+    },
+    "K线": {
+      "total": 5,
+      "ok": 4,
+      "diff": 1,
+      "blocked": 0
+    },
+    "数据": {
+      "total": 6,
+      "ok": 1,
+      "diff": 5,
+      "blocked": 0
+    },
+    "回测": {
+      "total": 14,
+      "ok": 12,
+      "diff": 2,
+      "blocked": 0
+    },
+    "因子": {
+      "total": 3,
+      "ok": 2,
+      "diff": 1,
+      "blocked": 0
+    },
+    "市场环境": {
+      "total": 5,
+      "ok": 5,
+      "diff": 0,
+      "blocked": 0
+    },
+    "设置": {
+      "total": 13,
+      "ok": 10,
+      "diff": 3,
+      "blocked": 0
+    },
+    "开发者": {
+      "total": 1,
+      "ok": 1,
+      "diff": 0,
+      "blocked": 0
+    },
+    "模拟盘": {
+      "total": 4,
+      "ok": 4,
+      "diff": 0,
+      "blocked": 0
+    },
+    "预警": {
+      "total": 1,
+      "ok": 1,
+      "diff": 0,
+      "blocked": 0
+    },
+    "持仓提醒": {
+      "total": 1,
+      "ok": 1,
+      "diff": 0,
+      "blocked": 0
+    },
+    "信号": {
+      "total": 2,
+      "ok": 2,
+      "diff": 0,
+      "blocked": 0
+    },
+    "财务": {
+      "total": 6,
+      "ok": 1,
+      "diff": 5,
+      "blocked": 0
+    },
+    "个股分析": {
+      "total": 2,
+      "ok": 1,
+      "diff": 1,
+      "blocked": 0
+    },
+    "ext-data": {
+      "total": 1,
+      "ok": 1,
+      "diff": 0,
+      "blocked": 0
+    }
+  },
+  "cases": [
+    {
+      "page": "全局",
+      "case": "auth_status",
+      "path": "/api/auth/status",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".authenticated: origin=False dev=True; .configured: origin=False dev=True"
+    },
+    {
+      "page": "全局",
+      "case": "capabilities",
+      "path": "/api/capabilities",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".capabilities.adj_factor: dev 缺失; .capabilities.financial: dev 缺失"
+    },
+    {
+      "page": "全局",
+      "case": "settings",
+      "path": "/api/settings",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "全局",
+      "case": "preferences",
+      "path": "/api/settings/preferences",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".adj_factor_provider: origin='fuyao' dev='tickflow'; .backtest_worker_rss_limit_gib: origin=6 dev=8; .daily_batch_compress: origin=True dev=False; .email_smtp_config.host: origin='' dev='smtp.example.com'; .financial_data_provider: origin='fuyao' dev='tickflow'"
+    },
+    {
+      "page": "全局",
+      "case": "capability_matrix",
+      "path": "/api/settings/capability-matrix",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".capabilities[1].current: origin='fuyao' dev='tickflow'; .capabilities[1].current_display: origin='fuyao' dev='TickFlow'; .capabilities[1].effective: origin='fuyao' dev='tickflow'; .capabilities[1].effective_display: origin='fuyao' dev='TickFlow'; .capabilities[1].usable: origin=True dev=False"
+    },
+    {
+      "page": "全局",
+      "case": "data_integrity",
+      "path": "/api/data/integrity",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".data_revisions.etf: origin='0:b373f18e60bd4d4b81cc94a58fa04965' dev='1ba874f6508540de86bd9f4fc80d83bb:ad7ddb72cf1b4e26a6ff0a19dcba16ee'; .data_revisions.index: origin='b373f18e60bd4d4b81cc94a58fa04965' dev='ad7ddb72cf1b4e26a6ff0a19dcba16ee'; .data_revisions.stock: origin='077f13a99fa14b3cb5f11b04e3fc3dee:b373f18e60bd4d4b81cc94a58fa04965' dev='737e45dabd094751b01779b7d3d04613:ad7ddb72cf1b4e26a6ff0a19dcba16ee'; .report.asset_types[1]: origin='index' dev='etf'; .report.backup_dir: dev 缺失"
+    },
+    {
+      "page": "全局",
+      "case": "intraday_status",
+      "path": "/api/intraday/status",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".mode: origin='full_market' dev='none'; .realtime_allowed: origin=True dev=False"
+    },
+    {
+      "page": "全局",
+      "case": "quote_interval",
+      "path": "/api/settings/preferences/quote-interval",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".min_interval: origin=1.0 dev=6.0"
+    },
+    {
+      "page": "全局",
+      "case": "data_version",
+      "path": "/api/data/version",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "全局",
+      "case": "data_status",
+      "path": "/api/data/status",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".adj_factor: origin={'rows': 4956, 'symbols_covered': 3779, 'earliest_date': '2025-11-17', 'latest_date': '2026-11-19', 'trading_days': 223} dev=None; .daily: origin={'rows': 0, 'earliest_date': '2025-11-17', 'latest_date': '2026-11-19', 'symbols_covered': 5537, 'trading_days': 245} dev=None; .enriched: origin={'rows': 0, 'fields': 15, 'earliest_date': '2025-11-17', 'latest_date': '2026-11-19', 'symbols_covered': 5537, 'trading_days': 245} dev=None; .index_daily: origin={'rows': 146468, 'earliest_date': '2025-11-17', 'latest_date': '2026-11-19', 'symbols_covered': 599, 'trading_days': 245} dev=None; .index_enriched: origin={'rows': 146468, 'earliest_date': '2025-11-17', 'latest_date': '2026-11-19', 'symbols_covered': 599, 'trading_days': 245, 'fields': 12} dev=None"
+    },
+    {
+      "page": "全局",
+      "case": "intraday_versions",
+      "path": "/api/intraday/data-versions",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".versions.daily: origin='1795159010022810538:0' dev='1795252531729941917:0'; .versions.minute: origin='1795159010022810538:0' dev='1795252531729941917:0'"
+    },
+    {
+      "page": "全局",
+      "case": "task_registry",
+      "path": "/api/task-registry",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "看板",
+      "case": "overview_market",
+      "path": "/api/overview/market",
+      "params": {
+        "as_of": "2026-11-13"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".active_leaders[2].amount: origin=557261159.0 dev=341376036.0; .active_leaders[2].board: origin='科创板' dev='北交所'; .active_leaders[2].change_pct: origin=-0.124989 dev=0.030754; .active_leaders[2].close: origin=95.98 dev=61.0; .active_leaders[2].name: origin='钶锐锶' dev='宇特光电'"
+    },
+    {
+      "page": "看板",
+      "case": "pipeline_jobs",
+      "path": "/api/pipeline/jobs",
+      "params": {
+        "limit": "1"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".jobs[0].duration_s: origin=144.0 dev=95.0; .jobs[0].finished_at: origin='2026-11-20T07:37:24Z' dev='2026-11-21T04:45:14Z'; .jobs[0].id: origin='da71465f5a' dev='544b013641'; .jobs[0].result.adj_factor_symbols: dev 缺失; .jobs[0].result.daily_days: dev 缺失"
+    },
+    {
+      "page": "看板",
+      "case": "alerts",
+      "path": "/api/alerts",
+      "params": {
+        "days": "7",
+        "limit": "10"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "看板",
+      "case": "emotion_config",
+      "path": "/api/settings/emotion-score/config",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "自选",
+      "case": "instruments_search",
+      "path": "/api/kline/instruments/search",
+      "params": {
+        "q": "600519"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "自选",
+      "case": "watchlist",
+      "path": "/api/watchlist",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".symbols: 长度 origin=0 dev=10"
+    },
+    {
+      "page": "自选",
+      "case": "watchlist_groups",
+      "path": "/api/watchlist/groups",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".groups: 长度 origin=0 dev=18"
+    },
+    {
+      "page": "自选",
+      "case": "watchlist_enriched",
+      "path": "/api/watchlist/enriched",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".elapsed_ms: origin=0 dev=446.956651; .rows: 长度 origin=0 dev=10"
+    },
+    {
+      "page": "选股",
+      "case": "strategies",
+      "path": "/api/strategies",
+      "params": {
+        "asset_type": "stock",
+        "timeframe": "day"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "选股",
+      "case": "screener_cached",
+      "path": "/api/screener/cached",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "选股",
+      "case": "market_snapshot",
+      "path": "/api/screener/market-snapshot",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".rows[0].amount: origin=1879247328.0 dev=2645742573.0; .rows[0].change_pct: origin=-0.013115 dev=0.019056; .rows[0].close: origin=12.04 dev=12.3; .rows[0].float_market_cap: origin=233644447291.63998 dev=238689925389.30002; .rows[0].market_cap: origin=233647255103.91998 dev=238692793835.40002"
+    },
+    {
+      "page": "选股",
+      "case": "limit_ladder",
+      "path": "/api/screener/limit-ladder",
+      "params": {
+        "as_of": "2026-11-13"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "选股",
+      "case": "rps_rotation",
+      "path": "/api/rps/rotation",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".columns.2026-11-04: dev 缺失; .columns.2026-11-05: dev 缺失; .columns.2026-11-06: dev 缺失; .columns.2026-11-09: dev 缺失; .columns.2026-11-10: dev 缺失"
+    },
+    {
+      "page": "指数",
+      "case": "intraday_indices",
+      "path": "/api/intraday/indices",
+      "params": {
+        "symbols": "000001.SH"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".rows[0].change_amount: origin=-10.213 dev=-43.825; .rows[0].change_pct: origin=-0.284657 dev=-1.224977; .rows[0].close: origin=3577.618 dev=3533.793; .rows[0].date: origin='2026-11-19' dev='2026-11-20'; .rows[0].last_price: origin=3577.618 dev=3533.793"
+    },
+    {
+      "page": "指数",
+      "case": "index_daily",
+      "path": "/api/index/daily",
+      "params": {
+        "symbol": "000001.SH",
+        "start_date": "2026-11-12",
+        "end_date": "2026-11-13"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".index_info.asset_type: dev 缺失; .index_info.exchange: origin 缺失; .index_info.float_shares: origin 缺失; .index_info.limit_down: origin 缺失; .index_info.limit_up: origin 缺失"
+    },
+    {
+      "page": "指数",
+      "case": "index_minute",
+      "path": "/api/index/minute",
+      "params": {
+        "symbol": "000001.SH",
+        "date": "2026-11-13"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".index_info.asset_type: dev 缺失; .index_info.exchange: origin 缺失; .index_info.float_shares: origin 缺失; .index_info.limit_down: origin 缺失; .index_info.limit_up: origin 缺失"
+    },
+    {
+      "page": "异动",
+      "case": "abnormal_overview",
+      "path": "/api/abnormal/overview",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".cache_date: origin='2026-11-19' dev=None; .counts.edge: origin=131 dev=0; .counts.triggered: origin=56 dev=0; .counts.watch: origin=332 dev=0; .rows: 长度 origin=200 dev=0"
+    },
+    {
+      "page": "异动",
+      "case": "abnormal_intraday",
+      "path": "/api/abnormal/intraday",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".cache_date: origin='2026-11-19' dev=None; .counts.broken: dev 缺失; .counts.limit_down: dev 缺失; .counts.limit_up: dev 缺失; .counts.new_high: dev 缺失"
+    },
+    {
+      "page": "复盘",
+      "case": "auction_benchmark",
+      "path": "/api/market-recap/auction-benchmark",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".items[0].auction_pct: origin=4.5184 dev=-8.2025; .items[0].day0_oc: origin=-0.050057 dev=0.01082; .items[0].day0_pct: origin=-0.007134 dev=-0.072092; .items[0].name: origin='华胜天成' dev='九阳股份'; .items[0].tags[0]: origin='IT服务Ⅲ' dev='小家电Ⅲ'"
+    },
+    {
+      "page": "复盘",
+      "case": "market_recap_reports",
+      "path": "/api/market-recap/reports",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "复盘",
+      "case": "dragon_tiger",
+      "path": "/api/market-recap/dragon-tiger",
+      "params": {
+        "date": "2026-11-13"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "K线",
+      "case": "daily",
+      "path": "/api/kline/daily",
+      "params": {
+        "symbol": "600519.SH",
+        "start_date": "2026-11-12",
+        "end_date": "2026-11-13"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".rows[0].annual_vol_20d: origin=0.262207 dev=509.548782; .rows[0].atr_14: origin=28.437017 dev=195.400288; .rows[0].boll_lower: origin=1272.10549 dev=164.876256; .rows[0].boll_upper: origin=1497.77551 dev=2172.760744; .rows[0].deviate_10d: dev 缺失"
+    },
+    {
+      "page": "K线",
+      "case": "daily_latest",
+      "path": "/api/kline/daily/latest",
+      "params": {
+        "symbol": "600519.SH"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "K线",
+      "case": "minute",
+      "path": "/api/kline/minute",
+      "params": {
+        "symbol": "600519.SH",
+        "date": "2026-11-13"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "K线",
+      "case": "minute_range",
+      "path": "/api/kline/minute-range",
+      "params": {
+        "symbol": "600519.SH",
+        "days": "2"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "K线",
+      "case": "minute_gaps",
+      "path": "/api/kline/minute-gaps",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "数据",
+      "case": "regime_coverage",
+      "path": "/api/regime/coverage",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "数据",
+      "case": "data_workload",
+      "path": "/api/data/workload",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".groups.http.backtest: dev 缺失; .groups.http.kline.max_ms: origin=2547.660538 dev=707.497458; .groups.http.kline.request: origin=56 dev=6; .groups.http.kline.total_ms: origin=3123.595011 dev=1571.549137; .groups.http.overview.max_ms: origin=247.459779 dev=9692.37148"
+    },
+    {
+      "page": "数据",
+      "case": "minute_refresh_status",
+      "path": "/api/settings/minute-refresh/status",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".enabled: origin=False dev=True; .gate_reason: origin='disabled' dev='capability'; .provider: origin='tickflow' dev='unavailable:missing_src'; .provider_effective: origin='tickflow' dev='unavailable:missing_src'; .running: origin=True dev=False"
+    },
+    {
+      "page": "数据",
+      "case": "ext_data_list",
+      "path": "/api/ext-data",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".items[0].latest_sync_date: origin='2026-11-21 15:17:38' dev='2026-11-21 12:46:57'; .items[0].pull.last_run: origin='2026-11-21T07:17:38.674762+00:00' dev='2026-11-21T04:46:57.886938+00:00'; .items[0].pull.next_run: origin='2026-11-22T07:17:38.675496+00:00' dev='2026-11-22T04:46:57.974144+00:00'; .items[1].latest_sync_date: origin='2026-11-21 15:17:56' dev='2026-11-21 12:46:39'; .items[1].pull.last_run: origin='2026-11-21T07:17:56.118260+00:00' dev='2026-11-21T04:46:40.338395+00:00'"
+    },
+    {
+      "page": "数据",
+      "case": "financial_status",
+      "path": "/api/financials/status",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".available: origin=True dev=False; .last_sync: dev 缺失; .syncing: dev 缺失; .tables.balance_sheet: dev 缺失; .tables.cash_flow: dev 缺失"
+    },
+    {
+      "page": "数据",
+      "case": "pipeline_jobs_data",
+      "path": "/api/pipeline/jobs",
+      "params": {
+        "limit": "15"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".jobs: 长度 origin=7 dev=15; .jobs[0].duration_s: origin=144.0 dev=95.0; .jobs[0].finished_at: origin='2026-11-20T07:37:24Z' dev='2026-11-21T04:45:14Z'; .jobs[0].id: origin='da71465f5a' dev='544b013641'; .jobs[0].result.adj_factor_symbols: dev 缺失"
+    },
+    {
+      "page": "回测",
+      "case": "status",
+      "path": "/api/backtest/status",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "回测",
+      "case": "candidates",
+      "path": "/api/backtest/candidates",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "回测",
+      "case": "factor_columns",
+      "path": "/api/backtest/factor/columns",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "回测",
+      "case": "factors",
+      "path": "/api/factors",
+      "params": {
+        "asset_type": "stock"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "回测",
+      "case": "guardian_overview",
+      "path": "/api/backtest/guardian/overview",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "回测",
+      "case": "guardian_runs",
+      "path": "/api/backtest/guardian/runs",
+      "params": {
+        "limit": "10"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "回测",
+      "case": "guardian_config",
+      "path": "/api/backtest/guardian/config",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "回测",
+      "case": "lab_report",
+      "path": "/api/backtest/lab/report",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "回测",
+      "case": "mining_availability",
+      "path": "/api/backtest/mining/availability",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".available_end: origin='2026-11-19' dev='2026-11-16'; .effective_end: origin='2026-11-19' dev='2026-11-16'; .trading_bars: origin=245 dev=263"
+    },
+    {
+      "page": "回测",
+      "case": "mining_lock",
+      "path": "/api/backtest/mining/lock",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".held: origin=True dev=False; .holder: origin={'schema_version': 1, 'pid': 114, 'started_at': '2026-11-20T07:16:49.661605+00:00', 'role': 'app', 'host': '326e745edf83', 'process_started_at': 1795159006.93} dev=None; .holder_alive: origin=True dev=False; .holder_source: origin='file' dev=None; .mine: origin=True dev=False"
+    },
+    {
+      "page": "回测",
+      "case": "mining_runs",
+      "path": "/api/backtest/mining/runs",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "回测",
+      "case": "mining_config",
+      "path": "/api/backtest/mining/config",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "回测",
+      "case": "position_policies",
+      "path": "/api/backtest/position-policies",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "回测",
+      "case": "position_templates",
+      "path": "/api/backtest/position-policies/templates",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "因子",
+      "case": "factors_all",
+      "path": "/api/factors",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "因子",
+      "case": "definitions",
+      "path": "/api/definitions",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "因子",
+      "case": "definition_resources",
+      "path": "/api/definitions/resources",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".items: 长度 origin=20 dev=45"
+    },
+    {
+      "page": "市场环境",
+      "case": "regime_history",
+      "path": "/api/regime/history",
+      "params": {
+        "start": "2026-11-12",
+        "end": "2026-11-13"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "市场环境",
+      "case": "regime_latest",
+      "path": "/api/regime/latest",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "市场环境",
+      "case": "regime_states",
+      "path": "/api/regime/states",
+      "params": {
+        "days": "7"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "市场环境",
+      "case": "regime_phases",
+      "path": "/api/regime/phases",
+      "params": {
+        "start": "2026-11-12",
+        "end": "2026-11-13"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "市场环境",
+      "case": "regime_mainline",
+      "path": "/api/regime/mainline",
+      "params": {
+        "start": "2026-11-12",
+        "end": "2026-11-13"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "设置",
+      "case": "data_sources",
+      "path": "/api/settings/data-sources",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "设置",
+      "case": "monitor_rules",
+      "path": "/api/monitor-rules",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "设置",
+      "case": "monitor_options",
+      "path": "/api/monitor-rules/options",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "设置",
+      "case": "lots",
+      "path": "/api/lots",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "设置",
+      "case": "ext_pages",
+      "path": "/api/ext-pages",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "设置",
+      "case": "ext_namespaces",
+      "path": "/api/ext-pages/import-source/namespaces",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "设置",
+      "case": "analysis_menus",
+      "path": "/api/analysis-menus",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "设置",
+      "case": "strategy_pool",
+      "path": "/api/strategy-pool",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".meta.ai_0475585bf5: origin 缺失; .meta.ai_06b83b9187: origin 缺失; .meta.ai_074a982dd4: origin 缺失; .meta.ai_0c9ff48513: origin 缺失; .meta.ai_118e258b1a: origin 缺失"
+    },
+    {
+      "page": "设置",
+      "case": "extension_packages",
+      "path": "/api/extension-packages",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "设置",
+      "case": "sound_packs",
+      "path": "/api/settings/sound-packs",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".packs: 长度 origin=0 dev=2"
+    },
+    {
+      "page": "设置",
+      "case": "endpoints",
+      "path": "/api/settings/endpoints",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "设置",
+      "case": "upgrade_guard",
+      "path": "/api/upgrade-guard/status",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "设置",
+      "case": "market_recap_prompt",
+      "path": "/api/settings/preferences/market-recap-prompt",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".custom: origin='' dev='新提示词'; .customized: origin=False dev=True"
+    },
+    {
+      "page": "开发者",
+      "case": "kline_minute",
+      "path": "/api/kline/minute",
+      "params": {
+        "symbol": "600519.SH",
+        "date": "2026-11-13"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "模拟盘",
+      "case": "paper_accounts",
+      "path": "/api/paper/accounts",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "模拟盘",
+      "case": "paper_account",
+      "path": "/api/paper/account",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "模拟盘",
+      "case": "paper_positions",
+      "path": "/api/paper/positions",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "模拟盘",
+      "case": "paper_compare",
+      "path": "/api/paper/compare",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "预警",
+      "case": "alerts_500",
+      "path": "/api/alerts",
+      "params": {
+        "days": "7",
+        "limit": "500"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "持仓提醒",
+      "case": "lots_page",
+      "path": "/api/lots",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "信号",
+      "case": "custom_signals",
+      "path": "/api/custom-signals",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "信号",
+      "case": "signal_options",
+      "path": "/api/custom-signals/options",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "财务",
+      "case": "metrics",
+      "path": "/api/financials/metrics",
+      "params": {
+        "symbol": "600519.SH"
+      },
+      "origin_status": 200,
+      "dev_status": 403,
+      "verdict": "DIFF",
+      "reason": "状态码不同: 200 vs 403"
+    },
+    {
+      "page": "财务",
+      "case": "income",
+      "path": "/api/financials/income",
+      "params": {
+        "symbol": "600519.SH"
+      },
+      "origin_status": 200,
+      "dev_status": 403,
+      "verdict": "DIFF",
+      "reason": "状态码不同: 200 vs 403"
+    },
+    {
+      "page": "财务",
+      "case": "balance_sheet",
+      "path": "/api/financials/balance-sheet",
+      "params": {
+        "symbol": "600519.SH"
+      },
+      "origin_status": 200,
+      "dev_status": 403,
+      "verdict": "DIFF",
+      "reason": "状态码不同: 200 vs 403"
+    },
+    {
+      "page": "财务",
+      "case": "cash_flow",
+      "path": "/api/financials/cash-flow",
+      "params": {
+        "symbol": "600519.SH"
+      },
+      "origin_status": 200,
+      "dev_status": 403,
+      "verdict": "DIFF",
+      "reason": "状态码不同: 200 vs 403"
+    },
+    {
+      "page": "财务",
+      "case": "shares",
+      "path": "/api/financials/shares",
+      "params": {
+        "symbol": "600519.SH"
+      },
+      "origin_status": 200,
+      "dev_status": 403,
+      "verdict": "DIFF",
+      "reason": "状态码不同: 200 vs 403"
+    },
+    {
+      "page": "财务",
+      "case": "reports",
+      "path": "/api/financials/reports",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "个股分析",
+      "case": "stock_levels",
+      "path": "/api/stock-analysis/levels",
+      "params": {
+        "symbol": "600519.SH",
+        "days": "30"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".close: origin=1460.21 dev=1453.9; .dates[3]: origin='2026-09-28' dev='2026-09-25'; .dates[4]: origin='2026-09-29' dev='2026-09-26'; .dates[5]: origin='2026-09-30' dev='2026-09-27'; .dates[6]: origin='2026-10-08' dev='2026-09-28'"
+    },
+    {
+      "page": "个股分析",
+      "case": "stock_reports",
+      "path": "/api/stock-analysis/reports",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "page": "ext-data",
+      "case": "schema_all",
+      "path": "/api/ext-data/schema-all",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    }
+  ]
+}

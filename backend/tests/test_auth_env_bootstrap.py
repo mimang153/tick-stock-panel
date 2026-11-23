@@ -18,14 +18,14 @@ def isolated_auth_store(
     monkeypatch.setattr(app_config.settings, "data_dir", tmp_path)
     from app.services import auth
 
+    # DES-006: 密码存 PG、会话存 Redis, auth.json 仅为兼容展示的虚拟路径;
+    # 真实状态由 conftest 的 _user_state 夹具在每例前后重置。
     auth_path = tmp_path / "user_data" / "auth.json"
     env_path = tmp_path / ".env"
     monkeypatch.setattr(app_config, "_ENV_FILE", env_path)
     monkeypatch.setattr(app_config.settings, "auth_password", "")
-    auth._sessions.clear()
     auth._configured_cache = None
     yield auth, auth_path, env_path
-    auth._sessions.clear()
     auth._configured_cache = None
 
 
@@ -34,7 +34,7 @@ def test_bootstrap_recovers_compose_interpolated_password_from_raw_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    auth, auth_path, env_path = isolated_auth_store
+    auth, _auth_path, env_path = isolated_auth_store
     password = "pw${special}-secret"
     env_path.write_text(
         f"AUTH_PASSWORD={password}\nDATA_DIR={tmp_path}\n",
@@ -47,9 +47,12 @@ def test_bootstrap_recovers_compose_interpolated_password_from_raw_env(
     configured.auth_password = "pw-secret"  # 模拟 Compose 将未定义的 ${special} 插值为空串
     monkeypatch.setattr(app_config, "settings", configured)
 
+    from app.state import get_auth
+
     assert auth.bootstrap_from_env() is True
-    assert auth_path.exists()
-    assert password not in auth_path.read_text(encoding="utf-8")
+    stored = get_auth()
+    assert stored is not None and password not in str(stored)
+    assert stored["hash_algo"] == "pbkdf2_sha256"
     assert auth.verify_and_create_session(password) is not None
     assert auth.verify_and_create_session("pw-secret") is None
 
@@ -57,13 +60,15 @@ def test_bootstrap_recovers_compose_interpolated_password_from_raw_env(
 def test_bootstrap_from_env_does_not_override_existing_password(
     isolated_auth_store: tuple[ModuleType, Path, Path],
 ) -> None:
-    auth, auth_path, env_path = isolated_auth_store
+    from app.state import get_auth
+
+    auth, _auth_path, env_path = isolated_auth_store
     auth.set_password("web-managed-secret")
-    before = auth_path.read_bytes()
+    before = get_auth()
     env_path.write_text("AUTH_PASSWORD=replacement-secret\n", encoding="utf-8")
     app_config.settings.auth_password = "replacement-secret"
 
     assert auth.bootstrap_from_env() is False
-    assert auth_path.read_bytes() == before
+    assert get_auth() == before
     assert auth.verify_and_create_session("web-managed-secret") is not None
     assert auth.verify_and_create_session("replacement-secret") is None

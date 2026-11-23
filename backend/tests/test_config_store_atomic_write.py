@@ -13,7 +13,6 @@ secrets_store、auth、preferences、ExtConfigStore、策略 override、自定�
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,12 +22,22 @@ import pytest
 
 from app import secrets_store
 from app.api import analysis
+from app.config import settings
 from app.data_providers.custom import loader as custom_loader
 from app.factors import store as factor_store
 from app.services import preferences
 from app.services.ext_data import ExtConfig, ExtConfigStore, ExtField
 from app.strategy import config as strat_config
 from app.strategy import custom_signals
+
+
+@pytest.fixture(autouse=True)
+def shared_root_alias(tmp_path, monkeypatch):
+    """DES-006: shared 根动态别名到 settings.data_dir，保持旧测试目录语义。"""
+    from app.state import shared
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(shared, "shared_data_root", lambda: settings.data_dir)
 
 
 @pytest.fixture()
@@ -61,11 +70,10 @@ def test_preferences_survive_a_torn_write(data_dir: Path, torn_write) -> None:
     assert preferences.load()["theme"] == "dark"
 
     torn_write()
-    with pytest.raises(OSError):
-        preferences.save({"theme": "light"})
-
+    # DES-006: 偏好已迁 PG，写入不再经 Path.write_text；验证 PG 路径仍可写回。
+    preferences.save({"theme": "light"})
     preferences._invalidate_cache()
-    assert preferences.load() == {"theme": "dark", "kline_compress": True}
+    assert preferences.load() == {"theme": "light", "kline_compress": True}
 
 
 def test_secrets_survive_a_torn_write(data_dir: Path, torn_write) -> None:
@@ -73,10 +81,9 @@ def test_secrets_survive_a_torn_write(data_dir: Path, torn_write) -> None:
     assert secrets_store.load()["tickflow_token"] == "keep-me"
 
     torn_write()
-    with pytest.raises(OSError):
-        secrets_store.save({"tickflow_token": "replacement"})
-
-    assert secrets_store.load() == {"tickflow_token": "keep-me"}
+    # DES-006: 凭证已迁 PG，写入不再经文件；验证新值可从门面读回。
+    secrets_store.save({"tickflow_token": "replacement"})
+    assert secrets_store.load() == {"tickflow_token": "replacement"}
 
 
 def test_ext_config_survives_a_torn_write(data_dir: Path, torn_write) -> None:
@@ -176,18 +183,15 @@ def test_custom_source_yaml_survives_a_torn_write(data_dir: Path, torn_write) ->
         "display_name": "演示源",
         "datasets": {"daily": {"url": "https://example.test/daily", "method": "GET"}},
     }
-    path = custom_loader.save_config("demo", config)
-    before = path.read_text(encoding="utf-8")
-    assert custom_loader.load_config(path).display_name == "演示源"
+    from app.state import get_data_source_config
+
+    custom_loader.save_config("demo", config)
+    assert "演示源" in (get_data_source_config("demo") or "")
 
     torn_write()
-    with pytest.raises(OSError):
-        custom_loader.save_config("demo", {**config, "display_name": "演示源2"})
-
-    assert path.read_text(encoding="utf-8") == before
-    reloaded = custom_loader.load_config(path)
-    assert reloaded.display_name == "演示源"
-    assert list(reloaded.datasets) == ["daily"]
+    # DES-006: 数据源配置已迁 PG，写入不再经文件；验证门面读回更新值。
+    custom_loader.save_config("demo", {**config, "display_name": "演示源2"})
+    assert "演示源2" in (get_data_source_config("demo") or "")
 
 
 def test_a_normal_save_still_writes_what_it_was_given(data_dir: Path) -> None:
@@ -200,8 +204,8 @@ def test_a_normal_save_still_writes_what_it_was_given(data_dir: Path) -> None:
     secrets_store.save({"b": "2"})
     assert secrets_store.load() == {"a": "1", "b": "2"}
 
-    written = json.loads((data_dir / "user_data" / "preferences.json").read_text(encoding="utf-8"))
-    assert written == {"theme": "dark", "kline_compress": True}
+    # DES-006: 偏好权威在 PG，直接以门面读回替代旧文件断言。
+    assert preferences.load() == {"theme": "dark", "kline_compress": True}
 
 
 def test_no_tmp_file_is_left_behind(data_dir: Path) -> None:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -141,7 +140,6 @@ def test_jobs_remain_consistent_while_persisting_state(store, monkeypatch, statu
 
 def test_jobs_snapshot_is_bounded_sorted_and_clearable(store):
     # Use distinct times to test ordering independently of timestamp resolution.
-    store._max_jobs = 2
     ids = []
     for n in range(3):
         jid, _ = store.create(timeout_s=60)
@@ -150,10 +148,8 @@ def test_jobs_snapshot_is_bounded_sorted_and_clearable(store):
         ).isoformat()
         store.succeed(jid, {"sequence": n})
         ids.append(jid)
-    assert [j["id"] for j in store.list_recent()] == list(reversed(ids[-2:]))
-    assert {j["id"] for j in store.list_recent()} == {
-        p.stem for p in store._store_dir.glob("*.json")
-    }
+    # DES-006: live state 在 Redis，列表按显式 limit 截断，不再受 _max_jobs 文件保留约束。
+    assert [j["id"] for j in store.list_recent(limit=2)] == list(reversed(ids[-2:]))
     assert store.list_recent(limit=1)[0]["id"] == ids[-1]
     row = store.list_recent()[0]
     row["status"] = "pending"
@@ -164,9 +160,11 @@ def test_jobs_snapshot_is_bounded_sorted_and_clearable(store):
 
 
 def test_snapshot_loading_ignores_incomplete_or_corrupt_history(store):
+    """DES-006: 遗留的损坏 job_store 文件不再进入门面；live state 只认 Redis 写入。"""
     jid, _ = store.create(timeout_s=60)
     store.start(jid)
     store.succeed(jid, {"daily_rows": 123})
+    store._store_dir.mkdir(parents=True, exist_ok=True)
     for name, content in {
         "incomplete": '{"id":"old","status":"succeeded"}',
         "corrupt": "{",
@@ -174,26 +172,20 @@ def test_snapshot_loading_ignores_incomplete_or_corrupt_history(store):
     }.items():
         (store._store_dir / f"{name}.json").write_text(content, encoding="utf-8")
     revived = JobStore(store_dir=store._store_dir)
-    (job,) = revived.list_recent()
-    assert job["id"] == jid
-    assert job["result"] == {"daily_rows": 123}
+    jobs = revived.list_recent()
+    assert [job["id"] for job in jobs] == [jid]
+    assert jobs[0]["result"] == {"daily_rows": 123}
 
 
-def test_history_retention_follows_deleted_files_even_when_times_differ(store):
-    store._max_jobs = 3
+def test_history_retention_bounded_by_limit_even_when_times_differ(store):
+    """DES-006: live state 由门面索引维护，列表按 limit 截断，与文件 mtime 无关。"""
     ids = []
     for n in range(3):
         jid, _ = store.create(timeout_s=60)
         store.start(jid)
         store.succeed(jid, {"sequence": n})
         ids.append(jid)
-    # Retention uses file mtime, while the UI orders by started_at. A repaired
-    # orphan file can have an older start time and a recent modification time.
-    os.utime(store._store_dir / f"{ids[1]}.json", (1, 1))
     newest, _ = store.create(timeout_s=60)
     store.start(newest)
     store.succeed(newest, {"sequence": 3})
-    assert {j["id"] for j in store.list_recent()} == {ids[0], ids[2], newest}
-    assert {j["id"] for j in store.list_recent()} == {
-        p.stem for p in store._store_dir.glob("*.json")
-    }
+    assert {j["id"] for j in store.list_recent(limit=3)} == {ids[1], ids[2], newest}

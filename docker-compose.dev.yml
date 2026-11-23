@@ -37,6 +37,8 @@ services:
       # 容器内 localhost 即本容器, vite 的 /api 代理目标(源码布局下无需 TSP_DOCKER)
       - BACKEND_HOST=0.0.0.0
       - BACKEND_PORT=3018
+      # 后端日志级别：.env 可覆盖；双栈排查时用 DEBUG
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       # ---- 后端 extras ----
       # 默认带 dev(pytest/ruff) + backtest(vectorbt/numba): 开发容器要能跑测试,
       # 否则 dev.sh 的 `uv sync --frozen` 会把手动装的测试工具当多余包清掉。
@@ -60,12 +62,26 @@ services:
       - CACHE_REDIS_URL=${CACHE_REDIS_URL_CONTAINER:-redis://host.docker.internal:6379/0}
       - CACHE_REDIS_PREFIX=${CACHE_REDIS_PREFIX:-tickflow:cache:}
       - EVENT_BUS_BACKEND=${EVENT_BUS_BACKEND:-redis}
-      - EVENT_BUS_REDIS_URL=${EVENT_BUS_REDIS_URL_CONTAINER:-redis://host.docker.internal:6379/0}
+      - EVENT_BUS_REDIS_URL=${EVENT_BUS_REDIS_URL_CONTAINER:-redis://:123456@host.docker.internal:6379/0}
       - COORDINATION_BACKEND=${COORDINATION_BACKEND:-redis}
-      - COORDINATION_REDIS_URL=${COORDINATION_REDIS_URL_CONTAINER:-redis://host.docker.internal:6379/0}
+      - COORDINATION_REDIS_URL=${COORDINATION_REDIS_URL_CONTAINER:-redis://:123456@host.docker.internal:6379/0}
       - MINING_STORE_BACKEND=${MINING_STORE_BACKEND:-redis}
+      # redis 后端强制要求产物根(DES-003 D-03 / DIST-04)；DES-006 用 pgblob，
+      # 本地仅作临时 staging，落在匿名卷 .staging 内，不经 .:/app 落宿主机。
+      - MINING_ARTIFACT_ROOT=${MINING_ARTIFACT_ROOT:-/app/data/.staging/mining-artifacts}
       # ---- PostgreSQL 账户事务层(DES-005; 复用宿主机 pg_dev.sh 容器) ----
       - PAPER_PG_URL=${PAPER_PG_URL_CONTAINER:-postgresql://tsp:123456@host.docker.internal:5432/tsp_dev}
+      # ---- 用户状态存储层(DES-006) ----
+      - USER_STATE_PG_URL=${USER_STATE_PG_URL_CONTAINER:-postgresql://tsp:123456@host.docker.internal:5432/tsp_dev}
+      - USER_STATE_PG_SCHEMA=${USER_STATE_PG_SCHEMA:-tsp_user_state}
+      - USER_STATE_REDIS_URL=${USER_STATE_REDIS_URL_CONTAINER:-redis://:123456@host.docker.internal:6379/3}
+      - USER_STATE_REDIS_PREFIX=${USER_STATE_REDIS_PREFIX:-tsp:user:}
+      - SHARED_DATA_ROOT=/app/data/shared
+      - RUNTIME_DATA_ROOT=/app/data/.runtime
+      - USER_BLOB_MAX_BYTES=${USER_BLOB_MAX_BYTES:-67108864}
+      - JOB_LIVE_TTL_DAYS=${JOB_LIVE_TTL_DAYS:-7}
+      - USER_STATE_ENCRYPTION_KEY=${USER_STATE_ENCRYPTION_KEY:-}
+      - MINING_ARTIFACT_STORE=${MINING_ARTIFACT_STORE:-pgblob}
     depends_on:
       # 后端启动即连 CK 且 fail-closed, 必须等容器健康后再起, 否则启动直接失败
       clickhouse:
@@ -82,9 +98,13 @@ services:
       - ./.docker-cache/pnpm-store:/root/.local/share/pnpm/store
       - ./.docker-cache/npm-cache:/root/.npm
       - ./.docker-cache/uv-cache:/root/.cache/uv
-      # ---- 用户数据: 宿主机 data/ 持久化(与生产部署一致) ----
-      # DATA_DIR 已固定为 /app/data, 此处必须挂到相同目标
-      - ./data:/app/data
+      # ---- DES-006: 仅日志与策略/插件共享目录持久化 ----
+      - ./data/logs:/app/data/logs
+      - ./data/shared:/app/data/shared
+      # runtime 临时目录不落宿主机，重建容器后可丢弃
+      - /app/data/.runtime
+      - /app/data/.staging
+      - /app/data/.cache
     extra_hosts:
       # 宿主机上的自定义数据源(fuyao 等)经此地址访问
       - "host.docker.internal:host-gateway"
@@ -127,6 +147,8 @@ services:
       # 只挂单个 drop-in: 整个 config.d 目录挂载会覆盖镜像自带的
       # docker_related_config.xml(其中含 listen_host), 导致 CK 只监听 127.0.0.1
       - ./deploy/clickhouse/config.d/40-tsp-container.xml:/etc/clickhouse-server/config.d/40-tsp-container.xml:ro
+      # 开发环境内存上限覆盖（4.5GB）：全量 enriched 重算/并发建表需要，生产不挂此文件
+      - ./deploy/clickhouse/config.d/41-tsp-dev-memory.xml:/etc/clickhouse-server/config.d/41-tsp-dev-memory.xml:ro
       # 开发专用覆盖: 40 号文件保留生产保守值, 这里按全量测试峰值上调
       - ./deploy/clickhouse/config.d/41-tsp-dev-memory.xml:/etc/clickhouse-server/config.d/41-tsp-dev-memory.xml:ro
     healthcheck:

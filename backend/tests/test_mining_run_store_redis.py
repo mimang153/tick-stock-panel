@@ -122,8 +122,8 @@ def test_summary_and_artifact(store: RedisMiningRunStore) -> None:
     after = store.get(rid)
     assert after is not None and after["artifacts"]["factors"] == "factors.parquet"
     content = after["artifact_content"]["factors"]
-    assert content["uri"].startswith("file://")
-    assert content["uri"].endswith("/factors.parquet")
+    # DES-006: artifact 二进制入 PG blob（MINING_ARTIFACT_STORE=pgblob）。
+    assert content["uri"].startswith("pgblob://")
     assert content["content_addr"].startswith("sha256:")
     assert content["size_bytes"] == len(b"artifact")
 

@@ -21,8 +21,11 @@ import polars as pl
 from app.storage.clickhouse import ClickHouseClient
 
 # 版本号只在 DDL 语义变化时 +1；幂等建表本身覆盖"新增表"
-SCHEMA_VERSION = 3
-SCHEMA_NOTE = "v3: 修补快照 30 天 / mining 审计 90 天 TTL（DES-002 §9 / DES-003 D-02）"
+SCHEMA_VERSION = 5
+SCHEMA_NOTE = (
+    "v5: 用户状态迁移审计表 ck_integrity_event/ck_integrity_report_history/"
+    "ck_config_change_audit（DES-006；v4: ck_enriched_generation 补租约列）"
+)
 
 _PROJECTION_SETTINGS = "SETTINGS deduplicate_merge_projection_mode = 'rebuild'"
 
@@ -494,6 +497,51 @@ COMMENT 'mining运行审计:记录每次状态转换的快照,Redis状态机丢�
 PARTITION BY namespace
 ORDER BY (namespace, run_id, artifact_name)
 COMMENT 'mining产物元数据:内容寻址URI,产物字节不落CK'""",
+    "ck_integrity_event": """CREATE TABLE IF NOT EXISTS {table} (
+  id             UUID DEFAULT generateUUIDv4() COMMENT '行主键',
+  event_id       String COMMENT '审计事件唯一ID,用于幂等',
+  asset_type     LowCardinality(String) COMMENT '资产类型:stock/etf/index',
+  day            Date COMMENT '完整性状态对应交易日',
+  symbol         String COMMENT '标的代码,资产级问题为空字符串',
+  kind           LowCardinality(String) COMMENT '问题类型:missing/recompute等',
+  action         LowCardinality(String) COMMENT '状态动作:record/complete/clear',
+  detail         String COMMENT '动作详情JSON或文本',
+  created_at     DateTime64(3) COMMENT '审计记录创建时间',
+  created_by     LowCardinality(String) COMMENT '操作来源',
+  updated_at     DateTime64(3) DEFAULT now64(3) COMMENT '最后更新时间,兼作版本列',
+  updated_by     LowCardinality(String) COMMENT '最后更新来源'
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY toYYYYMM(day)
+ORDER BY (asset_type, day, symbol, event_id)
+COMMENT '完整性状态变更历史事件'""",
+    "ck_integrity_report_history": """CREATE TABLE IF NOT EXISTS {table} (
+  id             UUID DEFAULT generateUUIDv4() COMMENT '行主键',
+  report_id      String COMMENT '自检报告业务ID,修补凭证',
+  checked_at     DateTime64(3) COMMENT '自检完成时间',
+  status         LowCardinality(String) COMMENT '报告状态:clean/issues',
+  report_json    String COMMENT '报告完整JSON字符串',
+  created_at     DateTime64(3) COMMENT '审计记录创建时间',
+  created_by     LowCardinality(String) COMMENT '操作来源',
+  updated_at     DateTime64(3) DEFAULT now64(3) COMMENT '最后更新时间,兼作版本列',
+  updated_by     LowCardinality(String) COMMENT '最后更新来源'
+) ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY report_id
+COMMENT '完整性自检报告历史,当前报告以PG为准'""",
+    "ck_config_change_audit": """CREATE TABLE IF NOT EXISTS {table} (
+  id             UUID DEFAULT generateUUIDv4() COMMENT '行主键',
+  event_id       String COMMENT '审计事件唯一ID,用于幂等',
+  domain         LowCardinality(String) COMMENT '配置域:pref/token/watchlist/capability',
+  action         LowCardinality(String) COMMENT '动作:create/update/delete/revoke/import',
+  actor          LowCardinality(String) COMMENT '操作来源:api/scheduler/migration/system',
+  detail         String COMMENT '变更摘要JSON,禁止记录明文密钥',
+  created_at     DateTime64(3) COMMENT '审计记录创建时间',
+  created_by     LowCardinality(String) COMMENT '操作来源',
+  updated_at     DateTime64(3) DEFAULT now64(3) COMMENT '最后更新时间,兼作版本列',
+  updated_by     LowCardinality(String) COMMENT '最后更新来源'
+) ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY toYYYYMM(created_at)
+ORDER BY (domain, event_id)
+COMMENT '用户配置类状态变更审计,不承载当前态'""",
 }
 
 # 建表顺序即 DDL 声明顺序（无外键依赖，保持稳定即可）
@@ -705,9 +753,45 @@ def _migration_v3_retention_ttl(client: ClickHouseClient) -> None:
         )
 
 
+def _migration_v4_generation_lease_columns(client: ClickHouseClient) -> None:
+    """v3 → v4: ck_enriched_generation 补租约/fencing 列（DES-002 §9）。
+
+    DDL 早于本迁移就声明了 owner_id/fencing_token/lease_expires_at，但存量库
+    由旧版 CREATE 建立、没有这三列；代码查询这些列会抛 UNKNOWN_IDENTIFIER
+    （code 47），导致 compute_enriched 失败。用 ADD COLUMN IF NOT EXISTS 补齐。
+    """
+    table = client.table("ck_enriched_generation")
+    # 测试子集建表（tables=...）可能不含本表；表不存在则跳过，避免 UNKNOWN_TABLE。
+    existing = client.query(
+        "SELECT count() AS n FROM system.tables WHERE database = currentDatabase() "
+        "AND name = {name:String}",
+        {"name": table},
+    )
+    if "n" in existing.columns and (existing.is_empty() or int(existing["n"][0]) == 0):
+        return
+    columns = (
+        ("owner_id", "LowCardinality(String) DEFAULT ''"),
+        ("fencing_token", "UInt64 DEFAULT 0"),
+        ("lease_expires_at", "Nullable(DateTime64(3))"),
+    )
+    for name, definition in columns:
+        client.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {definition}")
+
+
+def _migration_v5_user_state_audit(client: ClickHouseClient) -> None:
+    """v4 → v5: 用户状态迁移审计表（DES-006）建表标记。
+
+    三张新表已由 ``_TABLE_DDL`` 在 ensure_schema 的幂等建表阶段统一创建
+    （CREATE TABLE IF NOT EXISTS 对存量库同样安全），本迁移仅作版本推进占位，
+    不重复执行 DDL，避免测试与幂等语义下出现重复建表语句。
+    """
+
+
 _MIGRATIONS: dict[int, Callable[[ClickHouseClient], None]] = {
     2: _migration_v2_instruments_nullable,
     3: _migration_v3_retention_ttl,
+    4: _migration_v4_generation_lease_columns,
+    5: _migration_v5_user_state_audit,
 }
 
 

@@ -26,8 +26,10 @@ def _has_upgrade_traces(data_dir: Path) -> bool:
     - kline_daily 已有 parquet (拉过日K; 内置策略跑起来必须有数据)
     - watchlist.parquet 存在 (加过自选)
     """
-    for sub in ("custom", "ai", "composite"):
-        if any((data_dir / "strategies" / sub).glob("*.py")):
+    from app.state import shared_strategy_dirs
+
+    for directory in shared_strategy_dirs():
+        if any(directory.glob("*.py")):
             return True
     if any((data_dir / "kline_daily").rglob("*.parquet")):
         return True
@@ -35,12 +37,14 @@ def _has_upgrade_traces(data_dir: Path) -> bool:
 
 
 def seed_missing_builtins(data_dir: Path) -> int:
-    """仅升级用户: 把内置策略种子按文件名补入 data/strategies/custom。
+    """仅升级用户: 把内置策略种子按文件名补入 shared strategies/custom。
 
     幂等标记 ``.seeded_v1`` 保证一次性; 新装无旧版痕迹则跳过并落标记。
     只补缺失的同名文件, 已有的一律不覆盖; 写入前过 _validate_safety。
     """
-    custom_dir = data_dir / "strategies" / "custom"
+    from app.state import shared_strategy_dirs
+
+    custom_dir = shared_strategy_dirs()[0]
     custom_dir.mkdir(parents=True, exist_ok=True)
     marker = custom_dir / ".seeded_v1"
     if marker.exists():

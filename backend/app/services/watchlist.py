@@ -1,30 +1,33 @@
 """自选与分组服务。
 
-自选存储于 ``data/user_data/watchlist.parquet``，分组定义存储于同目录的
-``watchlist_groups.json``。
+自选与分组的持久化经 ``app.state`` 门面落到 PG 三表, 版本号存 Redis; 本模块
+只负责业务顺序与成员关系, 不再直接读写本地 parquet/json 文件。
 
 成员关系为多值 (M:N): 每条自选带 ``group_ids: list[str]``, 同一标的可同时
 属于多个分组; 移出分组只摘标签(标的仍在自选), 移出自选才删除实体。
-旧 schema (单值 ``group_id`` 列) 读取时自动迁移为 ``[group_id]``, 首次写回
-新 schema 前留一份 ``watchlist.parquet.bak`` 备份。
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import shutil
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 
 import polars as pl
 
 from app.config import settings
+from app.state import (
+    get_watchlist_version,
+    list_watchlist_groups,
+    list_watchlist_items,
+    save_watchlist_groups,
+    save_watchlist_items,
+)
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.client import get_client
 from app.tickflow.rate_limits import chunked, resolve_limit
@@ -32,52 +35,51 @@ from app.tickflow.rate_limits import chunked, resolve_limit
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
-# 数据版本号: 每次写盘 +1 (在 _LOCK 内递增, 读取免锁)。供监控引擎等进程内
-# 消费方做缓存失效判断 —— 版本没变就不必重读文件, 版本一变立即拿到新成员。
-_REVISION = 0
 
 
 def revision() -> int:
-    """自选/分组数据版本号, 每次写操作递增。"""
-    return _REVISION
+    """自选/分组数据版本号, 每次写操作由门面递增。"""
+    return get_watchlist_version()
 
 
 _MAX_GROUP_NAME_LENGTH = 24
 DEFAULT_GROUP_COLOR = "sky"
-GROUP_COLORS = frozenset(
-    {
-        "sky",
-        "blue",
-        "indigo",
-        "violet",
-        "fuchsia",
-        "rose",
-        "orange",
-        "amber",
-        "lime",
-        "emerald",
-        "teal",
-        "cyan",
-    }
+# 颜色编号与前端 WATCHLIST_GROUP_COLORS 顺序一致; 门面存编号, 服务层对外仍是颜色名。
+_GROUP_COLOR_SEQUENCE = (
+    "sky",
+    "blue",
+    "indigo",
+    "violet",
+    "fuchsia",
+    "rose",
+    "orange",
+    "amber",
+    "lime",
+    "emerald",
+    "teal",
+    "cyan",
 )
-_ENTRY_SCHEMA = {
-    "symbol": pl.Utf8,
-    "added_at": pl.Utf8,
-    "note": pl.Utf8,
-    "group_ids": pl.List(pl.Utf8),
-}
+GROUP_COLORS = frozenset(_GROUP_COLOR_SEQUENCE)
+_GROUP_COLOR_INDEX = {name: index for index, name in enumerate(_GROUP_COLOR_SEQUENCE)}
+_ENTRY_SCHEMA: pl.Schema = cast(
+    "pl.Schema",
+    {
+        "symbol": pl.Utf8,
+        "added_at": pl.Utf8,
+        "note": pl.Utf8,
+        "group_ids": pl.List(pl.Utf8),
+    },
+)
 
 
 def _path() -> Path:
-    p = settings.data_dir / "user_data" / "watchlist.parquet"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
+    """兼容旧调用的虚拟路径；门面持久化后不再读写该文件。"""
+    return settings.data_dir / "user_data" / "watchlist.parquet"
 
 
 def _groups_path() -> Path:
-    p = settings.data_dir / "user_data" / "watchlist_groups.json"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
+    """兼容旧调用的虚拟路径；门面持久化后不再读写该文件。"""
+    return settings.data_dir / "user_data" / "watchlist_groups.json"
 
 
 def _empty_entries() -> pl.DataFrame:
@@ -85,73 +87,73 @@ def _empty_entries() -> pl.DataFrame:
 
 
 def _read_entries() -> pl.DataFrame:
-    p = _path()
-    if not p.exists():
+    """从状态门面读取全部自选并归一化为服务层列结构。"""
+    rows = list_watchlist_items()
+    if not rows:
         return _empty_entries()
-    df = pl.read_parquet(p)
-    # 旧 schema 兼容: 单值 group_id → group_ids=[gid]; 两列都缺 → 空列表
-    if "group_ids" not in df.columns:
-        old = df["group_id"].to_list() if "group_id" in df.columns else [None] * df.height
-        df = df.with_columns(
-            pl.Series("group_ids", [[g] if g else [] for g in old], dtype=pl.List(pl.Utf8))
-        ).drop("group_id", strict=False)
-    if "symbol" not in df.columns:
-        df = df.with_columns(pl.lit("", dtype=pl.Utf8).alias("symbol"))
-    if "added_at" not in df.columns:
-        df = df.with_columns(pl.lit("", dtype=pl.Utf8).alias("added_at"))
-    if "note" not in df.columns:
-        df = df.with_columns(pl.lit(None, dtype=pl.Utf8).alias("note"))
-    return df.select(list(_ENTRY_SCHEMA))
+    normalized = [
+        {
+            "symbol": str(row.get("symbol") or ""),
+            "added_at": str(row.get("added_at") or ""),
+            "note": str(row.get("note") or ""),
+            "group_ids": [str(group_id) for group_id in (row.get("group_ids") or [])],
+        }
+        for row in rows
+    ]
+    return pl.DataFrame(normalized, schema=_ENTRY_SCHEMA)
 
 
 def _write_entries(df: pl.DataFrame) -> None:
-    global _REVISION
-    p = _path()
-    # 首次从旧 schema 迁移到 group_ids 前, 备份原文件(一次性)
-    if p.exists():
-        try:
-            if "group_ids" not in pl.read_parquet_schema(p).names():
-                shutil.copy(p, p.with_suffix(p.suffix + ".bak"))
-        except OSError as e:
-            logger.warning("watchlist backup before migration failed: %s", e)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    df.select(list(_ENTRY_SCHEMA)).write_parquet(tmp)
-    os.replace(tmp, p)
-    _REVISION += 1
+    """把自选整表写回门面；行序即展示顺序，由 position 固化。"""
+    rows = df.select(list(_ENTRY_SCHEMA)).to_dicts()
+    save_watchlist_items(
+        [
+            {
+                "symbol": row["symbol"],
+                "note": row.get("note") or "",
+                "position": index,
+                "added_at": row.get("added_at") or None,
+                "group_ids": row.get("group_ids") or [],
+            }
+            for index, row in enumerate(rows)
+        ]
+    )
+
+
+def _color_from_state(value: object) -> str:
+    """把门面存储的颜色编号还原为服务层颜色名。"""
+    if isinstance(value, str) and value in GROUP_COLORS:
+        return value
+    if isinstance(value, int | float) and 0 <= int(value) < len(_GROUP_COLOR_SEQUENCE):
+        return _GROUP_COLOR_SEQUENCE[int(value)]
+    return DEFAULT_GROUP_COLOR
 
 
 def _read_groups() -> list[dict]:
-    p = _groups_path()
-    if not p.exists():
-        return []
-    try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError("自选分组配置损坏，请检查 watchlist_groups.json") from exc
-    if not isinstance(raw, list):
-        raise ValueError("自选分组配置格式不正确")
-    groups = []
-    for item in raw:
-        if not isinstance(item, dict) or not item.get("id") or not item.get("name"):
-            continue
-        color = str(item.get("color", DEFAULT_GROUP_COLOR))
-        groups.append(
-            {
-                "id": str(item["id"]),
-                "name": str(item["name"]),
-                "color": color if color in GROUP_COLORS else DEFAULT_GROUP_COLOR,
-            }
-        )
-    return groups
+    """从状态门面读取分组；内部颜色编号对外仍暴露颜色名。"""
+    return [
+        {
+            "id": str(row["id"]),
+            "name": str(row["name"]),
+            "color": _color_from_state(row.get("color")),
+        }
+        for row in list_watchlist_groups()
+    ]
 
 
 def _write_groups(groups: list[dict]) -> None:
-    global _REVISION
-    p = _groups_path()
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(groups, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, p)
-    _REVISION += 1
+    """把分组整表写回门面；颜色名转编号，入参顺序即展示顺序。"""
+    save_watchlist_groups(
+        [
+            {
+                "id": group["id"],
+                "name": group["name"],
+                "color": _GROUP_COLOR_INDEX.get(group.get("color") or DEFAULT_GROUP_COLOR, 0),
+                "position": index,
+            }
+            for index, group in enumerate(groups)
+        ]
+    )
 
 
 def _normalize_group_name(name: str) -> str:

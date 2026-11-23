@@ -262,7 +262,7 @@ class MiningCandidateService:
                     "algorithm_version": summary.get("algorithm_version"),
                 },
             )
-        except Exception:  # noqa: BLE001 - 基线记录失败仅告警, 不影响发布编排
+        except Exception:  # noqa: BLE001 - 基线记录失败仅告警，不影响发布编排
             logger.warning("guardian baseline recording failed for %s", strategy_id, exc_info=True)
 
     def _load_candidate(
@@ -640,18 +640,18 @@ class MiningCandidateService:
             raise ValueError("candidate publication backlink is inconsistent")
 
     def _custom_strategy_path(self, strategy_id: str) -> Path:
-        """返回 data_dir 下自定义策略文件路径, 拒绝越界目录。"""
-        unresolved_root = self.data_dir / "strategies" / "custom"
-        unresolved_root.mkdir(parents=True, exist_ok=True)
-        if unresolved_root.is_symlink():
+        """返回 shared 自定义策略文件路径, 拒绝越界目录。"""
+        from app.state import shared_strategy_path
+
+        path = shared_strategy_path("custom", f"{strategy_id}.py")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.parent.is_symlink():
             raise ValueError("custom strategy directory must not be a symlink")
-        root = unresolved_root.resolve()
-        if not root.is_relative_to(self.data_dir):
-            raise ValueError("custom strategy directory escapes data_dir")
-        path = (root / f"{strategy_id}.py").resolve(strict=False)
-        if path.parent != root:
+        root = path.parent.resolve()
+        resolved = path.resolve(strict=False)
+        if resolved.parent != root:
             raise ValueError("strategy publication path escapes custom directory")
-        return path
+        return resolved
 
     def _render_factor_strategy(
         self,

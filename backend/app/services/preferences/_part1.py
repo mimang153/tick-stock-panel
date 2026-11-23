@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import re
 
 import app.services.preferences as _self
-from app.services.fs_utils import atomic_write_text
 
 from ._state import (
     _ALLOWED_DATA_PROVIDERS,
@@ -486,10 +484,10 @@ def set_emotion_score_config(cfg: dict | None) -> dict | None:
     from app.services.emotion_score import merge_config
 
     if not cfg:
+        from app.state import delete_preference_keys
+
         with _SAVE_LOCK:
-            current = _self.load()
-            current.pop("emotion_score_config", None)
-            atomic_write_text(_self._path(), json.dumps(current, indent=2, ensure_ascii=False))
+            delete_preference_keys(["emotion_score_config"])
             _self._invalidate_cache()
         return None
 

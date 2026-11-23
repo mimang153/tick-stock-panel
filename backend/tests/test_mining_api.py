@@ -476,8 +476,12 @@ def test_promote_endpoint_uses_persisted_definition_only(tmp_path):
 
 
 def test_publish_endpoint_uses_persisted_definition_and_invalidates_runtime(
-    tmp_path,
+    tmp_path, monkeypatch
 ) -> None:
+    from app.config import settings
+
+    # DES-006: 发布策略写 shared 根；隔离到 tmp 避免仓库只读目录。
+    monkeypatch.setattr(settings, "shared_data_root", tmp_path)
     client, store = _client(tmp_path)
     _successful_run(store)
     builtin_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "strategies"

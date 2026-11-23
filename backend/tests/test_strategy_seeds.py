@@ -12,7 +12,20 @@
 
 from __future__ import annotations
 
+import pytest
+
+from app.config import settings
 from app.strategy.strategy_seeds import SEEDS_DIR, seed_missing_builtins
+
+
+@pytest.fixture(autouse=True)
+def shared_root_alias(tmp_path, monkeypatch):
+    """DES-006: shared 根动态别名到 settings.data_dir，保持旧测试目录语义。"""
+    from app.state import shared
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(shared, "shared_data_root", lambda: settings.data_dir)
+
 
 _EXPECTED_COUNT = len([f for f in SEEDS_DIR.glob("*.py") if not f.name.startswith("_")])
 

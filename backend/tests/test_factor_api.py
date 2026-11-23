@@ -353,13 +353,19 @@ def test_delete_custom_and_composite_factor(tmp_path, cleanup_registry) -> None:
     assert get_factor("uf_del_member") is None
 
 
-def test_delete_with_strategy_reference_requires_force(tmp_path, cleanup_registry) -> None:
+def test_delete_with_strategy_reference_requires_force(
+    tmp_path, cleanup_registry, monkeypatch
+) -> None:
     """策略文件引用同样拦截: 409 列出 strategies/*.json, force=true 放行。"""
     import json
     from pathlib import Path
     from types import SimpleNamespace
 
+    from app.config import settings
     from app.factors.registry import get_factor
+
+    # DES-006: 策略扫描走 shared 根；隔离到 tmp_path。
+    monkeypatch.setattr(settings, "shared_data_root", tmp_path)
 
     app = FastAPI()
     app.include_router(router)
@@ -377,8 +383,8 @@ def test_delete_with_strategy_reference_requires_force(tmp_path, cleanup_registr
         },
     )
     cleanup_registry.add("uf_strat_ref")
-    strategies_dir = data_dir / "strategies"
-    strategies_dir.mkdir()
+    strategies_dir = data_dir / "strategies" / "custom"
+    strategies_dir.mkdir(parents=True)
     (strategies_dir / "my_strategy.json").write_text(
         json.dumps({"name": "my_strategy", "factors": {"uf_strat_ref": 1.0}}),
         encoding="utf-8",

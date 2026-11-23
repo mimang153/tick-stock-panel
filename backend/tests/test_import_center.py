@@ -140,8 +140,11 @@ def test_page_apply_requires_same_bytes_trust_and_explicit_overwrite(client, tmp
         ).status_code
         == 200
     )
-    target = tmp_path / "ext_pages" / "test_page" / "bundle.js"
-    assert target.read_bytes() == data
+    # DES-006: 页面 bundle 落 PG user_blob, 不再写本地 ext_pages 文件。
+    from app.state import list_ext_pages, resolve_blob_uri
+
+    row = next(item for item in list_ext_pages() if item["id"] == "test_page")
+    assert resolve_blob_uri(f"pgblob://{row['bundle_hash']}") == data
     assert (
         client.post(
             "/api/import-center/page", files={"file": ("page.mjs", data)}, data=fields

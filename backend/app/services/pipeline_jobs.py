@@ -1,30 +1,22 @@
-"""异步盘后管道任务注册表 — 每个 job 独立 JSON 文件。
+"""异步盘后管道任务注册表 — Redis live state + CK 历史。
 
 设计:
-  - job_store/ 文件夹,每个 job 一个 {id}.json,最多保留 max_jobs 个文件
-  - create()/start() 即落盘 pending/running 快照(进度只更新内存) ——
-    进程意外死亡(uvicorn --reload 热重载 / 被 kill)时记录不蒸发
-  - succeeded/failed 后写入终态并从内存释放
-  - 实例化时扫描磁盘,把上个进程遗留的 pending/running 孤儿记录补标为
-    failed(中断);finished_at 取文件 mtime(最后已知存活时刻),不用下次
-    开机时间虚增时长
-  - 列表查询读取原子发布的内存摘要；启动加载历史，生命周期与进度变化同步更新
-  - 单个查询 = 内存优先,没有则读磁盘
-  - 创建新 job 前检查文件数量,>= max_jobs 时删除最老的文件
+  - create()/start()/终态经 ``app.state`` 门面写入 Redis 当前态; 终态另写 CK 历史
+  - progress() 单独持久化 progress, get() 读取时把两者合并
+  - 实例化时扫描 Redis 当前态, 把上个进程遗留的 pending/running 孤儿补标为 failed
+  - 列表查询读门面索引, 生命周期与进度变化同步发布内存摘要
+  - store_dir 参数仅为兼容旧签名保留, 不再读写 job_store/*.json
 """
 
-from __future__ import annotations  # noqa: I001 - I001: 延迟导入块无法排序到文件顶部
+from __future__ import annotations
 
-import json
 import logging
-import os
 import threading
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, TypeVar
-import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -124,16 +116,12 @@ _STORE_DIR = _default_store_dir()
 class JobStore:
     def __init__(self, max_jobs: int = 50, store_dir: Path = _STORE_DIR) -> None:
         self._max_jobs = max_jobs
-        self._store_dir = store_dir
+        self._store_dir = store_dir  # 兼容参数: 门面持久化后不再使用
         self._active_jobs: dict[str, dict[str, Any]] = {}  # running/pending
         self._active_id: str | None = None
         self._lock = threading.Lock()
-        self._store_dir.mkdir(parents=True, exist_ok=True)
-        self._reap_orphans()
-        self._summary_snapshot: tuple[str | None, tuple[dict[str, Any], ...]] = (
-            None,
-            tuple(_summary(j) for j in self._job_files_sorted()[:max_jobs]),
-        )
+        # 导入期不访问 Redis/PG；中断任务恢复由启动入口 recover_interrupted_jobs() 负责。
+        self._summary_snapshot: tuple[str | None, tuple[dict[str, Any], ...]] = (None, ())
 
     def _publish_summary(self, job: dict[str, Any]) -> None:
         """Caller holds _lock. Publish status before potentially slow persistence."""
@@ -146,24 +134,12 @@ class JobStore:
     # ===== persistence =====
 
     def _write_file(self, job: dict[str, Any]) -> None:
-        """将 job 快照写入独立 JSON 文件(create/start/终态均落盘)。
+        """把 job 当前态写入门面; 终态追加 CK 历史。"""
+        from app.state import put_job_state, write_job_history
 
-        临时文件 + os.replace 原子替换: get()/list_recent() 等无锁读者
-        不会读到写一半的 JSON —— 否则 _read_file 解析失败按"文件不存在"
-        返回 None, 轮询方会瞬时看到任务凭空消失。
-        """
-        path = self._store_dir / f"{job['id']}.json"
-        tmp = self._store_dir / f"{job['id']}.json.tmp"
-        try:
-            tmp.write_text(
-                json.dumps(job, ensure_ascii=False, indent=None),
-                encoding="utf-8",
-            )
-            os.replace(tmp, path)
-        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
-            logger.warning("failed to write job file %s", path)
-            with contextlib.suppress(OSError):
-                tmp.unlink()
+        put_job_state(job)
+        if job.get("status") in ("succeeded", "failed"):
+            write_job_history(job)
         from app.services import coordination_audit
         from app.services.coordination import coordination
 
@@ -172,97 +148,47 @@ class JobStore:
             coordination_audit.record_job_state(job)
 
     def _read_file(self, job_id: str) -> dict[str, Any] | None:
-        """从磁盘读取单个 job 文件。"""
-        path = self._store_dir / f"{job_id}.json"
-        if not path.exists():
-            return None
-        try:
-            return json.loads(path.read_text("utf-8"))
-        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
-            logger.warning("failed to read job file %s", path)
-            return None
+        """从门面读取单个 job 当前态。"""
+        from app.state import get_job_state
+
+        return get_job_state(job_id)
 
     @staticmethod
     def _job_file_order_key(path: Path) -> str:
-        """job 文件的内容级时间标记 (started_at 优先, 未开始则用 last_progress_at)。
-
-        文件 mtime 取自粗粒度时钟: 同一 tick 内写出的多个 job 文件 mtime 相同,
-        只按 mtime 排序会让「裁掉最旧」变成随机丢一条。内容里的时间戳能定出
-        稳定次序, 与读取侧 (按 started_at 倒序) 保持一致。
-        """
-        try:
-            job = json.loads(path.read_text("utf-8"))
-        except Exception:  # noqa: BLE001 - 损坏 job 文件跳过排序键, 视为空
-            return ""
-        return job.get("started_at") or job.get("last_progress_at") or ""
+        """兼容旧签名; 顺序改由门面索引维护, 不再读取文件。"""
+        return str(path)
 
     def _delete_oldest(self, writing_id: str) -> None:
-        """留出待写文件的位置，清理文件时同步移除历史摘要。"""
-        try:
-            files = sorted(
-                self._store_dir.glob("*.json"),
-                key=lambda f: (f.stat().st_mtime_ns, self._job_file_order_key(f)),
-            )
-        except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
-            return
-        # 覆盖 pending/running 的已有文件时，不额外占用历史记录名额。
-        keep = self._max_jobs - int(not any(f.stem == writing_id for f in files))
-        deleted: set[str] = set()
-        while len(files) > keep:
-            oldest = files.pop(0)
-            try:
-                oldest.unlink()
-                if oldest.stem != writing_id:
-                    deleted.add(oldest.stem)
-            except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
-                logger.warning("failed to delete old job file %s", oldest)
-        if deleted:
-            active_id, summaries = self._summary_snapshot
-            self._summary_snapshot = (
-                active_id,
-                tuple(j for j in summaries if j["id"] not in deleted),
-            )
+        """为待写任务腾出摘要名额; Redis 索引上限由门面自身维护。"""
+        active_id, summaries = self._summary_snapshot
+        kept = [j for j in summaries if j["id"] != writing_id]
+        self._summary_snapshot = active_id, tuple(kept[: max(0, self._max_jobs - 1)])
 
     def _job_files_sorted(self) -> list[dict[str, Any]]:
-        """扫描磁盘上所有 job 文件,按 started_at 从新到旧排序。"""
-        jobs: list[dict[str, Any]] = []
-        for f in self._store_dir.glob("*.json"):
-            try:
-                job = json.loads(f.read_text("utf-8"))
-                _summary(job)
-                jobs.append(job)
-            except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
-                continue
+        """从门面读取当前态并按 started_at 从新到旧排序。"""
+        from app.state import list_recent_jobs
+
+        jobs = list_recent_jobs(limit=500)
         jobs.sort(key=lambda j: j.get("started_at") or "", reverse=True)
         return jobs
 
     def _reap_orphans(self) -> None:
         """启动补录: 把上个进程遗留的 pending/running 记录标为中断。
 
-        单例在进程启动时实例化,此时磁盘上的 pending/running 必然来自已死
-        亡的进程(uvicorn --reload 热重载 / 被 kill)—— 不补录则这些记录
-        永远停留在「运行中」, 同步历史里既看不到结果也看不到失败, 即
-        「数据在、记录丢」。finished_at 取文件 mtime(最后一次落盘 = 最后
-        已知存活时刻), 避免拿下次开机时间虚增 duration。
+        单例在进程启动时实例化, 此时门面中的 pending/running 必然来自已死亡
+        的进程 —— 不补录则这些记录永远停留在「运行中」。finished_at 取最后
+        已知存活时刻(last_progress_at/started_at), 不拿开机时间虚增时长。
         """
-        for f in self._store_dir.glob("*.json"):
-            try:
-                j = json.loads(f.read_text("utf-8"))
-            except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+        for job in self._job_files_sorted():
+            if job.get("status") not in ("pending", "running") or not job.get("id"):
                 continue
-            if not isinstance(j, dict):
-                continue
-            orig_status = j.get("status")
-            if not j.get("id") or orig_status not in ("pending", "running"):
-                continue
+            j = dict(job)
+            orig_status = j["status"]
             j["status"] = "failed"
             j["error"] = "后端重启,任务中断(启动时补录)"
-            try:
-                mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=UTC)
-                end = mtime.strftime("%Y-%m-%dT%H:%M:%SZ")
-            except Exception:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
+            end = j.get("last_progress_at") or j.get("started_at")
+            if not end:
                 end = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-            # mtime 早于 started_at(时钟回拨等)时夹住, 避免 duration 为负
             if j.get("started_at") and end < j["started_at"]:
                 end = j["started_at"]
             j["finished_at"] = end
@@ -429,6 +355,19 @@ class JobStore:
                 if len(j["log"]) > 200:
                     j["log"] = j["log"][-200:]
             self._publish_summary(j)
+        from app.state import put_job_progress
+
+        put_job_progress(
+            job_id,
+            {
+                "current": j["progress"],
+                "total": 100,
+                "message": msg,
+                "stage": j["stage"],
+                "stage_pct": j.get("stage_pct", 0),
+                "updated_at": j["last_progress_at"],
+            },
+        )
         # 锁外检查取消: reap 可能在本次更新刚结束后置位,下一次回调必然命中;
         # 在这里立即检查可以把终止延迟压缩到当次回调。
         ev = _CANCEL_FLAGS.get(job_id)
@@ -438,38 +377,39 @@ class JobStore:
     # ===== query =====
 
     def get(self, job_id: str) -> dict[str, Any] | None:
-        # 取锁与 succeed()/fail() 的「pop 出内存 → 终态落盘」串行,
+        # 取锁与 succeed()/fail() 的「pop 出内存 → 终态写门面」串行,
         # 避免轮询方恰好落在两者之间, 瞬时看到任务凭空消失。
         with self._lock:
-            # 内存中的活跃 job 优先
-            j = self._active_jobs.get(job_id)
-            if j:
-                return j
-            # 否则从磁盘读；本地无快照时回退协调层（跨实例任务）
-            local = self._read_file(job_id)
-            if local is not None:
-                return local
+            active = self._active_jobs.get(job_id)
+            job = dict(active) if active is not None else None
+        if job is None:
+            job = self._read_file(job_id)
+        if job is None:
             from app.services.coordination import coordination
 
             return coordination.job_state.get(job_id)
+        from app.state import get_job_progress
+
+        progress = get_job_progress(job_id)
+        return {**progress, **job} if progress else job
 
     def list_recent(self, limit: int = 20) -> list[dict[str, Any]]:
-        return self.recent_snapshot(limit)["jobs"]
+        """从门面读取最近任务列表。"""
+        from app.state import list_recent_jobs
+
+        return list_recent_jobs(limit)
 
     def recent_snapshot(self, limit: int = 20) -> dict[str, Any]:
         """Read one consistent status snapshot without disk I/O or the writer lock."""
-        active_id, summaries = self._summary_snapshot
-        jobs = [dict(j) for j in summaries[: max(1, limit)]]
-        if len(jobs) < limit:
-            # 其他实例的任务不在本地摘要中，从协调层补齐。
-            from app.services.coordination import coordination
+        from app.state import list_recent_jobs
 
-            for remote in coordination.job_state.recent(limit):
-                if any(j.get("id") == remote.get("id") for j in jobs):
+        active_id, summaries = self._summary_snapshot
+        if len(summaries) < limit:
+            for remote in list_recent_jobs(limit):
+                if any(j.get("id") == remote.get("id") for j in summaries):
                     continue
-                jobs.append(_summary(remote))
-                if len(jobs) >= limit:
-                    break
+                summaries = (*summaries, _summary(remote))
+        jobs = [dict(j) for j in summaries[: max(1, limit)]]
         return {"active_id": active_id, "jobs": jobs}
 
     def active_id(self) -> str | None:
@@ -592,24 +532,76 @@ class JobStore:
         release_run_slot(job_id)
 
     def clear(self) -> None:
-        """清空所有任务（内存 + 磁盘文件 + 跨实例 job_state + 取消标志）。
+        """清空所有任务（内存 + Redis live state + 跨实例状态 + 取消标志）。
 
-        DIST-09：分布式部署下跨实例可见的任务状态在 coordination.job_state，
-        只清本地内存/文件会让其他 worker 仍看到已"清空"的旧任务历史。
+        DIST-09：分布式部署下跨实例可见的任务状态一并清空, 避免其他 worker
+        仍看到已"清空"的旧任务历史。
         """
         from app.services.coordination import coordination
+        from app.state import clear_jobs
 
         with self._lock:
             self._active_jobs.clear()
             self._active_id = None
             self._summary_snapshot = None, ()
-            for f in self._store_dir.glob("*.json"):
-                with contextlib.suppress(Exception):
-                    f.unlink()
         with _CANCEL_FLAGS_LOCK:
             _CANCEL_FLAGS.clear()
+        clear_jobs()
         # 跨实例任务状态一并清空；取消标志按 job_id 带 TTL 自愈，无需逐个清。
         coordination.job_state.clear()
+
+    def _recover_one(self, job: dict[str, Any]) -> bool:
+        """把一个协调态遗留任务改判中断并写回门面；已终态返回 False。"""
+        from app.services.coordination import coordination
+        from app.state import get_job_state, put_job_state, write_job_history
+
+        job_id = str(job["id"])
+        live = get_job_state(job_id)
+        if live is not None and live.get("status") not in ("pending", "running"):
+            return False
+        interrupted = dict(live or job)
+        interrupted["status"] = "failed"
+        interrupted["error"] = "后端重启,任务中断(启动时从 CK 恢复)"
+        end = interrupted.get("last_progress_at") or interrupted.get("started_at")
+        if not end:
+            end = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        if interrupted.get("started_at") and end < interrupted["started_at"]:
+            end = interrupted["started_at"]
+        interrupted["finished_at"] = end
+        interrupted["duration_s"] = _duration_s(interrupted)
+        put_job_state(interrupted)
+        write_job_history(interrupted)
+        coordination.job_state.put(job_id, interrupted)
+        return True
+
+    def _refresh_summary(self) -> None:
+        """从门面重建内存摘要快照。"""
+        with self._lock:
+            self._summary_snapshot = (
+                self._active_id,
+                tuple(_summary(j) for j in self._job_files_sorted()[: self._max_jobs]),
+            )
+
+    def recover_interrupted(self, limit: int = 500) -> int:
+        """启动时把遗留的 pending/running 任务改判中断, 返回恢复条数。
+
+        候选来自两处: CK 审计重建的 coordination.job_state (Redis 丢失场景),
+        以及 app.state 的 live 索引 (Redis 存活但进程重启场景)。改判结果写回
+        live state 与 CK 历史, 使 get()/list_recent() 不再显示永远运行中的任务。
+        """
+        from app.services.coordination import coordination
+        from app.state import list_recent_jobs
+
+        candidates: dict[str, dict[str, Any]] = {}
+        for job in [*coordination.job_state.recent(limit), *list_recent_jobs(limit)]:
+            if job.get("status") in ("pending", "running") and job.get("id"):
+                candidates[str(job["id"])] = job
+        recovered = 0
+        for job in candidates.values():
+            if self._recover_one(job):
+                recovered += 1
+        self._refresh_summary()
+        return recovered
 
 
 def _summary(j: dict[str, Any]) -> dict[str, Any]:
@@ -640,6 +632,16 @@ def _duration_s(j: dict[str, Any]) -> float | None:
 
 # 进程内单例
 job_store = JobStore()
+
+
+def recover_interrupted_jobs(limit: int = 500) -> int:
+    """启动入口：从 CK 重建的协调态恢复中断任务。
+
+    由 main.py 在 ``rebuild_coordination()`` 之后调用, 且应用 coordination.once
+    限定单 worker 执行, 避免多实例互相改判对方任务。
+    """
+    return job_store.recover_interrupted(limit)
+
 
 _Result = TypeVar("_Result")
 

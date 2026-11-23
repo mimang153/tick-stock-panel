@@ -19,6 +19,14 @@ from app.services.guardian_store import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_shared_root(tmp_path, monkeypatch):
+    """DES-006: 策略写 shared 根；隔离到 tmp_path 避免仓库只读目录。"""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "shared_data_root", tmp_path)
+
+
 def _write_partitions(data_dir: Path, dates: list[date]) -> None:
     for value in dates:
         partition = data_dir / "kline_daily_enriched" / f"date={value.isoformat()}"
@@ -381,14 +389,17 @@ def test_guardian_api_combination_endpoints(tmp_path, monkeypatch):
     assert body["combinations"]["suggestions"][0]["a"] == "x"
 
 
-def test_create_composite_accepts_symlinked_data_dir(tmp_path):
+def test_create_composite_accepts_symlinked_data_dir(tmp_path, monkeypatch):
     """data_dir 含符号链接时 (如 macOS /tmp) 不能误判为路径逃逸。"""
+    from app.config import settings
     from app.strategy.engine import StrategyEngine
 
     real = tmp_path / "real"
     real.mkdir()
     link = tmp_path / "link"
     link.symlink_to(real, target_is_directory=True)
+    # DES-006: 组合策略写 shared 根；指向符号链接 data_dir 验证不误判逃逸。
+    monkeypatch.setattr(settings, "shared_data_root", link)
 
     builtin = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "strategies"
     engine = StrategyEngine(

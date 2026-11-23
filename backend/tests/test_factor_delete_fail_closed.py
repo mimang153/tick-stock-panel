@@ -21,8 +21,12 @@ FACTOR_ID = "uf_orphan_delete_guard"
 
 
 @pytest.fixture()
-def env(tmp_path):
+def env(tmp_path, monkeypatch):
     """磁盘上有一个未注册的自定义因子, 且被一个策略引用。"""
+    # DES-006: 策略 JSON 扫描路径迁到 shared 根；测试隔离到 tmp_path。
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "shared_data_root", tmp_path)
     factor_dir = tmp_path / "user_data" / "custom_factors"
     factor_dir.mkdir(parents=True)
     factor_path = factor_dir / f"{FACTOR_ID}.json"
@@ -40,7 +44,7 @@ def env(tmp_path):
         ),
         encoding="utf-8",
     )
-    strategies_dir = tmp_path / "strategies"
+    strategies_dir = tmp_path / "strategies" / "custom"
     strategies_dir.mkdir(parents=True)
     (strategies_dir / "s1.json").write_text(
         json.dumps({"id": "s1", "factors": [FACTOR_ID]}, ensure_ascii=False),
@@ -93,8 +97,8 @@ def test_delete_ignores_prefix_id_references(env, tmp_path):
     历史子串实现会把这类删除误判为「有引用」, 逼用户走危险的强删路径。
     """
     client, factor_path = env
-    (tmp_path / "strategies" / "s1.json").unlink()  # env 自带的精确引用, 本组用例不需要
-    (tmp_path / "strategies" / "s_prefix.json").write_text(
+    (tmp_path / "strategies" / "custom" / "s1.json").unlink()  # env 自带的精确引用
+    (tmp_path / "strategies" / "custom" / "s_prefix.json").write_text(
         json.dumps({"id": "s_prefix", "factors": [f"{FACTOR_ID}_v2"]}, ensure_ascii=False),
         encoding="utf-8",
     )
@@ -109,8 +113,8 @@ def test_delete_ignores_prefix_id_references(env, tmp_path):
 def test_delete_counts_exact_reference_anywhere_in_json(env, tmp_path):
     """精确引用无论出现在哪个字段 (含嵌套) 都要命中。"""
     client, _ = env
-    (tmp_path / "strategies" / "s1.json").unlink()
-    (tmp_path / "strategies" / "s_nested.json").write_text(
+    (tmp_path / "strategies" / "custom" / "s1.json").unlink()
+    (tmp_path / "strategies" / "custom" / "s_nested.json").write_text(
         json.dumps(
             {"id": "s_nested", "rules": [{"factor": FACTOR_ID, "weight": 1.0}]},
             ensure_ascii=False,
@@ -127,8 +131,8 @@ def test_delete_counts_exact_reference_anywhere_in_json(env, tmp_path):
 def test_delete_malformed_strategy_json_falls_back_to_substring(env, tmp_path):
     """策略 JSON 损坏时回退子串匹配 — fail-closed, 宁可误拒不可漏放。"""
     client, _ = env
-    (tmp_path / "strategies" / "s1.json").unlink()
-    (tmp_path / "strategies" / "s_broken.json").write_text(
+    (tmp_path / "strategies" / "custom" / "s1.json").unlink()
+    (tmp_path / "strategies" / "custom" / "s_broken.json").write_text(
         '{"id": "s_broken", "factors": [' + FACTOR_ID,  # 截断的非法 JSON
         encoding="utf-8",
     )

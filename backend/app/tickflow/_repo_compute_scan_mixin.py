@@ -72,6 +72,13 @@ class _ComputeScanMixin(_RepoMixinBase):
             )
         except Exception as e:  # noqa: BLE001 - BLE001: 外部IO/解析失败需降级, 非静默吞异常
             logger.warning("on-demand compute failed: %s", e)
+        logger.debug(
+            "on-demand enriched computed: rows=%d columns=%d has_deviate=%s has_metadata=%s",
+            len(df),
+            len(df.columns),
+            "deviate_3d" in df.columns,
+            "float_shares" in df.columns,
+        )
         return df
 
     def _compute_index_enriched_range(self, df: pl.DataFrame) -> pl.DataFrame:

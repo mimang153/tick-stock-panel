@@ -240,7 +240,6 @@ def get_options(request: Request):
 
 
 # ── 列表 ───────────────────────────────────────────────
-@router.get("")
 def _intraday_runtime_warning(intraday_rules, pooled_symbols, support) -> str:
     """根据分时能力与目标池规模生成运行时警告。"""
     if intraday_rules and not support["available"]:
@@ -279,6 +278,7 @@ def _annotate_group_rules(rules) -> None:
             rule["runtime_warning"] = "绑定的自选分组已删除, 规则已暂停监控, 编辑可重新选择"
 
 
+@router.get("")
 def list_rules(request: Request):
     repo = request.app.state.repo
     rules = [
@@ -569,7 +569,7 @@ def _strategy_available(engine, strategy_id: str) -> bool:
         return False
     try:
         return bool(engine.has(strategy_id))
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - 引擎查询异常按不可用处理，已记录日志后降级
         logger.warning("策略可用性检查失败: %s", strategy_id, exc_info=True)
         return False
 

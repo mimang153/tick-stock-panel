@@ -18,7 +18,9 @@ from app.backtest.matrix import build_market_data_matrix, make_signal_matrix, ro
 
 
 @pytest.fixture
-def service_factory(tmp_path, monkeypatch, ck_runtime):
+def service_factory(
+    tmp_path, monkeypatch, ck_runtime
+):  # func-length-allow: pytest fixture 线性组装测试服务依赖，拆分反而损害可读性
     from app.backtest.engine import BacktestEngine
     from app.backtest.strategy import StrategyBacktestService
     from app.config import settings
@@ -27,6 +29,10 @@ def service_factory(tmp_path, monkeypatch, ck_runtime):
     from tests.signal_seeds import install_pipeline_caches
 
     monkeypatch.setattr(settings, "data_dir", tmp_path)
+    # DES-006: API 路由从 shared 根扫描策略；隔离到 tmp_path。
+    monkeypatch.setattr(settings, "shared_data_root", tmp_path)
+    # spawn worker 子进程不继承 monkeypatch，用 env 传递 shared 根。
+    monkeypatch.setenv("SHARED_DATA_ROOT", str(tmp_path))
     install_pipeline_caches(monkeypatch)
     frame = _panel().with_columns(
         pl.col("close").alias("raw_close"),

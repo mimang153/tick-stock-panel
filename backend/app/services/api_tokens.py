@@ -1,27 +1,28 @@
 """API Token 域模块 — 外部调用方的第二认证通道 (与访问密码并行)。
 
-设计 (docs/open-platform-plan.md §4.1):
-  - 存储: data/user_data/api_tokens.json (0600), 只存 SHA-256 哈希;
+设计 (DES-006):
+  - 元数据/哈希存 PG api_token (经 app.state 门面), 不再读写 api_tokens.json;
     明文 Token (tsp_ + 32B hex) 仅在创建响应中出现一次。
   - scope: 固定五档, 见 SCOPES; 管理接口无对应 scope, Token 永远进不去。
-  - last_used_at 节流落盘 (≥60s 才写一次), 避免热路径每请求写文件。
-进程内写互斥沿用域模块惯例 (PAPER_LOCK 模式); 读取无锁 (json 小文件)。
+  - last_used_at 走 Redis 节流 (touch_api_token), 不再本地落盘。
+  - data_dir 参数仅为兼容旧调用方保留, 内部忽略。
 """
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
-import json
 import logging
-import os
 import secrets
-import threading
-from datetime import datetime
 from pathlib import Path
 
 from app.market_time import cn_now
-from app.services.fs_utils import atomic_write_text
+from app.state import (
+    create_api_token,
+    get_api_token_by_hash,
+    list_api_tokens,
+    revoke_api_token,
+    touch_api_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,53 +38,20 @@ SCOPES = (
 
 TOKEN_PREFIX = "tsp_"
 
-_LOCK = threading.Lock()
-# last_used_at 落盘节流: (token_id, 上次落盘时间); 内存即可, 重启丢失无害
-_last_persist: dict[str, datetime] = {}
-
-
-def _tokens_path(data_dir: Path) -> Path:
-    return Path(data_dir) / "user_data" / "api_tokens.json"
-
-
-def load_tokens(data_dir: Path) -> list[dict]:
-    p = _tokens_path(data_dir)
-    if not p.exists():
-        return []
-    try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-        return raw.get("tokens", [])
-    except Exception as e:  # noqa: BLE001 - 配置文件损坏时按无 Token 处理,不阻断鉴权初始化
-        logger.warning("api_tokens.json 解析失败 (视为无 Token): %s", e)
-        return []
-
-
-def _save(data_dir: Path, tokens: list[dict]) -> None:
-    p = _tokens_path(data_dir)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(p, json.dumps({"tokens": tokens}, ensure_ascii=False, indent=2))
-    # Windows 权限模型不同, 尽力而为
-    with contextlib.suppress(OSError):
-        os.chmod(p, 0o600)
-
 
 def _hash(plaintext: str) -> str:
+    """SHA-256 哈希明文 Token, 供存储与校验使用。"""
     return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
 
 
+def load_tokens(data_dir: Path) -> list[dict]:
+    """列出 token 元数据视图 (data_dir 保留兼容, DES-006 后内部走 PG 门面)。"""
+    return list_api_tokens()
+
+
 def list_tokens(data_dir: Path) -> list[dict]:
-    """管理列表视图: 去掉哈希, 附加 scope 有效性 (未知 scope 标 invalid)。"""
-    return [
-        {
-            "id": t["id"],
-            "name": t["name"],
-            "scopes": t["scopes"],
-            "created_at": t["created_at"],
-            "last_used_at": t.get("last_used_at"),
-            "revoked": bool(t.get("revoked")),
-        }
-        for t in load_tokens(data_dir)
-    ]
+    """管理列表视图: 返回 id/name/scopes/created_at/last_used_at/revoked。"""
+    return load_tokens(data_dir)
 
 
 def create_token(data_dir: Path, name: str, scopes: list[str]) -> tuple[dict, str]:
@@ -92,69 +60,34 @@ def create_token(data_dir: Path, name: str, scopes: list[str]) -> tuple[dict, st
     if bad:
         raise ValueError(f"未知 scope: {bad} (可用: {list(SCOPES)})")
     plaintext = TOKEN_PREFIX + secrets.token_hex(32)
-    record = {
-        "id": f"tok_{secrets.token_hex(4)}",
-        "name": name.strip() or "未命名",
-        "token_hash": _hash(plaintext),
-        "scopes": sorted(set(scopes)),
+    token_name = name.strip() or "未命名"
+    clean_scopes = sorted(set(scopes))
+    token_id = create_api_token(token_name, _hash(plaintext), clean_scopes)
+    view = {
+        "id": token_id,
+        "name": token_name,
+        "scopes": clean_scopes,
         "created_at": cn_now().isoformat(timespec="seconds"),
         "last_used_at": None,
         "revoked": False,
     }
-    with _LOCK:
-        tokens = load_tokens(data_dir)
-        tokens.append(record)
-        _save(data_dir, tokens)
-    view = {k: v for k, v in record.items() if k != "token_hash"}
     return view, plaintext
 
 
 def revoke_token(data_dir: Path, token_id: str) -> bool:
-    with _LOCK:
-        tokens = load_tokens(data_dir)
-        hit = False
-        for t in tokens:
-            if t["id"] == token_id:
-                t["revoked"] = True
-                hit = True
-        if hit:
-            _save(data_dir, tokens)
-        return hit
+    """撤销 Token; 不存在或已撤销返回 False。"""
+    return revoke_api_token(token_id)
 
 
 def verify_token(data_dir: Path, plaintext: str) -> dict | None:
     """明文 → 有效记录 (revoked/不匹配/哈希对不上 → None)。
 
-    命中时节流更新 last_used_at (内存立即, 落盘 ≥60s 一次)。
+    命中时经 touch_api_token 节流更新 last_used_at (Redis 节流后落 PG)。
     """
     if not plaintext.startswith(TOKEN_PREFIX):
         return None
-    h = _hash(plaintext)
-    for t in load_tokens(data_dir):
-        if t.get("token_hash") == h and not t.get("revoked"):
-            now = cn_now()
-            if _should_persist(t["id"], now):
-                _touch(data_dir, t, now)
-            return t
-    return None
-
-
-def _should_persist(token_id: str, now: datetime) -> bool:
-    last = _last_persist.get(token_id)
-    if last is None or (now - last).total_seconds() >= 60:
-        _last_persist[token_id] = now
-        return True
-    return False
-
-
-def _touch(data_dir: Path, record: dict, now: datetime) -> None:
-    record["last_used_at"] = now.isoformat(timespec="seconds")
-    try:
-        with _LOCK:
-            tokens = load_tokens(data_dir)
-            for t in tokens:
-                if t["id"] == record["id"]:
-                    t["last_used_at"] = record["last_used_at"]
-            _save(data_dir, tokens)
-    except Exception as e:  # noqa: BLE001 - 使用时间落盘失败可忽略,不影响本次鉴权结果
-        logger.warning("api_tokens last_used_at 落盘失败 (忽略): %s", e)
+    record = get_api_token_by_hash(_hash(plaintext))
+    if record is None or record.get("revoked"):
+        return None
+    touch_api_token(str(record["id"]))
+    return record

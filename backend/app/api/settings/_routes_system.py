@@ -6,7 +6,9 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
+
+from app.state import delete_sound_pack, list_sound_packs, read_sound_pack, save_sound_pack
 
 from ._common import (
     _FALLBACK_ENDPOINTS,
@@ -28,8 +30,6 @@ from ._common import (
     ReviewScheduleIn,
     TestEndpointIn,
     _api_pkg,
-    _safe_pack_path,
-    _sound_pack_dir,
     logger,
 )
 
@@ -432,18 +432,12 @@ def api_tokens_revoke(token_id: str, request: Request) -> dict:
 
 @router.get("/sound-packs")
 def sound_packs_list(request: Request) -> dict:
-    pack_dir = _sound_pack_dir(request)
-    packs: list[dict] = []
-    if pack_dir.is_dir():
-        packs = [
-            {
-                "name": f.name,
-                "size": f.stat().st_size,
-                "ext": f.suffix.lower().lstrip("."),
-            }
-            for f in sorted(pack_dir.iterdir())
-            if f.is_file() and f.suffix.lower() in _SOUND_PACK_EXTS
-        ]
+    """列出告警音包；元数据来自 PG，音频正文存 user_blob。"""
+    packs = [
+        {"name": row["name"], "size": row["size_bytes"], "ext": row["ext"]}
+        for row in list_sound_packs()
+        if f".{row['ext'].lower()}" in _SOUND_PACK_EXTS
+    ]
     return {"packs": packs}
 
 
@@ -474,27 +468,26 @@ async def sound_packs_upload(
     if not data:
         raise HTTPException(status_code=400, detail="空文件")
 
-    pack_dir = _sound_pack_dir(request)
-    pack_dir.mkdir(parents=True, exist_ok=True)
-    target = _safe_pack_path(pack_dir, name)
     # 同名重传 = 替换 (用户自定义音的自然语义)
-    target.write_bytes(data)
+    save_sound_pack(name, data, suffix.lstrip("."))
     return {"status": "saved", "pack": {"name": name, "size": len(data), "ext": suffix.lstrip(".")}}
 
 
 @router.delete("/sound-packs/{name}")
 def sound_packs_delete(name: str, request: Request) -> dict:
-    path = _safe_pack_path(_sound_pack_dir(request), name)
-    if not path.is_file():
+    """删除声音包元数据；blob 由内容寻址表自然去重保留。"""
+    if read_sound_pack(name) is None:
         raise HTTPException(status_code=404, detail=f"语音包 '{name}' 不存在")
-    path.unlink()
+    delete_sound_pack(name)
     return {"status": "deleted", "name": name}
 
 
 @router.get("/sound-packs/{name}/file")
-def sound_packs_file(name: str, request: Request) -> FileResponse:
-    path = _safe_pack_path(_sound_pack_dir(request), name)
-    if not path.is_file():
+def sound_packs_file(name: str, request: Request) -> Response:
+    """代理读取 user_blob 音频字节，保持文件下载 API 契约。"""
+    pack = read_sound_pack(name)
+    if pack is None:
         raise HTTPException(status_code=404, detail=f"语音包 '{name}' 不存在")
-    media_type = _SOUND_PACK_MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
-    return FileResponse(path, media_type=media_type)
+    data, ext = pack
+    media_type = _SOUND_PACK_MEDIA_TYPES.get(f".{ext.lower()}", "application/octet-stream")
+    return Response(content=data, media_type=media_type)

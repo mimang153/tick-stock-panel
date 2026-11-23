@@ -463,9 +463,10 @@ def _strategy_references_factor(text: str, factor_id: str) -> bool:
 def _find_references(data_dir, factor_id: str) -> list[str]:
     """扫描策略与复合因子定义中的引用 (删除前 fail-closed 检查)。"""
     references: list[str] = []
-    strategies_dir = data_dir / "strategies"
-    if strategies_dir.is_dir():
-        for file in strategies_dir.glob("*.json"):
+    from app.state import shared_strategy_dirs
+
+    for directory in shared_strategy_dirs():
+        for file in directory.glob("*.json"):
             try:
                 text = file.read_text(encoding="utf-8")
             except OSError:

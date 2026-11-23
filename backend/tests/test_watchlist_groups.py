@@ -3,7 +3,6 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import polars as pl
 import pytest
 from fastapi import HTTPException
 
@@ -18,17 +17,10 @@ def _request():
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo)))
 
 
-def test_historical_watchlist_is_read_as_ungrouped(monkeypatch, tmp_path):
+def test_new_symbol_without_group_is_ungrouped(monkeypatch, tmp_path):
+    """不指定分组新增的自选条目 group_ids 为空（DES-006 后状态存门面）。"""
     monkeypatch.setattr(settings, "data_dir", tmp_path)
-    path = tmp_path / "user_data" / "watchlist.parquet"
-    path.parent.mkdir(parents=True)
-    pl.DataFrame(
-        {
-            "symbol": ["600000.SH"],
-            "added_at": ["2026-08-08T10:00:00"],
-            "note": [""],
-        }
-    ).write_parquet(path)
+    watchlist.add("600000.SH")
 
     assert watchlist.list_symbols()[0]["group_ids"] == []
 
@@ -135,13 +127,16 @@ def test_group_api_contract(monkeypatch, tmp_path):
     assert exc_info.value.status_code == 404
 
 
-def test_historical_groups_default_to_sky(monkeypatch, tmp_path):
+def test_group_color_falls_back_to_sky_for_invalid_index(monkeypatch, tmp_path):
+    """门面里的越界颜色编号按默认 sky 展示。"""
+    from app.state.watchlist import save_watchlist_groups
+
     monkeypatch.setattr(settings, "data_dir", tmp_path)
-    path = tmp_path / "user_data" / "watchlist_groups.json"
-    path.parent.mkdir(parents=True)
-    path.write_text(
-        '[{"id":"legacy","name":"旧分组"},{"id":"invalid","name":"未知颜色","color":"black"}]',
-        encoding="utf-8",
+    save_watchlist_groups(
+        [
+            {"id": "legacy", "name": "旧分组", "color": 0, "position": 0},
+            {"id": "invalid", "name": "未知颜色", "color": 999, "position": 1},
+        ]
     )
 
     assert watchlist.list_groups() == [
@@ -252,30 +247,21 @@ def test_clear_group_strips_only_that_group(monkeypatch, tmp_path):
     assert b["group_ids"] == []
 
 
-def test_legacy_single_group_id_migration(monkeypatch, tmp_path):
-    """旧 schema(单值 group_id 列)读取迁移 + 首次写回前自动备份 .bak。"""
+def test_group_ids_round_trip_through_state_without_local_files(monkeypatch, tmp_path):
+    """group_ids 经门面往返保留, 且不再产生本地 parquet/备份文件。"""
     monkeypatch.setattr(settings, "data_dir", tmp_path)
-    path = tmp_path / "user_data" / "watchlist.parquet"
-    path.parent.mkdir(parents=True)
-    pl.DataFrame(
-        {
-            "symbol": ["600000.SH", "000001.SZ"],
-            "added_at": ["2026-08-08T10:00:00"] * 2,
-            "note": ["", ""],
-            "group_id": ["g1", None],
-        }
-    ).write_parquet(path)
+    _, created = watchlist.create_group("g1")
+    added = watchlist.add_batch(["600000.SH"], group_ids=[created["id"]])[0]
+    assert added[0]["group_ids"] == [created["id"]]
 
-    rows = watchlist.list_symbols()
-    assert rows[0]["group_ids"] == ["g1"]
-    assert rows[1]["group_ids"] == []
-    assert not (tmp_path / "user_data" / "watchlist.parquet.bak").exists()  # 只读不备份
-
-    # 触发写入 → 备份生成, 文件落新 schema
     watchlist.add("300750.SZ")
-    assert (tmp_path / "user_data" / "watchlist.parquet.bak").exists()
-    df = pl.read_parquet(path)
-    assert "group_ids" in df.columns and "group_id" not in df.columns
+    rows = watchlist.list_symbols()
+    assert {row["symbol"]: row["group_ids"] for row in rows} == {
+        "600000.SH": [created["id"]],
+        "300750.SZ": [],
+    }
+    assert not (tmp_path / "user_data" / "watchlist.parquet").exists()
+    assert not (tmp_path / "user_data" / "watchlist.parquet.bak").exists()
 
 
 def test_bulk_transfer_updates_membership_once_and_keeps_metadata(monkeypatch, tmp_path):

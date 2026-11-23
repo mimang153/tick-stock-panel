@@ -11,7 +11,6 @@ import threading
 import time
 import traceback
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
@@ -126,13 +125,11 @@ def _rss_bytes() -> int:
 
 
 def _strategy_dirs(data_dir: Path) -> list[Path]:
+    """返回 worker 策略扫描目录；用户策略来自 shared 门面，data_dir 仅兼容旧签名。"""
+    from app.state import shared_strategy_dirs
+
     app_dir = Path(__file__).resolve().parents[1]
-    return [
-        app_dir / "strategy" / "research",
-        data_dir / "strategies" / "custom",
-        data_dir / "strategies" / "ai",
-        data_dir / "strategies" / "composite",
-    ]
+    return [app_dir / "strategy" / "research", *shared_strategy_dirs()]
 
 
 def _decode_backtest_config(payload: dict[str, Any]):
@@ -227,6 +224,16 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
     _store = None
     try:
         _init_worker_storage(task)
+        # DES-006: worker 子进程不跑 FastAPI lifespan，主动初始化用户状态门面。
+        # 失败按降级处理（capability/preferences 读路径会返回稳定兜底），不阻断回测。
+        from contextlib import suppress
+
+        from app.state import init_state_pg
+        from app.state import ping as state_ping
+
+        with suppress(Exception):
+            init_state_pg()
+            state_ping()
         data_dir = Path(task["data_dir"])
         _store, service, strategy_engine = _build_worker_service(data_dir)
 

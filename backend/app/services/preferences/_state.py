@@ -1,7 +1,8 @@
-"""用户偏好设置持久化。
+"""用户偏好设置持久化 (DES-006)。
 
-存储位置: data/user_data/preferences.json
-沿用 secrets_store 的 merge-write 模式,但不做 chmod 0600 (非敏感数据)。
+偏好存 PG user_preference (经 app.state 门面), 不再读写 preferences.json;
+Redis 承载短缓存, 写入经事务 + version 递增保证一致性。
+本模块保留 load/save/mutation 等稳定签名供上层调用。
 """
 
 from __future__ import annotations
@@ -15,67 +16,52 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import app.services.preferences as _self
-from app.services.fs_utils import atomic_write_text
+from app.state import generation, get_preferences, preferences_version, save_preferences
 
 logger = logging.getLogger("app.services.preferences")
 
-# 进程内缓存: 行情轮询线程一轮会调用 8~12 次 getter, 每次读盘+parse 是纯重复;
-# 文件仅在用户改设置时变化, 以 (mtime_ns, size) 签名判断是否重读。
+# 兼容层: 历史调用方仍从 app.services.preferences 读取这两个进程内缓存变量;
+# DES-006 后偏好真值由门面缓存管理, 这里保留定义但不承载数据。
 _cache: dict | None = None
 _cache_sig: tuple[int, int] | None = None
 
 
 def _path() -> Path:
+    """返回虚拟路径标识 (DES-006 后偏好不再落本地文件, 仅兼容展示与日志)。"""
     from app.config import settings
 
-    p = settings.data_dir / "user_data" / "preferences.json"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
+    return settings.data_dir / "user_data" / "preferences.json"
 
 
 def _invalidate_cache() -> None:
+    """兼容旧调用方: 清空历史进程内缓存变量 (真值由门面缓存管理)。"""
     _self._cache = None
     _self._cache_sig = None
 
 
 def data_source_stamp() -> tuple:
-    """Opaque config version; routine last-fetch persistence must not invalidate pulls."""
-    from app.config import settings
+    """配置版本戳: 偏好摘要 + 偏好版本 + 密钥 generation, 不读取本地文件。
 
+    last_fetch_ms 由行情轮询周期性写入, 不应触发数据源缓存失效,
+    故偏好摘要中剔除该字段; 版本与 generation 由门面提供跨进程一致性。
+    用户状态门面未初始化（回测 worker 子进程/模块导入期）时返回稳定戳，
+    单次 worker 运行内缓存不失效，符合子进程只读场景。
+    """
+    from app.state.pg import is_ready
+
+    if not is_ready():
+        return ("worker", "0", "0")
     data = _self.load()
     data.pop("last_fetch_ms", None)
-    result: list[object] = [
-        hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-    ]
-    for name in ("secrets.json",):
-        path = settings.data_dir / "user_data" / name
-        try:
-            stat = path.stat()
-            result.append((stat.st_mtime_ns, stat.st_size))
-        except FileNotFoundError:
-            result.append(None)
-    return (str(settings.data_dir.resolve()), *result)
+    digest = hashlib.sha256(
+        json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    return (digest, preferences_version(), generation("secret"))
 
 
 def load() -> dict:
-    """读取 preferences.json (带 mtime 签名缓存)。返回深拷贝, 调用方可自由修改。"""
-    p = _self._path()
-    try:
-        sig = (p.stat().st_mtime_ns, p.stat().st_size)
-    except OSError:
-        return {}
-    if _self._cache is not None and sig == _self._cache_sig:
-        return copy.deepcopy(_self._cache)
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    except Exception as e:  # noqa: BLE001 - 用户配置解析失败按空配置降级, 不阻断启动
-        logger.warning("preferences.json malformed: %s", e)
-        return {}
-    _self._cache = data
-    _self._cache_sig = sig
-    return copy.deepcopy(_self._cache)
+    """读取偏好配置 (经 PG 门面)。返回深拷贝, 调用方可自由修改。"""
+    return copy.deepcopy(get_preferences())
 
 
 _SAVE_LOCK = threading.RLock()
@@ -83,26 +69,15 @@ _SAVE_LOCK = threading.RLock()
 
 @contextmanager
 def mutation():
-    """Serialize multi-step preference changes with ordinary merge-writes."""
+    """序列化多步偏好变更, 与 save 共用进程内锁。"""
     with _SAVE_LOCK:
         yield
 
 
 def save(updates: dict) -> dict:
-    """合并写入。返回新内容。
-
-    锁内 read-modify-write: FastAPI 同步端点跑线程池, 并行 PUT 各自基于旧快照
-    写盘会互相覆盖 (实测: 压缩总开关并行写分时/日K两键, 后写者把先写者覆盖)。
-    """
+    """合并写入 (经 PG 门面, 事务内 read-modify-write)。返回新内容。"""
     with _SAVE_LOCK:
-        current = _self.load()
-        current.update(updates)
-        atomic_write_text(
-            _self._path(),
-            json.dumps(current, indent=2, ensure_ascii=False),
-        )
-        _self._invalidate_cache()
-    return current
+        return save_preferences(updates)
 
 
 # 共享常量 (供各 part 引用)

@@ -1,0 +1,97 @@
+{
+  "generated_at": "2026-11-21T17:16:47",
+  "window": {
+    "start": "2026-11-12",
+    "end": "2026-11-13"
+  },
+  "summary": {
+    "total": 8,
+    "ok": 4,
+    "diff": 4,
+    "blocked": 0
+  },
+  "cases": [
+    {
+      "case": "instruments_search",
+      "path": "/api/kline/instruments/search",
+      "params": {
+        "q": "600519"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "case": "kline_daily",
+      "path": "/api/kline/daily",
+      "params": {
+        "symbol": "600519.SH",
+        "start_date": "2026-11-12",
+        "end_date": "2026-11-13"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".rows[0].annual_vol_20d: origin=0.262207 dev=509.548782; .rows[0].atr_14: origin=28.437017 dev=195.400288; .rows[0].boll_lower: origin=1272.10549 dev=164.876256; .rows[0].boll_upper: origin=1497.77551 dev=2172.760744; .rows[0].deviate_10d: dev 缺失"
+    },
+    {
+      "case": "index_daily",
+      "path": "/api/index/daily",
+      "params": {
+        "symbol": "000001.SH",
+        "start_date": "2026-11-12",
+        "end_date": "2026-11-13"
+      },
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".index_info.asset_type: dev 缺失; .index_info.exchange: origin 缺失; .index_info.float_shares: origin 缺失; .index_info.limit_down: origin 缺失; .index_info.limit_up: origin 缺失"
+    },
+    {
+      "case": "overview_market",
+      "path": "/api/overview/market",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".active_leaders[0].amount: origin=4067360718.0 dev=616234694.0; .active_leaders[0].board: origin='深主板' dev='创业板'; .active_leaders[0].change_pct: origin=0.040706 dev=0.142104; .active_leaders[0].close: origin=7.67 dev=65.02; .active_leaders[0].name: origin='华东重机' dev='尚水智能'"
+    },
+    {
+      "case": "regime_latest",
+      "path": "/api/regime/latest",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "case": "screener_market_snapshot",
+      "path": "/api/screener/market-snapshot",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "DIFF",
+      "reason": ".rows[0].amount: origin=1879247328.0 dev=2645742573.0; .rows[0].change_pct: origin=-0.013115 dev=0.019056; .rows[0].close: origin=12.04 dev=12.3; .rows[0].float_market_cap: origin=233644447291.63998 dev=238689925389.30002; .rows[0].market_cap: origin=233647255103.91998 dev=238692793835.40002"
+    },
+    {
+      "case": "ext_schema_all",
+      "path": "/api/ext-data/schema-all",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    },
+    {
+      "case": "alerts",
+      "path": "/api/alerts",
+      "params": {},
+      "origin_status": 200,
+      "dev_status": 200,
+      "verdict": "OK",
+      "reason": ""
+    }
+  ]
+}

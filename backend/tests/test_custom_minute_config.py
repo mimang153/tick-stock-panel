@@ -507,6 +507,7 @@ def test_save_data_source_validates_before_write(monkeypatch, tmp_path):
     """
     from app.api.settings import save_data_source
     from app.data_providers.custom import loader
+    from app.state import get_data_source_config
 
     monkeypatch.setattr(loader, "data_sources_dir", lambda: tmp_path)
     saved_providers = dict(loader._PROVIDERS)
@@ -519,7 +520,8 @@ def test_save_data_source_validates_before_write(monkeypatch, tmp_path):
             datasets={"full_minute": DatasetConfigIn(**_minute_dataset())},
         )
         save_data_source(ok)
-        assert (tmp_path / "fm_ok.yaml").exists()
+        # DES-006: 数据源配置落 PG 门面，不再写本地 YAML。
+        assert get_data_source_config("fm_ok") is not None
         assert loader.provider_has_dataset("fm_ok", "full_minute")
 
         # 非法: 缺 volume → HTTP 400 带原因, 且不写 YAML
@@ -531,7 +533,7 @@ def test_save_data_source_validates_before_write(monkeypatch, tmp_path):
             save_data_source(bad)
         assert ei.value.status_code == 400
         assert "volume" in str(ei.value.detail)
-        assert not (tmp_path / "fm_bad.yaml").exists()
+        assert get_data_source_config("fm_bad") is None
     finally:
         loader._PROVIDERS.clear()
         loader._PROVIDERS.update(saved_providers)
