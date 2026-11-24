@@ -19,6 +19,8 @@ services:
         NODE_VERSION: ${NODE_VERSION:-20.18.1}
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
     container_name: tsp-dev
+    # 开机自启：与 tsp-dev-clickhouse 同策略，宿主机重启后自动拉起本服务。
+    restart: unless-stopped
     working_dir: /app
     # 容器入口: 先经国内镜像预装后端依赖(绕开 uv.lock 锁定的官方源地址),
     # 再交给仓库自带 dev.sh 启动(uvicorn --reload + vite HMR)
